@@ -1,0 +1,63 @@
+# Minimal Fireworks cast: budget implementers + large-context refactorer.
+# export FIREWORKS_API_KEY=...
+[parable]
+version = 1
+default_executor = "kimi"
+default_reviewer = "opus"
+
+[providers.claude]
+type = "subagent"
+
+[providers.fireworks]
+type = "codex"
+base_url = "https://api.fireworks.ai/inference/v1"
+env_key = "FIREWORKS_API_KEY"
+wire_api = "responses"
+
+[executors.sonnet]
+provider = "claude"
+model = "sonnet"
+tags = ["implementer"]
+use_for = "Implementer when you'd rather stay Claude-native for a task."
+
+[executors.opus]
+provider = "claude"
+model = "opus"
+tags = ["smoke-test", "reviewer"]
+use_for = "Smoke-testing with real requests; second-opinion review."
+
+[executors.kimi]
+provider = "fireworks"
+model = "accounts/fireworks/models/kimi-k2p7-code"
+effort = "high"
+cost = { in = 0.95, out = 4.00, cache_in = 0.19 }
+context_ktok = 262
+tags = ["implementer", "agentic"]
+use_for = "Default implementer: fast, strong tool loop."
+
+[executors.glm]
+provider = "fireworks"
+model = "accounts/fireworks/models/glm-5p2"
+effort = "high"
+cost = { in = 1.40, out = 4.40, cache_in = 0.26 }
+tags = ["implementer"]
+use_for = "Alternate implementer; strong agentic coding."
+
+[executors.deepseek]
+provider = "fireworks"
+model = "accounts/fireworks/models/deepseek-v4-pro"
+effort = "high"
+cost = { in = 1.74, out = 3.48, cache_in = 0.15 }
+context_ktok = 1000
+tags = ["refactor-wide", "large-context"]
+use_for = "Repo-wide refactors and huge-context work."
+max_minutes = 30
+
+[routing]
+mechanical    = ["kimi", "sonnet"]
+feature       = ["kimi", "glm", "sonnet"]
+refactor_wide = ["deepseek", "kimi"]
+gnarly        = ["opus"]
+review        = ["glm", "opus"]
+smoke_test    = ["opus"]
+escalation    = ["kimi", "glm", "opus"]

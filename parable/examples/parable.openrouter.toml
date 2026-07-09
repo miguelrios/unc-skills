@@ -1,0 +1,47 @@
+# Minimal OpenRouter cast — one gateway, many vendors.
+# export OPENROUTER_API_KEY=...
+[parable]
+version = 1
+default_executor = "minimax"
+default_reviewer = "opus"
+
+[providers.claude]
+type = "subagent"
+
+[providers.openrouter]
+type = "codex"
+base_url = "https://openrouter.ai/api/v1"
+env_key = "OPENROUTER_API_KEY"
+wire_api = "responses"
+
+[executors.opus]
+provider = "claude"
+model = "opus"
+tags = ["smoke-test", "reviewer"]
+use_for = "Smoke-testing with real requests; second-opinion review."
+
+[executors.minimax]
+provider = "openrouter"
+model = "minimax/minimax-m3"
+effort = "medium"
+cost = { in = 0.30, out = 1.20 }
+context_ktok = 512
+tags = ["cheap-mechanical", "reviewer"]
+use_for = "Mechanical edits with a precise spec; cheap first-pass diff review."
+avoid_for = "Design judgment; multi-step debugging."
+
+[executors.kimi]
+provider = "openrouter"
+model = "moonshotai/kimi-k2.7"
+effort = "high"
+tags = ["implementer", "agentic"]
+use_for = "Default implementer."
+
+[routing]
+mechanical    = ["minimax"]
+feature       = ["kimi"]
+refactor_wide = ["kimi"]
+gnarly        = ["opus"]
+review        = ["minimax", "opus"]
+smoke_test    = ["opus"]
+escalation    = ["minimax", "kimi", "opus"]

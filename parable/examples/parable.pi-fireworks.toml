@@ -1,0 +1,50 @@
+# pi-harness cast: chat-completions direct to Fireworks — no Responses API, no proxy.
+# export FIREWORKS_API_KEY=...   (requires: npm i -g @earendil-works/pi-coding-agent, node >= 22)
+[parable]
+version = 1
+default_executor = "minimax"
+default_reviewer = "opus"
+
+[providers.claude]
+type = "subagent"
+
+[providers.fireworks-pi]
+type = "pi"
+base_url = "https://api.fireworks.ai/inference/v1"
+env_key = "FIREWORKS_API_KEY"
+api = "openai-completions"
+
+[executors.opus]
+provider = "claude"
+model = "opus"
+tags = ["smoke-test", "reviewer"]
+use_for = "Smoke-testing with real requests; second-opinion review."
+
+[executors.minimax]
+provider = "fireworks-pi"
+model = "accounts/fireworks/models/minimax-m3"
+effort = "medium"
+cost = { in = 0.30, out = 1.20, cache_in = 0.06 }
+context_ktok = 512
+tags = ["cheap-mechanical", "reviewer"]
+use_for = "Mechanical edits with a precise spec; cheap first-pass diff review."
+avoid_for = "Design judgment; multi-step debugging."
+max_minutes = 15
+
+[executors.kimi]
+provider = "fireworks-pi"
+model = "accounts/fireworks/models/kimi-k2p7-code"
+effort = "high"
+cost = { in = 0.95, out = 4.00, cache_in = 0.19 }
+context_ktok = 262
+tags = ["implementer", "agentic"]
+use_for = "Default implementer."
+
+[routing]
+mechanical    = ["minimax"]
+feature       = ["kimi"]
+refactor_wide = ["kimi"]
+gnarly        = ["opus"]
+review        = ["minimax", "opus"]
+smoke_test    = ["opus"]
+escalation    = ["minimax", "kimi", "opus"]

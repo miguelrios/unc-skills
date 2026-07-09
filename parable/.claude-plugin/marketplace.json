@@ -1,0 +1,31 @@
+{
+  "name": "parable",
+  "owner": {
+    "name": "Parcha Labs",
+    "url": "https://parcha.com"
+  },
+  "metadata": {
+    "description": "Multi-model coding orchestration — the brain tells the story, the cast performs it."
+  },
+  "plugins": [
+    {
+      "name": "parable",
+      "source": "./",
+      "version": "0.1.0",
+      "description": "Multi-model coding orchestration: plan, route to the cheapest capable executor model, verify with code, review with fresh eyes.",
+      "author": {
+        "name": "Parcha Labs",
+        "url": "https://parcha.com"
+      },
+      "homepage": "https://github.com/miguelrios/unc-skills/tree/main/parable",
+      "repository": "https://github.com/miguelrios/unc-skills/tree/main/parable",
+      "license": "MIT",
+      "keywords": [
+        "orchestration",
+        "multi-model",
+        "codex",
+        "coding-agent"
+      ]
+    }
+  ]
+}

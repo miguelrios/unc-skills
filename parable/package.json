@@ -1,0 +1,40 @@
+{
+  "name": "@parcha/parable",
+  "version": "0.1.7",
+  "description": "Multi-model coding orchestration skill for Claude Code \u2014 the brain tells the story, the cast performs it.",
+  "bin": {
+    "parable": "bin/parable.js"
+  },
+  "scripts": {
+    "test": "python3 -m unittest discover -s tests -v && python3 -m py_compile skills/parable/scripts/parable.py && python3 -m json.tool .claude-plugin/plugin.json >/dev/null && python3 -m json.tool .claude-plugin/marketplace.json >/dev/null && node --check bin/parable.js",
+    "pack:check": "npm pack --dry-run"
+  },
+  "files": [
+    ".claude-plugin/*.json",
+    "bin/parable.js",
+    "skills/parable/SKILL.md",
+    "skills/parable/scripts/*",
+    "skills/parable/references/*",
+    "examples/*.toml",
+    "install.sh",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/miguelrios/unc-skills.git",
+    "directory": "parable"
+  },
+  "keywords": [
+    "claude-code",
+    "skill",
+    "orchestration",
+    "multi-model",
+    "codex"
+  ],
+  "author": "Parcha Labs (https://parcha.com)",
+  "license": "MIT"
+}

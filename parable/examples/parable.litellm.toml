@@ -1,0 +1,38 @@
+# LiteLLM-proxy cast: bridge ANY chat-completions model to codex executors.
+# Your proxy must serve /v1/responses (LiteLLM does, in front of any model_list entry).
+# export LITELLM_MASTER_KEY=...
+[parable]
+version = 1
+default_executor = "worker"
+default_reviewer = "opus"
+
+[providers.claude]
+type = "subagent"
+
+[providers.litellm]
+type = "codex"
+base_url = "http://localhost:4000/v1"
+env_key = "LITELLM_MASTER_KEY"
+wire_api = "responses"
+
+[executors.opus]
+provider = "claude"
+model = "opus"
+tags = ["smoke-test", "reviewer"]
+use_for = "Smoke-testing with real requests; second-opinion review."
+
+[executors.worker]
+provider = "litellm"
+model = "your-proxy-alias"        # any alias from your proxy's model_list
+effort = "high"
+tags = ["implementer"]
+use_for = "Implementer via your proxy — swap the alias to A/B models without touching this file's shape."
+
+[routing]
+mechanical    = ["worker"]
+feature       = ["worker"]
+refactor_wide = ["worker"]
+gnarly        = ["opus"]
+review        = ["opus"]
+smoke_test    = ["opus"]
+escalation    = ["worker", "opus"]

@@ -1,0 +1,30 @@
+{
+  "name": "unc-skills",
+  "owner": {
+    "name": "Miguel Rios",
+    "url": "https://github.com/miguelrios"
+  },
+  "metadata": {
+    "description": "Miguel's personal Claude Code skills: hands-free, parable, cascade."
+  },
+  "plugins": [
+    {
+      "name": "hands-free",
+      "source": "./hands-free",
+      "version": "0.2.0",
+      "description": "Route AI coding-assistant approval and input prompts to a phone call through Vapi. Works with Claude Code and Codex."
+    },
+    {
+      "name": "parable",
+      "source": "./parable",
+      "version": "0.1.7",
+      "description": "Multi-model coding orchestration: plan, route to the cheapest capable executor model, verify with code, review with fresh eyes."
+    },
+    {
+      "name": "cascade",
+      "source": "./cascade",
+      "version": "0.1.0",
+      "description": "Cascading development loops — plan, advance, or take over a chain of bounded, evidence-gated development loops."
+    }
+  ]
+}

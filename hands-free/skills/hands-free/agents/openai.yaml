@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hands Free"
+  short_description: "Route Codex input requests to a phone call"
+  default_prompt: "activate hands free"

@@ -1,0 +1,36 @@
+{
+  "name": "hands-free",
+  "version": "0.1.0",
+  "description": "Route Codex approval and input prompts to a phone call.",
+  "author": {
+    "name": "Parcha AI",
+    "url": "https://github.com/miguelrios"
+  },
+  "homepage": "https://github.com/miguelrios/unc-skills/tree/main/hands-free",
+  "repository": "https://github.com/miguelrios/unc-skills/tree/main/hands-free",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "phone",
+    "voice",
+    "vapi",
+    "skill"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Hands Free",
+    "shortDescription": "Route Codex prompts to phone calls",
+    "longDescription": "Use Vapi phone calls to answer Codex approval and input prompts without typing in chat.",
+    "developerName": "Parcha AI",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/miguelrios/unc-skills/tree/main/hands-free",
+    "defaultPrompt": [
+      "activate hands free",
+      "deactivate hands free"
+    ]
+  }
+}

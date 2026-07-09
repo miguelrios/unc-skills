@@ -1,0 +1,1043 @@
+#!/usr/bin/env python3
+"""parable — multi-model coding orchestration dispatcher.
+
+The orchestrating agent (the "brain") never parses provider configs or raw
+harness logs; it calls these subcommands and reads their compact reports.
+
+Subcommands:
+  config [--validate] [--json]   Show merged config summary the brain reads at session start
+  list                           One line per executor: id, model, cost, status, tags
+  run <executor> <plan> [workdir] [--slug S] [--effort E]   Dispatch a plan to a codex- or pi-backed executor
+  resume <run-dir|uuid> <delta prompt>            Continue a prior run's session with a fix-up
+  status <run-dir>               6- or 7-line status parsed from the run's event stream
+  verify [--when W] [--only a,b] [--targets T] [workdir]   Run configured deterministic checks
+  review <executor> [workdir] [--author ID] [--base BRANCH] [--paths P]  Model code-review of the current diff
+
+Requires Python 3.11+ (tomllib). `pip install tomli` covers 3.10.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+try:
+    import tomllib
+except ImportError:  # pragma: no cover
+    try:
+        import tomli as tomllib  # type: ignore
+    except ImportError:
+        sys.exit("parable requires Python >= 3.11 (or `pip install tomli`)")
+
+SCHEMA_VERSION = 1
+SUPPORTED_PROVIDER_TYPES = ("codex", "codex-native", "subagent", "pi")
+CHECK_WHEN_VALUES = ("post-implement", "pre-commit")
+EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh")
+PI_THINKING_LEVELS = ("off",) + EFFORT_LEVELS  # "off" is pi-only
+PI_API_VALUES = ("openai-completions", "openai-responses", "anthropic-messages")
+PI_INSTALL_HINT = ("'pi' not found on PATH — npm i -g @earendil-works/pi-coding-agent "
+                   "(requires node >= 22; pi crashes on node 20)")
+
+# Tier-0 defaults: Claude-native executors need no API keys — they run as
+# subagents inside the orchestrating session. Anything with an env_key must
+# be declared explicitly by the user.
+BUILTIN_DEFAULTS: dict = {
+    "parable": {
+        "version": SCHEMA_VERSION,
+        "log_dir": ".parable",
+        "default_executor": "sonnet",
+        "default_reviewer": "opus",
+        "repo_notes": "",
+    },
+    "providers": {
+        "claude": {"type": "subagent"},
+    },
+    "executors": {
+        "sonnet": {
+            "provider": "claude",
+            "model": "sonnet",
+            "tags": ["implementer", "default"],
+            "use_for": (
+                "Default implementer: features, bugfixes, tests from a fully-specified plan. "
+                "Literal instruction-follower — state scope explicitly in the plan."
+            ),
+            "avoid_for": "Ambiguous architecture decisions; repo-wide refactors needing huge context.",
+        },
+        "opus": {
+            "provider": "claude",
+            "model": "opus",
+            "tags": ["smoke-test", "reviewer", "second-opinion"],
+            "use_for": (
+                "Smoke-testing against the running stack (instruct it explicitly to execute real "
+                "requests and return evidence) and second-opinion review of risky diffs."
+            ),
+            "avoid_for": "Cheap mechanical edits (waste of capability).",
+        },
+    },
+    "checks": {},
+    "research": {"provider": "grep.ai"},
+    "routing": {
+        "mechanical": ["sonnet"],
+        "feature": ["sonnet"],
+        "refactor_wide": ["sonnet"],
+        "gnarly": ["opus"],
+        "review": ["opus"],
+        "smoke_test": ["opus"],
+        "escalation": ["sonnet", "opus"],
+    },
+}
+
+
+def utc_stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def git_root(start: Path | None = None) -> Path:
+    p = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True, cwd=start or Path.cwd(),
+    )
+    if p.returncode == 0:
+        return Path(p.stdout.strip())
+    return Path.cwd()
+
+
+# ---------------------------------------------------------------------------
+# Config loading / merging / validation
+# ---------------------------------------------------------------------------
+
+def config_paths(root: Path) -> list[Path]:
+    """Candidate config files, lowest precedence first."""
+    paths: list[Path] = []
+    user_global = Path.home() / ".config" / "parable" / "parable.toml"
+    paths.append(user_global)
+    paths.append(root / "parable.toml")
+    paths.append(root / ".claude" / "parable.toml")
+    env = os.environ.get("PARABLE_CONFIG")
+    if env:
+        paths.append(Path(env))
+    return paths
+
+
+def merge_configs(base: dict, overlay: dict) -> dict:
+    """Merge overlay onto base. [executors.*]/[providers.*]/[checks.*] merge
+    per-id with overlay winning per-field; [parable]/[routing] are
+    whole-table overlay-wins."""
+    out = json.loads(json.dumps(base))  # deep copy, plain data only
+    for section in ("executors", "providers", "checks"):
+        for key, val in overlay.get(section, {}).items():
+            merged = dict(out.setdefault(section, {}).get(key, {}))
+            merged.update(val)
+            out[section][key] = merged
+    for section in ("parable", "routing", "research"):
+        if section in overlay:
+            merged = dict(out.get(section, {}))
+            merged.update(overlay[section])
+            out[section] = merged
+    return out
+
+
+def load_config(root: Path) -> tuple[dict, list[Path]]:
+    cfg = json.loads(json.dumps(BUILTIN_DEFAULTS))
+    loaded: list[Path] = []
+    for path in config_paths(root):
+        if path.is_file():
+            with open(path, "rb") as f:
+                try:
+                    overlay = tomllib.load(f)
+                except tomllib.TOMLDecodeError as e:
+                    sys.exit(f"parable: invalid TOML in {path}: {e}")
+            cfg = merge_configs(cfg, overlay)
+            loaded.append(path)
+    version = cfg.get("parable", {}).get("version", SCHEMA_VERSION)
+    if int(version) != SCHEMA_VERSION:
+        sys.exit(f"parable: config schema version {version} not supported (this version supports {SCHEMA_VERSION})")
+    return cfg, loaded
+
+
+def validate_config(cfg: dict) -> list[str]:
+    """Return a list of problems (empty = valid)."""
+    problems: list[str] = []
+    providers = cfg.get("providers", {})
+    executors = cfg.get("executors", {})
+    for pid, prov in providers.items():
+        ptype = prov.get("type")
+        if ptype not in SUPPORTED_PROVIDER_TYPES:
+            problems.append(
+                f"provider '{pid}': unknown type '{ptype}' (this version supports: "
+                f"{', '.join(SUPPORTED_PROVIDER_TYPES)})"
+            )
+        if ptype == "codex":
+            if not prov.get("base_url"):
+                problems.append(f"provider '{pid}': type=codex requires base_url")
+            if not prov.get("env_key"):
+                problems.append(f"provider '{pid}': type=codex requires env_key (name of the API-key env var)")
+            wire = prov.get("wire_api", "responses")
+            if wire != "responses":
+                problems.append(
+                    f"provider '{pid}': wire_api='{wire}' — codex only supports 'responses' "
+                    f"(chat-completions was removed from codex; use a Responses-capable endpoint, "
+                    f"a LiteLLM proxy bridge, or a type=\"pi\" provider)"
+                )
+        if ptype == "pi":
+            if not prov.get("base_url"):
+                problems.append(f"provider '{pid}': type=pi requires base_url")
+            if not prov.get("env_key"):
+                problems.append(f"provider '{pid}': type=pi requires env_key (name of the API-key env var)")
+            api = prov.get("api", "openai-completions")
+            if api not in PI_API_VALUES:
+                problems.append(f"provider '{pid}': api='{api}' (supported: {', '.join(PI_API_VALUES)})")
+    for eid, ex in executors.items():
+        pid = ex.get("provider")
+        if pid not in providers:
+            problems.append(f"executor '{eid}': unknown provider '{pid}'")
+        if not ex.get("model"):
+            problems.append(f"executor '{eid}': missing model")
+        effort = ex.get("effort")
+        if effort is not None:
+            ptype = providers.get(pid, {}).get("type")
+            allowed = PI_THINKING_LEVELS if ptype == "pi" else EFFORT_LEVELS
+            if effort not in allowed:
+                problems.append(f"executor '{eid}': effort='{effort}' (allowed for {ptype}: {', '.join(allowed)})")
+    for klass, chain in cfg.get("routing", {}).items():
+        if klass == "notes" or not isinstance(chain, list):
+            continue
+        for eid in chain:
+            if eid not in executors:
+                problems.append(f"routing.{klass}: unknown executor '{eid}'")
+    for cid, check in cfg.get("checks", {}).items():
+        if not check.get("run"):
+            problems.append(f"check '{cid}': missing run command")
+        for w in check.get("when", []):
+            if w not in CHECK_WHEN_VALUES:
+                problems.append(f"check '{cid}': unknown when '{w}' (use {'/'.join(CHECK_WHEN_VALUES)})")
+    for name in (cfg["parable"].get("default_executor"), cfg["parable"].get("default_reviewer")):
+        if name and name not in executors:
+            problems.append(f"[parable] default executor/reviewer '{name}' is not a configured executor")
+    research = cfg.get("research", {}).get("provider", "grep.ai")
+    if research not in ("grep.ai", "claude"):
+        problems.append(f"[research] provider='{research}' (supported: grep.ai, claude)")
+    return problems
+
+
+def env_key_status(cfg: dict, executor_id: str) -> str:
+    """Credential status for an executor. Returns exactly one of:
+    'disabled', 'subagent', 'codex-native', 'ready', or 'missing <ENV_VAR_NAME>'."""
+    ex = cfg["executors"][executor_id]
+    if ex.get("enabled", True) is False:
+        return "disabled"
+    prov = cfg["providers"].get(ex.get("provider"), {})
+    ptype = prov.get("type")
+    if ptype == "subagent":
+        return "subagent"
+    if ptype == "codex-native":
+        return "codex-native"
+    # codex and pi providers both authenticate via a named env var
+    key = prov.get("env_key", "")
+    return "ready" if os.environ.get(key) else f"missing {key}"
+
+
+# ---------------------------------------------------------------------------
+# codex argv construction
+# ---------------------------------------------------------------------------
+
+def provider_overrides(provider_id: str, prov: dict) -> list[str]:
+    """Inline -c overrides defining a custom provider for one invocation.
+    The user's ~/.codex/config.toml is never modified."""
+    pid = f"parable_{provider_id}"
+    args: list[str] = []
+    args += ["-c", f'model_providers.{pid}.name="{provider_id}"']
+    args += ["-c", f'model_providers.{pid}.base_url="{prov["base_url"]}"']
+    args += ["-c", f'model_providers.{pid}.env_key="{prov["env_key"]}"']
+    args += ["-c", f'model_providers.{pid}.wire_api="responses"']
+    for hk, hv in prov.get("http_headers", {}).items():
+        args += ["-c", f'model_providers.{pid}.http_headers.{hk}="{hv}"']
+    for qk, qv in prov.get("query_params", {}).items():
+        args += ["-c", f'model_providers.{pid}.query_params.{qk}="{qv}"']
+    args += ["-c", f'model_provider="{pid}"']
+    return args
+
+
+def build_run_argv(cfg: dict, executor_id: str, workdir: Path,
+                   last_msg_path: Path) -> tuple[list[str], list[str]]:
+    """Returns (argv, overrides). overrides is the flag list a resume must
+    replay, built explicitly alongside argv."""
+    ex = cfg["executors"][executor_id]
+    prov = cfg["providers"][ex["provider"]]
+    overrides: list[str] = []
+    if prov.get("type") == "codex":
+        overrides += provider_overrides(ex["provider"], prov)
+    overrides += ["-c", f'model="{ex["model"]}"']
+    # Always pin effort explicitly — otherwise runs silently inherit whatever
+    # the user's personal codex config sets.
+    overrides += ["-c", f'model_reasoning_effort="{ex.get("effort", "high")}"']
+    for item in ex.get("extra_config", []):
+        overrides += ["-c", item]
+    argv = (["codex", "exec", "--yolo", "--json", "-C", str(workdir), "--skip-git-repo-check"]
+            + overrides + ["--output-last-message", str(last_msg_path), "-"])
+    return argv, overrides
+
+
+# ---------------------------------------------------------------------------
+# pi harness — provider generation, argv, env
+# ---------------------------------------------------------------------------
+
+def build_pi_models_json(provider_id: str, prov: dict, ex: dict, executor_id: str) -> dict:
+    """Generated per-run pi provider config. The API key is an $ENV reference —
+    resolved by pi at request time, never written to disk or argv."""
+    cost = ex.get("cost", {})
+    model: dict = {
+        "id": ex["model"],
+        "name": executor_id,
+        "reasoning": bool(ex.get("reasoning", True)),
+        "input": ["text"],
+        "cost": {
+            "input": cost.get("in", 0),
+            "output": cost.get("out", 0),
+            "cacheRead": cost.get("cache_in", 0),
+            "cacheWrite": 0,
+        },
+    }
+    if ex.get("context_ktok"):
+        model["contextWindow"] = int(ex["context_ktok"]) * 1000
+    model.update(ex.get("model_overrides", {}))
+    provider: dict = {
+        "name": f"parable_{provider_id}",
+        "baseUrl": prov["base_url"],
+        "apiKey": "$" + prov["env_key"],
+        "api": prov.get("api", "openai-completions"),
+        "models": [model],
+    }
+    for key in ("headers", "compat"):
+        if prov.get(key):
+            provider[key] = prov[key]
+    return {"providers": {f"parable_{provider_id}": provider}}
+
+
+def write_pi_agent_dir(base_dir: Path, models: dict) -> Path:
+    """Hermetic pi agent dir for one run: pi reads models/settings/sessions from
+    here (via PI_CODING_AGENT_DIR) and never touches the user's ~/.pi."""
+    agent_dir = base_dir / "pi-agent"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "models.json").write_text(json.dumps(models, indent=1))
+    user_bin = Path.home() / ".pi" / "agent" / "bin"
+    link = agent_dir / "bin"
+    if user_bin.is_dir() and not link.exists():
+        link.symlink_to(user_bin)
+    return agent_dir
+
+
+PI_HERMETIC_FLAGS = ["--no-extensions", "--no-skills", "--no-prompt-templates", "--no-approve"]
+
+
+def pi_model_flags(ex: dict, default_effort: str = "high") -> list[str]:
+    """Provider and model go in as separate flags: model ids can contain
+    slashes (e.g. accounts/fireworks/models/...), which the combined
+    provider/id form mis-parses."""
+    return ["--provider", f'parable_{ex["provider"]}',
+            "--model", ex["model"],
+            "--thinking", ex.get("effort", default_effort)]
+
+
+def build_pi_argv(cfg: dict, executor_id: str, run_dir: Path, session_id: str,
+                  plan_path: Path) -> tuple[list[str], list[str]]:
+    """Returns (argv, overrides). overrides is the flag list a resume must
+    replay (it carries the session flags that reopen this exact session)."""
+    ex = cfg["executors"][executor_id]
+    overrides = (["--mode", "json"] + pi_model_flags(ex)
+                 + ["--session-dir", str(run_dir / "sessions"), "--session-id", session_id]
+                 + PI_HERMETIC_FLAGS)
+    # Plans go in as an @file: a single argv element caps out around 128KB.
+    argv = ["pi", "-p"] + overrides + [f"@{plan_path}"]
+    return argv, overrides
+
+
+def pi_env(run_dir: Path) -> dict:
+    return os.environ | {
+        "PI_CODING_AGENT_DIR": str(run_dir / "pi-agent"),
+        "PI_OFFLINE": "1",
+        "PI_SKIP_VERSION_CHECK": "1",
+    }
+
+
+def parse_pi_events(jsonl_path: Path) -> dict:
+    """Compact facts from a pi --mode json event stream, normalized to the same
+    keys the codex parser emits so status/summaries work on either harness."""
+    facts: dict = {
+        "session_id": None, "turns": 0, "tool_calls": 0,
+        "last_message": "", "errors": [], "usage": {}, "phase": "unknown",
+    }
+    if not jsonl_path.is_file():
+        return facts
+    with open(jsonl_path, errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            t = d.get("type")
+            if t == "session":
+                facts["session_id"] = d.get("id")
+                facts["phase"] = "running"
+            elif t == "turn_start":
+                facts["turns"] += 1
+            elif t == "tool_execution_start":
+                facts["tool_calls"] += 1
+            elif t == "message_end" and d.get("message", {}).get("role") == "assistant":
+                m = d["message"]
+                texts = [c.get("text", "") for c in m.get("content", []) if c.get("type") == "text"]
+                if texts and texts[-1]:
+                    facts["last_message"] = texts[-1]
+                usage = m.get("usage", {})
+                for src, dst in (("input", "input_tokens"), ("cacheRead", "cached_input_tokens"),
+                                 ("output", "output_tokens")):
+                    if isinstance(usage.get(src), (int, float)):
+                        facts["usage"][dst] = facts["usage"].get(dst, 0) + usage[src]
+                cost = usage.get("cost", {}).get("total")
+                if isinstance(cost, (int, float)):
+                    facts["usage"]["cost"] = facts["usage"].get("cost", 0) + cost
+                if m.get("stopReason") in ("error", "aborted"):
+                    facts["phase"] = "error"
+                    facts["errors"].append(str(m.get("errorMessage"))[:200])
+            elif t == "agent_end":
+                if facts["phase"] != "error":
+                    facts["phase"] = "complete"
+    return facts
+
+
+def parse_harness_events(harness: str, jsonl_path: Path) -> dict:
+    if harness == "pi":
+        return parse_pi_events(jsonl_path)
+    return parse_events(jsonl_path)
+
+
+def run_harness_process(argv: list[str], events_path: Path, harness: str,
+                        max_minutes: float, cwd=None, env=None,
+                        stdin=subprocess.DEVNULL) -> tuple[int, str]:
+    """Launch a harness subprocess, streaming its output to events_path.
+    Returns (exit_code, status) where status is OK | FAILED | TIMEOUT.
+    Both harnesses read stdin even with a positional prompt; an
+    open-but-silent stdin hangs the process forever, hence DEVNULL default."""
+    with open(events_path, "w") as events:
+        try:
+            proc = subprocess.run(argv, cwd=cwd, env=env, stdin=stdin,
+                                  stdout=events, stderr=subprocess.STDOUT,
+                                  timeout=max_minutes * 60)
+        except subprocess.TimeoutExpired:
+            return 124, "TIMEOUT"
+        except FileNotFoundError:
+            sys.exit(f"parable: {PI_INSTALL_HINT}" if harness == "pi"
+                     else "parable: 'codex' not found on PATH — install the codex CLI")
+    return proc.returncode, ("OK" if proc.returncode == 0 else "FAILED")
+
+
+# ---------------------------------------------------------------------------
+# Event-stream parsing (codex --json)
+# ---------------------------------------------------------------------------
+
+def parse_events(jsonl_path: Path) -> dict:
+    """Compact facts from a codex --json event stream."""
+    facts: dict = {
+        "session_id": None, "turns": 0, "tool_calls": 0,
+        "last_message": "", "errors": [], "usage": {}, "phase": "unknown",
+    }
+    if not jsonl_path.is_file():
+        return facts
+    with open(jsonl_path, errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            t = d.get("type")
+            if t == "thread.started":
+                facts["session_id"] = d.get("thread_id")
+                facts["phase"] = "running"
+            elif t == "turn.started":
+                facts["turns"] += 1
+            elif t == "item.completed":
+                item = d.get("item", {})
+                it = item.get("type")
+                if it == "agent_message":
+                    facts["last_message"] = item.get("text", "")
+                elif it in ("command_execution", "function_call", "custom_tool_call", "local_shell_call"):
+                    facts["tool_calls"] += 1
+                elif it == "error":
+                    facts["errors"].append(item.get("message", "")[:200])
+            elif t == "turn.completed":
+                facts["phase"] = "complete"
+                usage = d.get("usage", {})
+                for k, v in usage.items():
+                    if isinstance(v, (int, float)):
+                        facts["usage"][k] = facts["usage"].get(k, 0) + v
+            elif t == "turn.failed" or t == "error":
+                facts["phase"] = "error"
+                msg = d.get("message") or json.dumps(d)[:200]
+                facts["errors"].append(str(msg)[:200])
+    return facts
+
+
+def summarize_run(meta: dict, facts: dict, run_dir: Path) -> str:
+    usage = facts.get("usage", {})
+    toks = f"in={usage.get('input_tokens', 0)} cached={usage.get('cached_input_tokens', 0)} out={usage.get('output_tokens', 0)}"
+    if isinstance(usage.get("cost"), (int, float)):
+        toks += f" cost=${usage['cost']:.4f}"
+    last = (facts.get("last_message") or "").strip().replace("\n", " ")
+    lines = [
+        f"STATUS   {meta.get('status')}  exit={meta.get('exit_code')}  {meta.get('seconds')}s",
+        f"EXECUTOR {meta.get('executor')}  model={meta.get('model')}  effort={meta.get('effort')}",
+        f"SESSION  {meta.get('session_id')}",
+        f"TURNS    {facts.get('turns')}  tool_calls={facts.get('tool_calls')}  tokens {toks}",
+        f"LAST     {last[:220] or '(no agent message)'}",
+        f"RUN_DIR  {run_dir}",
+    ]
+    if facts.get("errors"):
+        lines.append(f"ERRORS   {len(facts['errors'])}: {facts['errors'][-1][:180]}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Subcommands
+# ---------------------------------------------------------------------------
+
+def cmd_config(args: argparse.Namespace) -> int:
+    root = git_root()
+    cfg, loaded = load_config(root)
+    problems = validate_config(cfg)
+    if args.json:
+        print(json.dumps({"config": cfg, "loaded": [str(p) for p in loaded], "problems": problems}, indent=1))
+        return 1 if problems else 0
+    print(f"parable config — loaded: {', '.join(str(p) for p in loaded) or '(builtin Tier-0 defaults only)'}")
+    par = cfg["parable"]
+    print(f"defaults: executor={par.get('default_executor')} reviewer={par.get('default_reviewer')} log_dir={par.get('log_dir')}")
+    print("executors:")
+    for eid, ex in cfg["executors"].items():
+        status = env_key_status(cfg, eid)
+        cost = ex.get("cost", {})
+        cost_s = f"${cost.get('in', '?')}/{cost.get('out', '?')}" if cost else "-"
+        print(f"  {eid:<10} {status:<14} {cost_s:<12} tags={','.join(ex.get('tags', []))}")
+        if ex.get("use_for"):
+            print(f"             use_for: {ex['use_for']}")
+        if ex.get("avoid_for"):
+            print(f"             avoid_for: {ex['avoid_for']}")
+    research = cfg.get("research", {}).get("provider", "grep.ai")
+    if research == "grep.ai":
+        print("research: grep.ai — IN-DEPTH research + research-backed slides/docs/sheets route "
+              "through the grep-research-skills package (invoke its skills via the Skill tool, by "
+              "name); quick lookups stay in-session; "
+              "missing -> npx grep-research-skills; auth -> grep-login")
+    else:
+        print("research: claude — in-session with the best available model")
+    print("routing:")
+    for klass, chain in cfg.get("routing", {}).items():
+        if isinstance(chain, list):
+            print(f"  {klass:<14} -> {', '.join(chain)}")
+    if cfg.get("checks"):
+        print("checks: " + ", ".join(f"{cid}({','.join(c.get('when', []))})" for cid, c in cfg["checks"].items()))
+    notes = (par.get("repo_notes") or "").strip()
+    if notes:
+        print("repo_notes:")
+        for ln in notes.splitlines():
+            print(f"  {ln}")
+    if problems:
+        print("PROBLEMS:")
+        for p in problems:
+            print(f"  ! {p}")
+    if args.validate:
+        print("VALID" if not problems else "INVALID")
+        return 1 if problems else 0
+    return 0
+
+
+def cmd_list(_args: argparse.Namespace) -> int:
+    cfg, _ = load_config(git_root())
+    for eid, ex in cfg["executors"].items():
+        cost = ex.get("cost", {})
+        cost_s = f"${cost.get('in', '?')}/{cost.get('out', '?')}" if cost else "-"
+        print(f"{eid:<10} {ex.get('model', ''):<50} {cost_s:<12} {env_key_status(cfg, eid):<14} {','.join(ex.get('tags', []))}")
+    return 0
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    root = git_root()
+    cfg, _ = load_config(root)
+    problems = validate_config(cfg)
+    if problems:
+        sys.exit("parable: config invalid:\n  " + "\n  ".join(problems))
+    eid = args.executor
+    if eid not in cfg["executors"]:
+        sys.exit(f"parable: unknown executor '{eid}' (see: parable.py list)")
+    ex = cfg["executors"][eid]
+    if ex.get("enabled", True) is False:
+        sys.exit(f"parable: executor '{eid}' is disabled (enabled = false in config)")
+    if args.effort:
+        prov_type = cfg["providers"].get(ex.get("provider"), {}).get("type")
+        allowed = PI_THINKING_LEVELS if prov_type == "pi" else EFFORT_LEVELS
+        if args.effort not in allowed:
+            sys.exit(f"parable: --effort '{args.effort}' (allowed for {prov_type}: {', '.join(allowed)})")
+        ex = {**ex, "effort": args.effort}
+        cfg = {**cfg, "executors": {**cfg["executors"], eid: ex}}
+    prov = cfg["providers"][ex["provider"]]
+    if prov.get("type") == "subagent":
+        sys.exit(f"parable: executor '{eid}' is a Claude subagent — dispatch it via the Agent tool, not parable.py run")
+    if prov.get("type") in ("codex", "pi") and not os.environ.get(prov.get("env_key", "")):
+        sys.exit(f"parable: env var {prov.get('env_key')} is not set (required by executor '{eid}')")
+    plan_path = Path(args.plan)
+    if not plan_path.is_file():
+        sys.exit(f"parable: plan file not found: {plan_path}")
+    workdir = Path(args.workdir).resolve() if args.workdir else root
+
+    slug = args.slug or re.sub(r"[^a-z0-9-]+", "-", plan_path.parent.name.lower()).strip("-") or "task"
+    log_root = root / cfg["parable"].get("log_dir", ".parable")
+    run_dir = log_root / "runs" / f"{utc_stamp()}-{slug}-{eid}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "plan.md").write_text(
+        WORKSPACE_CONTRACT + "\n\n" + plan_path.read_text(errors="replace"))
+
+    harness = "pi" if prov.get("type") == "pi" else "codex"
+    if harness == "pi":
+        session_id = str(uuid.uuid4())
+        write_pi_agent_dir(run_dir, build_pi_models_json(ex["provider"], prov, ex, eid))
+        argv, overrides = build_pi_argv(cfg, eid, run_dir, session_id, run_dir / "plan.md")
+    else:
+        session_id = None
+        argv, overrides = build_run_argv(cfg, eid, workdir, run_dir / "last-message.txt")
+    (run_dir / "cmd.txt").write_text(shlex.join(argv) + "\n")
+    events_path = run_dir / "harness.jsonl"
+
+    max_minutes = float(ex.get("max_minutes", 20))
+    started = time.time()
+    # meta.json exists from launch so `status` works on an in-progress run.
+    meta = {
+        "harness": harness, "executor": eid, "model": ex["model"],
+        "effort": ex.get("effort", "high"), "provider": ex["provider"],
+        "workdir": str(workdir), "session_id": session_id, "exit_code": None,
+        "status": "RUNNING", "seconds": None,
+        "overrides": overrides,
+        "resumes": 0,
+    }
+    (run_dir / "meta.json").write_text(json.dumps(meta, indent=1))
+    if harness == "pi":
+        exit_code, status = run_harness_process(argv, events_path, harness, max_minutes,
+                                                cwd=workdir, env=pi_env(run_dir))
+    else:
+        with open(run_dir / "plan.md", "rb") as plan_f:
+            exit_code, status = run_harness_process(argv, events_path, harness, max_minutes,
+                                                    stdin=plan_f)
+    seconds = round(time.time() - started, 1)
+
+    facts = parse_harness_events(harness, events_path)
+    meta.update(session_id=facts.get("session_id") or session_id, exit_code=exit_code,
+                status=status, seconds=seconds)
+    (run_dir / "meta.json").write_text(json.dumps(meta, indent=1))
+    print(summarize_run(meta, facts, run_dir))
+    return 0 if status == "OK" else 1
+
+
+def find_run_dir(root: Path, cfg: dict, ref: str) -> Path:
+    p = Path(ref)
+    if p.is_dir() and (p / "meta.json").is_file():
+        return p
+    runs = root / cfg["parable"].get("log_dir", ".parable") / "runs"
+    for run_dir in sorted(runs.glob("*"), reverse=True):
+        meta_f = run_dir / "meta.json"
+        if meta_f.is_file():
+            try:
+                if json.loads(meta_f.read_text()).get("session_id") == ref:
+                    return run_dir
+            except json.JSONDecodeError:
+                continue
+    sys.exit(f"parable: no run found for '{ref}'")
+
+
+def cmd_resume(args: argparse.Namespace) -> int:
+    root = git_root()
+    cfg, _ = load_config(root)
+    run_dir = find_run_dir(root, cfg, args.run)
+    meta = json.loads((run_dir / "meta.json").read_text())
+    if not meta.get("session_id"):
+        sys.exit(f"parable: run {run_dir} has no session id — start a fresh run instead")
+    n = meta.get("resumes", 0) + 1
+    events_path = run_dir / f"resume-{n}.jsonl"
+    harness = meta.get("harness", "codex")
+    env = None
+    if harness == "pi":
+        # Replayed overrides carry --session-dir/--session-id: same id in the
+        # same dir opens the existing session and continues it.
+        argv = ["pi", "-p"] + meta.get("overrides", []) + [args.prompt]
+        env = pi_env(run_dir)
+    else:
+        # `codex exec resume` does not accept -C; the session runs in the process cwd.
+        argv = ["codex", "exec", "resume", meta["session_id"], "--yolo", "--json"]
+        argv += meta.get("overrides", [])
+        argv += [args.prompt]
+    started = time.time()
+    ex = cfg["executors"].get(meta.get("executor"), {})
+    max_minutes = float(ex.get("max_minutes", 20))
+    exit_code, status = run_harness_process(argv, events_path, harness, max_minutes,
+                                            cwd=meta["workdir"], env=env)
+    meta["resumes"] = n
+    meta["exit_code"] = exit_code
+    meta["status"] = status
+    meta["seconds"] = round(time.time() - started, 1)
+    (run_dir / "meta.json").write_text(json.dumps(meta, indent=1))
+    print(summarize_run(meta, parse_harness_events(harness, events_path), run_dir))
+    return 0 if status == "OK" else 1
+
+
+def merge_facts(facts_list: list[dict]) -> dict:
+    """Aggregate facts across the original run and every resume, in order."""
+    merged: dict = {"session_id": None, "turns": 0, "tool_calls": 0,
+                    "last_message": "", "errors": [], "usage": {}, "phase": "unknown"}
+    for f in facts_list:
+        merged["session_id"] = merged["session_id"] or f.get("session_id")
+        merged["turns"] += f.get("turns", 0)
+        merged["tool_calls"] += f.get("tool_calls", 0)
+        if f.get("last_message"):
+            merged["last_message"] = f["last_message"]
+        merged["errors"].extend(f.get("errors", []))
+        for k, v in f.get("usage", {}).items():
+            merged["usage"][k] = merged["usage"].get(k, 0) + v
+        if f.get("phase") != "unknown":
+            merged["phase"] = f["phase"]
+    return merged
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    run_dir = Path(args.run_dir)
+    meta_f = run_dir / "meta.json"
+    if not meta_f.is_file():
+        sys.exit(f"parable: {run_dir} has no meta.json")
+    meta = json.loads(meta_f.read_text())
+    harness = meta.get("harness", "codex")
+    streams = [run_dir / "harness.jsonl"] + sorted(run_dir.glob("resume-*.jsonl"))
+    print(summarize_run(meta, merge_facts([parse_harness_events(harness, s) for s in streams]), run_dir))
+    if meta.get("status") == "RUNNING":
+        live = [s for s in streams if s.is_file()]
+        quiet = min((time.time() - s.stat().st_mtime for s in live), default=None)
+        if quiet is not None and quiet > 180:
+            print(f"WARNING  no events for {int(quiet // 60)}m — the dispatching session may have "
+                  f"exited and killed this run (child processes die with it); if so, re-dispatch "
+                  f"or resume rather than waiting")
+    return 0
+
+
+def run_check(root: Path, cid: str, check: dict, targets: str) -> dict:
+    cmd = check["run"].replace("{targets}", targets)
+    cwd = root / check.get("cwd", ".")
+    timeout_s = float(check.get("timeout_minutes", 15)) * 60
+    started = time.time()
+    try:
+        proc = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True,
+                              text=True, timeout=timeout_s)
+        rc = proc.returncode
+        out = (proc.stdout or "") + (proc.stderr or "")
+    except subprocess.TimeoutExpired as e:
+        rc = 124
+        out = ((e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")) + "\n[TIMEOUT]"
+    return {"id": cid, "rc": rc, "seconds": round(time.time() - started, 1), "output": out, "cmd": cmd}
+
+
+def failure_lines(check: dict, result: dict) -> list[str]:
+    tail_n = int(check.get("tail_lines", 8))
+    lines = result["output"].splitlines()
+    pattern = check.get("grep")
+    if pattern:
+        matched = [ln for ln in lines if re.search(pattern, ln)]
+        if matched:
+            return matched[:12]
+    return lines[-tail_n:][:12]
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    root = git_root(Path(args.workdir).resolve()) if args.workdir else git_root()
+    cfg, _ = load_config(root)
+    checks = cfg.get("checks", {})
+    if args.only:
+        wanted = [c.strip() for c in args.only.split(",")]
+        unknown = [c for c in wanted if c not in checks]
+        if unknown:
+            sys.exit(f"parable: unknown checks: {', '.join(unknown)}")
+        selected = {cid: checks[cid] for cid in wanted}
+    else:
+        selected = {cid: c for cid, c in checks.items() if args.when in c.get("when", [])}
+    if not selected:
+        print(f"PARABLE VERIFY  no checks configured for when={args.when}")
+        return 0
+    out_dir = root / cfg["parable"].get("log_dir", ".parable") / "verify" / utc_stamp()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # Targets reach the check command through the shell — quote each token.
+    targets = " ".join(shlex.quote(t) for t in (args.targets or "").split())
+    results = []
+    for cid, check in selected.items():
+        res = run_check(root, cid, check, targets)
+        (out_dir / f"{cid}.log").write_text(res["output"])
+        results.append((check, res))
+    n_fail = sum(1 for _, r in results if r["rc"] != 0)
+    total_s = round(sum(r["seconds"] for _, r in results), 1)
+    print(f"PARABLE VERIFY  {len(results)} checks  {len(results) - n_fail} pass  {n_fail} fail  ({total_s}s)")
+    for check, res in results:
+        mark = "PASS" if res["rc"] == 0 else "FAIL"
+        line = f"{mark} {res['id']:<14} {res['seconds']}s"
+        if res["rc"] != 0:
+            line += f"  exit {res['rc']}  log: {out_dir / (res['id'] + '.log')}"
+        print(line)
+        if res["rc"] != 0:
+            for ln in failure_lines(check, res):
+                print(f"    {ln[:200]}")
+    return 1 if n_fail else 0
+
+
+SECRETISH_RE = re.compile(r"(^|/)\.env(\.|$)|\.pem$|\.key$|credential|secret|token", re.IGNORECASE)
+
+
+def partition_untracked(untracked: list[str], log_dir: str, paths: list[str]) -> tuple[list[str], list[str]]:
+    """Split untracked files into (content_included, listed_by_name_only).
+
+    Untracked content goes to an external reviewer model, so it is included
+    only when the caller scoped the review with --paths, and never for
+    secret-looking filenames. Everything else is listed by name so omissions
+    are visible instead of silent."""
+    include, listed = [], []
+    for uf in filter(None, untracked):
+        if uf.startswith(log_dir.rstrip("/") + "/"):
+            continue
+        in_scope = bool(paths) and any(uf == p or uf.startswith(p.rstrip("/") + "/") for p in paths)
+        if in_scope and not SECRETISH_RE.search(uf):
+            include.append(uf)
+        else:
+            listed.append(uf)
+    return include, listed
+
+
+REVIEW_FALLBACK_PROMPT = """You are reviewing a code diff — read and pronounce, do not investigate.
+Deterministic verification (typecheck, tests) has already run; do NOT run commands, builds, or tests,
+and do NOT modify any file. You may briefly read a file for context, but your job is judgment on the
+diff below, delivered fast.
+
+Report every issue you find, including ones you are uncertain about or consider low-severity. Do not
+filter for importance or confidence — a separate verification step will do that. Your goal is coverage:
+it is better to surface a finding that later gets filtered out than to silently drop a real bug. For
+each finding give: file:line, what is wrong, why it matters, confidence (high/medium/low), severity
+(P0/P1/P2). Also check explicitly: acceptance criteria met (when a plan is provided); out-of-scope
+hunks (list each); tests for the changed behavior that test behavior, not implementation. Findings
+only — no praise, no summary of correct code. End with the complete findings list as your final
+message. The diff:
+
+"""
+
+
+def review_rubric() -> str:
+    """The rubric lives in references/review-prompt.md (single source, below the `---` rule);
+    the embedded constant serves installs where the reference file is absent."""
+    ref = Path(__file__).resolve().parent.parent / "references" / "review-prompt.md"
+    try:
+        rubric = ref.read_text().split("---", 1)[1].strip()
+        return rubric + "\n\nThe diff:\n\n"
+    except (OSError, IndexError):
+        return REVIEW_FALLBACK_PROMPT
+
+WORKSPACE_CONTRACT = """\
+WORKSPACE CONTRACT: You may be one of several agents working in this repository \
+concurrently. Modified or untracked files you did not create belong to another \
+agent's in-flight work. Never revert, checkout, stash, clean, or delete changes \
+outside the files your task assigns to you — if the workspace state looks wrong, \
+report it in your final message instead of fixing it. Scope limits like "only \
+touch X" bound what YOU edit; they are never an instruction to remove someone \
+else's changes."""
+
+REVIEW_DEFAULT_EFFORT = "medium"   # reviews run at their own effort, independent of the implement dispatch
+REVIEW_MAX_MINUTES = 8
+PI_REVIEW_TOOLS = "read,grep,find,ls"  # reviewers are read-only: judgment on the diff, not investigation
+
+
+def cmd_review(args: argparse.Namespace) -> int:
+    root = git_root()
+    cfg, _ = load_config(root)
+    eid = args.executor
+    if eid not in cfg["executors"]:
+        sys.exit(f"parable: unknown executor '{eid}'")
+    ex = cfg["executors"][eid]
+    prov = cfg["providers"][ex["provider"]]
+    if ex.get("enabled", True) is False:
+        sys.exit(f"parable: reviewer '{eid}' is disabled (enabled = false in config)")
+    if prov.get("type") == "subagent":
+        sys.exit(f"parable: executor '{eid}' is a Claude subagent — review via the Agent tool")
+    if prov.get("type") in ("codex", "pi") and not os.environ.get(prov.get("env_key", "")):
+        sys.exit(f"parable: env var {prov.get('env_key')} is not set (required by reviewer '{eid}')")
+    if args.author:
+        author = cfg["executors"].get(args.author, {})
+        if author.get("model") == ex.get("model"):
+            sys.exit(f"parable: reviewer '{eid}' uses the same model as author '{args.author}' — pick a different reviewer")
+    workdir = Path(args.workdir).resolve() if args.workdir else root
+    paths = [p.strip() for p in (args.paths or "").split(",") if p.strip()]
+    diff_args = ["git", "diff"]
+    if args.base:
+        diff_args += [f"{args.base}...HEAD"]
+    else:
+        diff_args += ["HEAD"]
+    if paths:
+        diff_args += ["--"] + paths
+    diff = subprocess.run(diff_args, capture_output=True, text=True, cwd=workdir).stdout
+    # New files are usually untracked — but their content ships to an external
+    # reviewer model, so content is included only inside an explicit --paths
+    # scope (and never for secret-looking names); the rest is listed by name.
+    log_dir = cfg["parable"].get("log_dir", ".parable").strip("/")
+    max_bytes = 200_000
+    untracked = subprocess.run(["git", "ls-files", "--others", "--exclude-standard"],
+                               capture_output=True, text=True, cwd=workdir).stdout.split("\n")
+    include, listed = partition_untracked(untracked, log_dir, paths)
+    for uf in include:
+        fpath = workdir / uf
+        if not fpath.is_file() or fpath.stat().st_size > max_bytes or b"\x00" in fpath.read_bytes()[:8000]:
+            listed.append(uf)
+            continue
+        diff += subprocess.run(["git", "diff", "--no-index", "--", "/dev/null", uf],
+                               capture_output=True, text=True, cwd=workdir).stdout
+    if listed:
+        diff += ("\n[untracked files present, content NOT included (scope with --paths to review them): "
+                 + ", ".join(listed[:40]) + (" …" if len(listed) > 40 else "") + "]\n")
+    if not diff.strip():
+        print("PARABLE REVIEW  empty diff — nothing to review")
+        return 0
+    if len(diff) > 400_000:
+        diff = diff[:400_000] + "\n[diff truncated at 400KB — review what is shown]\n"
+    prompt = review_rubric()
+    if getattr(args, "plan", None) and Path(args.plan).is_file():
+        plan_block = "The plan:\n\n" + Path(args.plan).read_text(errors="replace") + "\n\n"
+        prompt = prompt.replace("The diff:", plan_block + "The diff:", 1)
+    prompt += diff
+    max_minutes = float(args.max_minutes or REVIEW_MAX_MINUTES)
+    effort = args.effort or REVIEW_DEFAULT_EFFORT
+    review_dir = root / cfg["parable"].get("log_dir", ".parable") / "reviews" / f"{utc_stamp()}-{eid}"
+    review_dir.mkdir(parents=True, exist_ok=True)
+    if prov.get("type") == "pi":
+        rc, out = review_via_pi(cfg, eid, ex, prov, review_dir, workdir, prompt, max_minutes, effort)
+    else:
+        rc, out = review_via_codex(ex, prov, workdir, prompt, max_minutes, effort)
+    # The full review always lands in an artifact file: stdout tails are lossy
+    # and a lost finding triggers wasteful re-reviews.
+    review_file = review_dir / "review.md"
+    review_file.write_text(out or "")
+    print(out)
+    print(f"REVIEW_FILE {review_file}")
+    if rc != 0 or not out:
+        print(f"PARABLE REVIEW  reviewer exited {rc} with {'no' if not out else 'this'} output — "
+              f"fall back to a Claude subagent review rather than retrying executors",
+              file=sys.stderr)
+    return rc
+
+
+def review_via_pi(cfg: dict, eid: str, ex: dict, prov: dict, review_dir: Path,
+                  workdir: Path, prompt: str, max_minutes: float,
+                  effort: str) -> tuple[int, str]:
+    """One-shot pi review: rubric+diff go in as an @file (argv size limits),
+    a throwaway hermetic agent dir carries the provider, read-only tools,
+    no session kept. Returns (exit_code, review_text)."""
+    prompt_file = review_dir / "prompt.md"
+    prompt_file.write_text(prompt)
+    write_pi_agent_dir(review_dir, build_pi_models_json(ex["provider"], prov, ex, eid))
+    argv = (["pi", "-p", "--mode", "json"]
+            + pi_model_flags({**ex, "effort": effort})
+            + ["--no-session", "--tools", PI_REVIEW_TOOLS]
+            + PI_HERMETIC_FLAGS + [f"@{prompt_file}"])
+    events_path = review_dir / "harness.jsonl"
+    exit_code, status = run_harness_process(argv, events_path, "pi", max_minutes,
+                                            cwd=workdir, env=pi_env(review_dir))
+    facts = parse_pi_events(events_path)
+    out = facts.get("last_message", "").strip()
+    if status == "TIMEOUT" and not out:
+        return 124, ""
+    return exit_code, out
+
+
+def review_via_codex(ex: dict, prov: dict, workdir: Path, prompt: str,
+                     max_minutes: float, effort: str) -> tuple[int, str]:
+    """Codex review reads the rubric+diff from stdin and answers in prose.
+    Returns (exit_code, review_text)."""
+    argv = ["codex", "exec", "--yolo", "-C", str(workdir), "--skip-git-repo-check"]
+    if prov.get("type") == "codex":
+        argv += provider_overrides(ex["provider"], prov)
+    argv += ["-c", f'model="{ex["model"]}"']
+    argv += ["-c", f'model_reasoning_effort="{effort}"']
+    argv += ["-"]
+    try:
+        proc = subprocess.run(argv, input=prompt, text=True, capture_output=True,
+                              timeout=max_minutes * 60)
+    except subprocess.TimeoutExpired:
+        return 124, ""
+    except FileNotFoundError:
+        sys.exit("parable: 'codex' not found on PATH — install the codex CLI")
+    return proc.returncode, proc.stdout.strip()
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="parable.py", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("config", help="show merged config summary")
+    p.add_argument("--validate", action="store_true")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_config)
+
+    p = sub.add_parser("list", help="list executors")
+    p.set_defaults(fn=cmd_list)
+
+    p = sub.add_parser("run", help="dispatch a plan to an executor")
+    p.add_argument("executor")
+    p.add_argument("plan")
+    p.add_argument("workdir", nargs="?",
+                   help="git root the executor operates in (default: current repo root)")
+    p.add_argument("--slug")
+    p.add_argument("--effort", help="override the executor's configured effort for this dispatch")
+    p.set_defaults(fn=cmd_run)
+
+    p = sub.add_parser("resume", help="send a delta prompt to a prior run's session")
+    p.add_argument("run", help="run dir or session uuid")
+    p.add_argument("prompt")
+    p.set_defaults(fn=cmd_resume)
+
+    p = sub.add_parser("status", help="compact status of a run from its event stream")
+    p.add_argument("run_dir")
+    p.set_defaults(fn=cmd_status)
+
+    p = sub.add_parser("verify", help="run configured deterministic checks")
+    p.add_argument("--when", default="post-implement", choices=list(CHECK_WHEN_VALUES))
+    p.add_argument("--only")
+    p.add_argument("--targets", default="")
+    p.add_argument("workdir", nargs="?")
+    p.set_defaults(fn=cmd_verify)
+
+    p = sub.add_parser("review", help="model code-review of the current diff")
+    p.add_argument("executor")
+    p.add_argument("workdir", nargs="?")
+    p.add_argument("--author", help="executor id that authored the diff (enforces different reviewer model)")
+    p.add_argument("--base", help="review changes against this base branch instead of HEAD")
+    p.add_argument("--paths", help="comma-separated paths limiting the review to the task's files")
+    p.add_argument("--plan", help="path to the task's plan.md — included so the reviewer can check acceptance criteria and scope")
+    p.add_argument("--effort", help=f"reviewer effort (default {REVIEW_DEFAULT_EFFORT}; never inherits the executor's implement effort)")
+    p.add_argument("--max-minutes", type=float, help=f"review timeout (default {REVIEW_MAX_MINUTES})")
+    p.set_defaults(fn=cmd_review)
+
+    args = ap.parse_args()
+    return args.fn(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

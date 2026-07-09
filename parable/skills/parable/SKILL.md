@@ -1,0 +1,98 @@
+---
+name: parable
+description: Orchestrator for multi-task implementation batches. The session model plans each task, routes it to the cheapest capable executor (Claude subagents by default; codex- and pi-run models via parable.toml), and verifies and reviews the results. Invoke when the user types /parable, hands over a list of tasks to implement, says "work through my backlog," "knock out these issues," or "use cheap/fast models for this." Not for a single isolated bugfix or a standalone code review.
+---
+
+# parable — divide and conquer
+
+You are the **brain**: the most capable model in the room, and the most expensive. The strategy
+is division of labor: carve the work into the smallest clusters that can proceed independently —
+split by layer, by component, by concern, along whatever natural seams the task has — route each
+cluster to the cheapest executor suited to it (the cast and its stage directions come from the
+config), and run independent clusters concurrently under the shared-tree rules below. One
+executor grinding through a whole feature serially is the expensive path in both wall-clock and
+tokens. Planning, routing, verification, and judgment stay with you; you already know how to do
+those. This file tells you what's available and the house rules; the method is yours.
+
+## Session start
+
+Run `scripts/parable-config.sh` once. It prints the executor cast (credential status, costs,
+`use_for`/`avoid_for` stage directions), the routing chains per task class, the configured
+checks, the research provider, and `repo_notes` — repo conventions that belong in every plan.
+That output plus this file covers the common case; the full selection algorithm and escalation
+ladder live in `references/routing.md`. No config file means Tier-0 defaults:
+`sonnet` implements and `opus` reviews as Claude subagents, no keys needed — and with no
+configured checks, `parable-verify.sh` passes vacuously until the user declares some.
+
+## The tools
+
+- `scripts/parable-run.sh <executor> <plan.md> [workdir] [--effort <level>]` — dispatch a
+  codex- or pi-backed executor headlessly; prints status, session id, turns, tokens and cost,
+  last message, and the run dir. Subagent executors (`sonnet`, `opus`, …) dispatch via the
+  Agent tool with the plan as the prompt — use the general-purpose agent type with the
+  executor's model; custom agent-type names are install-specific.
+- `scripts/parable-resume.sh <run-dir> "<message>"` — continue an executor's existing session
+  (caching economics: facts below). Sessions do not transfer between executors.
+- `scripts/parable-status.sh <run-dir>` — live run state in ~7 lines for zero model tokens;
+  the cheap first read on any run.
+- `scripts/parable-verify.sh --when <post-implement|pre-commit>` — the repo's configured
+  checks, compact pass/fail with the actionable failure lines.
+- `scripts/parable-review.sh <reviewer> --author <executor> --paths <files> --plan <plan.md>` —
+  synchronous cross-model review with the rubric from `references/review-prompt.md`; findings
+  print to stdout and land in the `REVIEW_FILE` path it prints. Reviewers run read-only.
+- The scripts are conveniences, not walls — drive a harness CLI directly when the flow needs
+  it. Provider recipes and direct-CLI gotchas: `references/providers.md`. Config schema:
+  `references/config.md`.
+
+## House rules
+
+- The reviewer never shares the author's model — `--author` enforces it.
+- A feature split across concurrent plans is reviewed once, as one integrated diff against the
+  whole feature intent — the union of the changed paths plus the full spec. Reviews scoped per
+  plan cannot see integration seams and misread sibling work as scope violations.
+- `parable-verify.sh` is green before any commit — and acceptance criteria are verified on the
+  route production requests actually take. Code reached by no live caller proves nothing;
+  green unit tests do not prove a route.
+- Present plans for approval before implementing, unless the user pre-authorized autonomy.
+- Concurrent runs in one working tree get disjoint owned paths, declared in their plans;
+  overlap means serialize. Commit verified work promptly — uncommitted diffs in a shared tree
+  are unprotected — and verify or commit landed runs before any tree-wide git operation of
+  your own (stash, checkout, reset), which can silently drop a sibling run's uncommitted work.
+- Implementing a task yourself is the user's money: ask first with AskUserQuestion, except for
+  fixes smaller than the handoff would cost.
+- Spend and wait mechanics: your harness ships its own spend discipline, written by the model's
+  creator and newer than anything here — follow it over any advice in this file. The facts below
+  only add what is parable-specific.
+
+## Facts you cannot derive mid-session
+
+- Executor sessions share zero context with this conversation and follow plans literally —
+  a plan must be self-contained: intent, scope, off-limits paths, the `repo_notes` conventions.
+- Every executor harness keeps its own sessions and rides its provider's prompt cache: codex
+  stores server-side threads (`codex exec resume <id>`), pi stores local session files
+  (`--session-id`), and a resumed session's replayed prefix bills at cached rates — follow-ups
+  cost cents where a fresh briefing re-bills the whole context. The bar for resuming is lower
+  than it feels: the session already holds the executor's codebase exploration, so even work
+  needing significant improvement usually lands better as continuity feedback to that session
+  than as a fresh start that re-explores from zero. Two edges: a session exists only once a
+  first turn has completed (a run killed earlier records no session id, leaving nothing to
+  resume), and an over-grown or misled session stops being a bargain — start fresh when its
+  accumulated context misleads more than it informs, and always when changing executors.
+  Claude-subagent executors have no resumable session.
+- Where a run's work lives, per harness: every parable run dir holds `harness.jsonl` (the live
+  event stream, one JSON event per line), `plan.md`, `cmd.txt`, `meta.json`, and a
+  `resume-N.jsonl` per follow-up; pi runs also keep the full session transcript under
+  `<run-dir>/sessions/`; codex sessions started outside parable land in
+  `~/.codex/sessions/<Y>/<m>/<d>/rollout-*.jsonl`. Transcripts grow to megabytes; the working
+  tree itself is the other ground truth for what an executor has actually produced.
+
+## Research and research-backed artifacts
+
+grep.ai is Parcha's hosted research service (a free tier exists); parable defaults
+`[research].provider` to it — set `"claude"` to keep research in-session. With the default,
+route in-depth research and research-backed deliverables (reports, slidedecks, spreadsheets,
+PDFs, apps) through the installed **grep-research-skills** package: invoke its skills by name
+via the Skill tool (`research`, `ultra-research`, `grep-build-slidedeck`, `grep-domain-expert`,
+and friends — each skill's description says when it fits). `npx grep-research-skills` installs
+them; `grep-login` authenticates. Quick lookups are ordinary in-session web searches. These
+deliverables have no git diff: close by confirming the artifact with the user.

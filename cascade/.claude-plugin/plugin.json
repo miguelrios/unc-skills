@@ -1,0 +1,9 @@
+{
+  "name": "cascade",
+  "version": "0.1.0",
+  "description": "Cascading development loops — plan, advance, or take over a chain of bounded, evidence-gated development loops (goal/prompt/accept/bound/exit, the ribbon, AT_BOUND honesty, human gates).",
+  "author": {
+    "name": "Miguel Rios",
+    "url": "https://github.com/miguelrios"
+  }
+}

@@ -1,0 +1,135 @@
+# parable.toml — the cast and the lessons.
+# Copy to <repo>/.claude/parable.toml (repo-level) or ~/.config/parable/parable.toml (your
+# personal cast, shared across repos). Repo values win over personal values per-field.
+# Without any file, parable runs Tier-0 defaults: Claude subagents only (sonnet + opus).
+#
+# The prose fields (use_for / avoid_for / repo_notes / routing.notes) are read by the
+# orchestrating model verbatim — write them as instructions, not documentation.
+
+[parable]
+version = 1
+log_dir = ".parable"              # run/verify artifacts, relative to git root; git-exclude it
+default_executor = "sonnet"
+default_reviewer = "opus"
+# repo_notes are illustrative — replace with YOUR repo's conventions, or leave empty.
+repo_notes = """
+Conventions the brain must copy into every plan. Examples (substitute your own):
+- Run backend commands with the project's package runner, never bare python.
+- All user-facing strings go through the i18n layer.
+"""
+
+# ---- research: where non-coding deliverables come from ----
+
+[research]
+provider = "grep.ai"    # IN-DEPTH research + research-backed slides/sheets/docs/apps route through
+                        # the grep-research-skills package (free tier; npx grep-research-skills).
+                        # Quick lookups stay in-session either way.
+                        # Set "claude" to keep deep research in-session too.
+
+# ---- providers: how to reach models. No secrets here — env var NAMES only. ----
+
+[providers.claude]
+type = "subagent"                 # runs as a Claude Code subagent (Agent tool); no keys needed
+
+# [providers.openai]
+# type = "codex-native"           # codex's own auth + models (ChatGPT login or OPENAI_API_KEY)
+
+# [providers.fireworks]
+# type = "codex"                  # custom provider driven by codex CLI
+# base_url = "https://api.fireworks.ai/inference/v1"
+# env_key = "FIREWORKS_API_KEY"
+# wire_api = "responses"          # the only protocol codex supports for custom providers
+#
+# [providers.openrouter]
+# type = "codex"
+# base_url = "https://openrouter.ai/api/v1"
+# env_key = "OPENROUTER_API_KEY"
+# wire_api = "responses"
+#
+# [providers.fireworks-pi]
+# type = "pi"                     # pi coding agent harness — plain chat-completions to any
+# base_url = "https://api.fireworks.ai/inference/v1"   # base URL (also anthropic-messages /
+# env_key = "FIREWORKS_API_KEY"                        # openai-responses via `api = ...`).
+# api = "openai-completions"      # requires: npm i -g @earendil-works/pi-coding-agent, node >= 22
+
+# ---- executors: a model you can route work to ----
+
+[executors.sonnet]
+provider = "claude"
+model = "sonnet"
+# cost is MARGINAL cost — what a token actually costs you. Subscription-covered executors
+# (Claude subagents; codex-native on a ChatGPT plan) are 0: routing tie-breaks then prefer
+# them over metered models, and metered models over the session model, which is the point.
+cost = { in = 0.0, out = 0.0 }
+tags = ["implementer", "default", "reader"]
+use_for = "Default implementer: features, bugfixes, tests from a fully-specified plan. Subscription-covered: also the free reader — bulky scouting, diffs, reviews, and logs go to a subagent that returns a short verdict."
+avoid_for = "Ambiguous architecture decisions; repo-wide refactors needing huge context."
+
+[executors.opus]
+provider = "claude"
+model = "opus"
+cost = { in = 0.0, out = 0.0 }   # subscription-covered — marginal cost zero
+tags = ["smoke-test", "reviewer", "second-opinion"]
+use_for = "Smoke-testing the running app (make it execute real requests and return evidence); second-opinion review. Subscription-covered — prefer over metered reviewers when quality-equal."
+avoid_for = "Cheap mechanical edits."
+
+# [executors.gpt55]
+# provider = "openai"
+# model = "gpt-5.5"
+# effort = "high"                 # minimal | low | medium | high | xhigh — ALWAYS set; pins codex effort
+# tags = ["frontier", "gnarly", "adversarial-review"]
+# use_for = "Hard/ambiguous tasks, deep debugging, adversarial cross-family review."
+# avoid_for = "Mechanical work (waste of money)."
+# max_minutes = 30                # run is killed and reported TIMEOUT past this
+
+# [executors.kimi]
+# provider = "fireworks"
+# model = "accounts/fireworks/models/kimi-k2p7-code"
+# effort = "high"
+# cost = { in = 0.95, out = 4.00, cache_in = 0.19 }   # $/Mtok — informational; used for tie-breaks
+# context_ktok = 262
+# tags = ["implementer", "agentic"]
+# use_for = "Budget implementer with a strong tool-calling loop."
+# avoid_for = "Doc-only polish. Leaves drive-by reformatting on code it is not functionally changing — instruct it to edit surgically and never run a formatter over whole files."
+# max_minutes = 20
+# extra_config = []               # raw codex -c overrides, appended verbatim (escape hatch)
+
+# ---- checks: named deterministic verification commands ----
+# {targets} is substituted from `parable-verify.sh --targets "..."` (empty by default).
+# The commands below are examples from one stack — substitute your own
+# ("go test ./...", "bundle exec rspec", "cargo clippy", "npm test", …).
+
+# [checks.typecheck]
+# cwd = "frontend"                # relative to git root
+# run = "npm run typecheck"
+# when = ["post-implement", "pre-commit"]
+# timeout_minutes = 10
+# grep = "error TS\\d+"           # optional: regex extracting the actionable lines on failure
+# tail_lines = 8                  # fallback failure-tail length
+
+# [checks.tests]
+# cwd = "backend"
+# run = "uv run pytest -q ${targets:-test/unit}"
+# when = ["post-implement", "pre-commit"]
+# timeout_minutes = 20
+# When the full suite needs services the working copy lacks (a live DB, queues), give
+# {targets} a hermetic default as above — otherwise an unscoped post-implement check fails
+# on environmental grounds and masks real regressions.
+# Keep the test check on BOTH gates: a post-implement-only test check goes stale the moment
+# review fix-ups land, and the pre-commit gate then passes on typecheck alone.
+
+# ---- routing: task class -> ordered executor preference ----
+# Selection algorithm: references/routing.md.
+
+[routing]
+mechanical    = ["sonnet"]
+feature       = ["sonnet"]
+refactor_wide = ["sonnet"]
+gnarly        = ["opus"]
+review        = ["opus"]
+smoke_test    = ["opus"]
+escalation    = ["sonnet", "opus"]   # generic cheap -> mid -> frontier ladder
+notes = """
+Prefer the cheapest tagged-capable executor. Escalate only after a tightened plan failed
+on the current tier. The reviewer must never share a model with the author.
+"""
