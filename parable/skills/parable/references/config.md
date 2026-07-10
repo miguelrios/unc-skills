@@ -51,7 +51,7 @@ Unknown `type` values fail validation loudly (future harnesses will extend this 
 |---|---|---|
 | `provider` | required | a `[providers.*]` id |
 | `model` | required | provider-form model id |
-| `effort` | `high` | `minimal`–`xhigh`; ALWAYS set it explicitly — parable pins it on dispatch precisely so runs never inherit the local user's harness config, which would make cost non-reproducible across machines. pi executors map it to `--thinking` and additionally accept `off`. `parable-run.sh --effort <level>` overrides it for one dispatch |
+| `effort` | `high` | `minimal`–`ultra` (`max`/`ultra` exist on GPT-5.6-class models; `ultra` flips codex into proactive multi-agent delegation — the executor spawns its own subagent threads, highest per-turn burn, so reserve it for deliberately dispatched batch clusters); ALWAYS set it explicitly — parable pins it on dispatch precisely so runs never inherit the local user's harness config, which would make cost non-reproducible across machines. pi executors map it to `--thinking`, additionally accept `off`, and cap at `max` (no `ultra`). `parable-run.sh --effort <level>` overrides it for one dispatch |
 | `reasoning` | true | pi only: the generated model entry's reasoning flag |
 | `model_overrides` | `{}` | pi only: raw fields merged into the generated model entry last (`maxTokens`, model-level `compat`, …) — pi's analog of `extra_config` |
 | `cost` | — | `{ in, out, cache_in }` $/Mtok; informational + tie-breaks |

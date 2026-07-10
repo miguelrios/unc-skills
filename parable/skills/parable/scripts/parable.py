@@ -41,8 +41,11 @@ except ImportError:  # pragma: no cover
 SCHEMA_VERSION = 1
 SUPPORTED_PROVIDER_TYPES = ("codex", "codex-native", "subagent", "pi")
 CHECK_WHEN_VALUES = ("post-implement", "pre-commit")
-EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh")
-PI_THINKING_LEVELS = ("off",) + EFFORT_LEVELS  # "off" is pi-only
+EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+# "max"/"ultra" ship with GPT-5.6-class models; "ultra" additionally flips codex into
+# proactive multi-agent delegation (the model spawns its own subagent threads) — a
+# deliberate batch-dispatch setting, not an escalation rung.
+PI_THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")  # pi: "off" extra, no "ultra"
 PI_API_VALUES = ("openai-completions", "openai-responses", "anthropic-messages")
 PI_INSTALL_HINT = ("'pi' not found on PATH — npm i -g @earendil-works/pi-coding-agent "
                    "(requires node >= 22; pi crashes on node 20)")

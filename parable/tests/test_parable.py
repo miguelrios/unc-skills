@@ -73,6 +73,20 @@ class TestValidation(unittest.TestCase):
         problems = parable.validate_config(cfg2)
         self.assertTrue(any("effort='off'" in p for p in problems))
 
+    def test_effort_max_everywhere_ultra_codex_only(self):
+        # "max" is legal for both harnesses.
+        cfg = self.cfg(providers={"cx": {"type": "codex", "base_url": "https://x", "env_key": "K", "wire_api": "responses"},
+                                  "fw": {"type": "pi", "base_url": "https://x", "env_key": "K"}})
+        cfg["executors"]["a"] = {"provider": "cx", "model": "mm", "effort": "max"}
+        cfg["executors"]["b"] = {"provider": "fw", "model": "mm", "effort": "max"}
+        self.assertEqual([p for p in parable.validate_config(cfg) if "effort" in p], [])
+        # "ultra" is codex-only (proactive multi-agent delegation); pi rejects it.
+        cfg["executors"]["a"]["effort"] = "ultra"
+        self.assertEqual([p for p in parable.validate_config(cfg) if "effort" in p], [])
+        cfg["executors"]["b"]["effort"] = "ultra"
+        problems = parable.validate_config(cfg)
+        self.assertTrue(any("effort='ultra'" in p for p in problems))
+
     def test_codex_provider_requires_responses(self):
         cfg = self.cfg(providers={"fw": {"type": "codex", "base_url": "https://x", "env_key": "K", "wire_api": "chat"}})
         problems = parable.validate_config(cfg)

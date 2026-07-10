@@ -64,6 +64,12 @@ The config pins each executor's baseline effort; when the task's role calls for 
 (a mechanical task on a high-effort implementer), override per dispatch with
 `parable-run.sh --effort <level>` instead of editing the config.
 
+`max` and `ultra` (GPT-5.6-class models) sit above `xhigh`. `ultra` is not a bigger `max`:
+it flips codex into proactive multi-agent delegation — the executor spawns its own parallel
+subagent threads inside one dispatch. Use it for deliberately handed-over batch clusters with
+disjoint per-subtask file ownership, never as an escalation rung; it carries the highest
+per-turn burn of any setting.
+
 ## Cost accounting
 
 Run summaries report tokens (and provider-reported cost when available); `cost` fields in
