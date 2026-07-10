@@ -115,6 +115,36 @@ Uses codex's own auth (ChatGPT login or `OPENAI_API_KEY`) and model catalog — 
 injected beyond `model` and effort. This is the zero-risk path: codex's home models run its
 harness exactly as designed.
 
+## Cursor (cursor-agent)
+
+```toml
+[providers.cursor]
+type = "cursor"                 # cursor-agent CLI; no base_url (the CLI owns its endpoint)
+# env_key = "CURSOR_API_KEY"    # optional — this is the default the CLI already reads
+```
+
+A third executor harness alongside codex and pi, driven by the
+[Cursor CLI](https://cursor.com/docs/cli) (`cursor-agent`). Install:
+`curl https://cursor.com/install -fsS | bash`. It reaches two model families you can't get
+elsewhere: **Composer** (Cursor-exclusive — no public API, no gateway) and **Grok** (a genuine
+third model family for adversarial review), plus mirrors of the Claude/GPT catalog.
+
+- **Auth is a subscription**, not metered API keys: a user `CURSOR_API_KEY` draws on that
+  account's Cursor plan. Confirm the tier with `cursor-agent about --format json`.
+- **Effort rides the model slug**, not a flag: `grok-4.5-low|high|xhigh` (and a `-fast` tier);
+  Composer has no effort variant. So set the full slug as `model` and treat `effort` as
+  advisory metadata (parable does not gate it against the codex/pi enum for cursor executors).
+  List slugs with `cursor-agent models` — route by slug, never by display name (the names are
+  shifted, e.g. `grok-4.5-medium` *displays* as "Grok 4.5 Low").
+- parable dispatches it as `cursor-agent -p --output-format stream-json --force --trust`, plan
+  on stdin. `--force` is required or headless edits are proposed-only and the run stalls on
+  approval. Sessions resume headlessly by chat id (`--resume <id>`), captured from the stream.
+- Reviews run in `--plan` mode (read-only: analyze, no edits).
+- **Small budget.** A Cursor plan's included budget (~$20/cycle on Pro) is orders of magnitude
+  smaller than the Claude/ChatGPT plan windows and bills overage in arrears — treat cursor
+  executors as a boutique lane (a fast mechanical burst, a third-family review), not bulk.
+  `parable-usage.sh` shows the dollars remaining this cycle.
+
 ## Claude subagents
 
 ```toml
@@ -125,6 +155,30 @@ type = "subagent"
 Executors on this provider are dispatched with the Agent tool inside the orchestrating
 session — no API keys, no codex. `parable.py run` refuses them by design; the brain owns
 subagent dispatch directly.
+
+## Reading subscription headroom (parable-usage.sh)
+
+Each subscription pool publishes its own remaining headroom over an authenticated endpoint the
+official CLI already calls — `parable-usage.sh` reads them for zero model tokens and no turn,
+using the same on-disk credential the local harness stored (it never mints or writes a token):
+
+- **claude** — `GET https://api.anthropic.com/api/oauth/usage`, bearer
+  `~/.claude/.credentials.json → .claudeAiOauth.accessToken` (needs `user:profile` scope),
+  `anthropic-beta: oauth-2025-04-20`. Windows: `five_hour`, `seven_day`, `seven_day_opus`
+  (`utilization` 0–100, `resets_at` ISO).
+- **codex** — `GET https://chatgpt.com/backend-api/wham/usage`, bearer
+  `~/.codex/auth.json → .tokens.access_token` + header `ChatGPT-Account-Id: .tokens.account_id`.
+  Windows: `rate_limit.primary_window` (5h), `secondary_window` (weekly) (`used_percent`,
+  `reset_at` unix). API-key auth (`OPENAI_API_KEY` in auth.json) has no plan usage — reports unknown.
+- **cursor** — `POST https://api2.cursor.sh/auth/exchange_user_api_key` (bearer `$CURSOR_API_KEY`)
+  → `accessToken`, then `POST …/aiserver.v1.DashboardService/GetCurrentPeriodUsage` → `planUsage`
+  `{limit, remaining}` cents. The raw API key is NOT accepted on the RPC directly — the exchange
+  step is mandatory.
+
+All three are internal/undocumented (the same ones the CLIs call); shapes can drift across CLI
+versions, so every probe fails soft to `unknown` on a missing credential, a stale-token 401, or
+a shape change — the tool informs routing, it never blocks it. A 401 means the token is stale;
+run any command for that CLI (or `codex login status`) to refresh it, then re-probe.
 
 ## Driving codex directly (beyond parable.py)
 

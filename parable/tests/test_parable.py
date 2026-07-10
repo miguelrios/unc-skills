@@ -473,5 +473,172 @@ class TestFailureLines(unittest.TestCase):
         self.assertEqual(parable.failure_lines(check, res), ["c", "d"])
 
 
+CURSOR_PROV = {"type": "cursor"}
+CURSOR_EX = {"provider": "cur", "model": "composer-2.5", "tags": ["mechanical"]}
+
+
+class TestCursorValidation(unittest.TestCase):
+    def cfg(self):
+        c = json.loads(json.dumps(parable.BUILTIN_DEFAULTS))
+        c["providers"]["cur"] = dict(CURSOR_PROV)
+        c["executors"]["composer"] = dict(CURSOR_EX)
+        return c
+
+    def test_cursor_provider_is_valid(self):
+        self.assertEqual(parable.validate_config(self.cfg()), [])
+
+    def test_cursor_rejects_base_url(self):
+        c = self.cfg()
+        c["providers"]["cur"]["base_url"] = "https://x"
+        self.assertTrue(any("type=cursor takes no base_url" in p for p in parable.validate_config(c)))
+
+    def test_cursor_effort_is_advisory_not_gated(self):
+        # cursor pins effort in the slug, so any effort string is accepted (no enum gate).
+        c = self.cfg()
+        c["executors"]["composer"]["effort"] = "high"      # a codex enum value
+        self.assertEqual([p for p in parable.validate_config(c) if "effort" in p], [])
+        c["executors"]["composer"]["effort"] = "banana"    # not in any enum — still fine for cursor
+        self.assertEqual([p for p in parable.validate_config(c) if "effort" in p], [])
+
+    def test_cursor_env_status(self):
+        import os as _os
+        c = self.cfg()
+        old = _os.environ.pop("CURSOR_API_KEY", None)
+        try:
+            self.assertEqual(parable.env_key_status(c, "composer"), "missing CURSOR_API_KEY")
+            _os.environ["CURSOR_API_KEY"] = "x"
+            self.assertEqual(parable.env_key_status(c, "composer"), "ready")
+        finally:
+            _os.environ.pop("CURSOR_API_KEY", None)
+            if old is not None:
+                _os.environ["CURSOR_API_KEY"] = old
+
+
+class TestCursorArgv(unittest.TestCase):
+    def cfg(self):
+        c = json.loads(json.dumps(parable.BUILTIN_DEFAULTS))
+        c["providers"]["cur"] = dict(CURSOR_PROV)
+        c["executors"]["composer"] = dict(CURSOR_EX)
+        return c
+
+    def test_run_argv_shape(self):
+        argv, overrides = parable.build_cursor_argv(self.cfg(), "composer", Path("/w"))
+        self.assertEqual(argv[:2], ["cursor-agent", "-p"])
+        joined = " ".join(argv)
+        self.assertIn("--output-format stream-json", joined)
+        self.assertIn("--force", joined)
+        self.assertIn("--model composer-2.5", joined)
+        self.assertIn("--workspace /w", joined)
+        self.assertNotIn("--resume", joined)  # fresh run has no chat id
+
+    def test_resume_replays_overrides_plus_chat(self):
+        _, overrides = parable.build_cursor_argv(self.cfg(), "composer", Path("/w"))
+        resume = ["cursor-agent", "-p"] + overrides + ["--resume", "chat-77"]
+        joined = " ".join(resume)
+        self.assertIn("--model composer-2.5", joined)   # model survives the resume
+        self.assertIn("--resume chat-77", joined)
+
+
+class TestCursorEventParsing(unittest.TestCase):
+    def write(self, tmp, events):
+        p = Path(tmp) / "h.jsonl"
+        p.write_text("\n".join(json.dumps(e) for e in events))
+        return p
+
+    def test_parse_normalizes_to_codex_keys(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self.write(tmp, [
+                {"type": "system", "subtype": "init", "session_id": "cur-1", "model": "Composer 2.5"},
+                {"type": "tool_call", "subtype": "started", "call_id": "t1"},
+                {"type": "tool_call", "subtype": "completed", "call_id": "t1"},
+                {"type": "assistant", "message": {"role": "assistant",
+                    "content": [{"type": "text", "text": "interim"}]}},
+                {"type": "result", "subtype": "success", "is_error": False,
+                 "result": "Done. Created file.", "session_id": "cur-1",
+                 "usage": {"inputTokens": 8014, "outputTokens": 147,
+                           "cacheReadTokens": 24388, "cacheWriteTokens": 0}},
+            ])
+            facts = parable.parse_cursor_events(p)
+        self.assertEqual(facts["session_id"], "cur-1")
+        self.assertEqual(facts["phase"], "complete")
+        self.assertEqual(facts["turns"], 1)
+        self.assertEqual(facts["tool_calls"], 1)   # only 'started' counts, not 'completed'
+        self.assertEqual(facts["last_message"], "Done. Created file.")  # result text wins over interim
+        self.assertEqual(facts["usage"]["input_tokens"], 8014)
+        self.assertEqual(facts["usage"]["cached_input_tokens"], 24388)
+        self.assertEqual(facts["usage"]["output_tokens"], 147)
+
+    def test_error_result(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self.write(tmp, [
+                {"type": "system", "subtype": "init", "session_id": "e1"},
+                {"type": "result", "subtype": "error", "is_error": True,
+                 "result": "model refused", "session_id": "e1"},
+            ])
+            facts = parable.parse_cursor_events(p)
+        self.assertEqual(facts["phase"], "error")
+        self.assertEqual(facts["errors"], ["model refused"])
+
+    def test_harness_dispatch(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self.write(tmp, [{"type": "system", "subtype": "init", "session_id": "z"}])
+            self.assertEqual(parable.parse_harness_events("cursor", p)["session_id"], "z")
+
+
+class TestPoolsInConfig(unittest.TestCase):
+    def test_maps_provider_types_to_pools(self):
+        c = json.loads(json.dumps(parable.BUILTIN_DEFAULTS))  # subagent-only -> claude
+        self.assertEqual(parable.pools_in_config(c), ["claude"])
+        c["providers"]["oai"] = {"type": "codex-native"}
+        c["executors"]["terra"] = {"provider": "oai", "model": "gpt-5.6-terra"}
+        c["providers"]["cur"] = dict(CURSOR_PROV)
+        c["executors"]["composer"] = dict(CURSOR_EX)
+        self.assertEqual(parable.pools_in_config(c), ["claude", "codex", "cursor"])
+
+    def test_metered_providers_have_no_pool(self):
+        c = json.loads(json.dumps(parable.BUILTIN_DEFAULTS))
+        c["providers"]["fw"] = dict(PI_PROV)
+        c["executors"]["minimax"] = dict(PI_EX)
+        # pi/codex (API-key) providers are not subscription pools -> only claude remains
+        self.assertEqual(parable.pools_in_config(c), ["claude"])
+
+
+class TestUsageProbe(unittest.TestCase):
+    """parable_usage fails soft — a missing credential is 'unknown', never an exception."""
+    def setUp(self):
+        import importlib, sys as _sys
+        _sys.path.insert(0, str(Path(parable.__file__).resolve().parent))
+        self.pu = importlib.import_module("parable_usage")
+
+    def test_missing_credentials_are_unknown_not_error(self):
+        import os as _os
+        saved = {k: _os.environ.pop(k, None) for k in ("CURSOR_API_KEY", "CLAUDE_CONFIG_DIR", "CODEX_HOME")}
+        _os.environ["CLAUDE_CONFIG_DIR"] = "/nonexistent-xyz"
+        _os.environ["CODEX_HOME"] = "/nonexistent-xyz"
+        try:
+            r = {x["pool"]: x for x in self.pu.probe_all()}
+            self.assertEqual(r["claude"]["status"], "unknown")
+            self.assertEqual(r["codex"]["status"], "unknown")
+            self.assertEqual(r["cursor"]["status"], "unknown")
+            # a soft failure still produces a formattable report
+            self.assertIn("unknown", self.pu.format_report(list(r.values())))
+        finally:
+            _os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            _os.environ.pop("CODEX_HOME", None)
+            for k, v in saved.items():
+                if v is not None:
+                    _os.environ[k] = v
+
+    def test_worst_used_pct_picks_tightest_window(self):
+        report = {"pool": "codex", "status": "ok",
+                  "windows": [{"window": "5h", "used_pct": 12.0},
+                              {"window": "7d", "used_pct": 88.0}]}
+        self.assertEqual(self.pu.worst_used_pct(report), 88.0)
+        self.assertIsNone(self.pu.worst_used_pct({"pool": "x", "windows": []}))
+
+
 if __name__ == "__main__":
     unittest.main()

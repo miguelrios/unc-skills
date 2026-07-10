@@ -1,0 +1,101 @@
+# Three-subscription cast: Claude plan + ChatGPT plan + Cursor plan, load-balanced by
+# live headroom (`parable-usage.sh`). No metered API keys — every executor rides a
+# subscription, marginal cost zero until a window/budget is spent.
+#   requires: codex CLI (ChatGPT login), cursor-agent (curl https://cursor.com/install -fsS | bash,
+#   then export CURSOR_API_KEY), and Claude Code for the subagents.
+[parable]
+version = 1
+default_executor = "terra"
+default_reviewer = "opus"
+
+[providers.claude]
+type = "subagent"
+
+[providers.openai]
+type = "codex-native"          # ChatGPT plan
+
+[providers.cursor]
+type = "cursor"                # Cursor plan; auths via CURSOR_API_KEY
+
+# ---- Claude plan ----
+[executors.sonnet]
+provider = "claude"
+model = "sonnet"
+cost = { in = 0.0, out = 0.0 }
+tags = ["implementer", "reader"]
+use_for = "Feature/mechanical implementer and the free reader; terra's peer — pick by pool headroom."
+avoid_for = "Repo-wide refactors needing huge context. Claude-window burn also gates the brain."
+
+[executors.opus]
+provider = "claude"
+model = "opus"
+cost = { in = 0.0, out = 0.0 }
+tags = ["reviewer", "smoke-test", "adversarial"]
+use_for = "Adversarial reviewer of non-Claude diffs; smoke-testing the running app."
+avoid_for = "Cheap mechanical edits; reviewing Claude-authored diffs (same family)."
+
+# ---- ChatGPT plan ----
+[executors.terra]
+provider = "openai"
+model = "gpt-5.6-terra"
+effort = "high"
+cost = { in = 0.0, out = 0.0 }
+tags = ["implementer", "default"]
+use_for = "Default feature implementer — sonnet's peer on the other plan."
+avoid_for = "Trivial renames (luna); deep ambiguous debugging (sol)."
+
+[executors.luna]
+provider = "openai"
+model = "gpt-5.6-luna"
+effort = "medium"
+cost = { in = 0.0, out = 0.0 }
+tags = ["cheap-mechanical", "first-pass"]
+use_for = "Mechanical edits with a precise spec; cheap first-pass review of routine diffs."
+avoid_for = "Design judgment; high-blast-radius review."
+
+[executors.sol]
+provider = "openai"
+model = "gpt-5.6-sol"
+effort = "xhigh"
+cost = { in = 0.0, out = 0.0 }
+tags = ["frontier", "gnarly", "adversarial"]
+use_for = "Gnarly debugging, cross-cutting design tension; adversarial reviewer of Claude diffs."
+avoid_for = "Everyday features (terra); mechanical work (luna)."
+max_minutes = 30
+
+# ---- Cursor plan (boutique lane — small budget, watch `parable-usage.sh`) ----
+[executors.composer]
+provider = "cursor"
+model = "composer-2.5"          # no effort variant; Cursor-exclusive fast agentic model
+cost = { in = 0.50, out = 2.50 }
+tags = ["cheap-mechanical", "fast"]
+use_for = "Fast mechanical bursts with a precise spec when the Cursor cycle has budget."
+avoid_for = "Anything when Cursor's cycle budget is low; luna/minimax cover mechanical without it."
+max_minutes = 15
+
+[executors.grok]
+provider = "cursor"
+model = "grok-4.5-high"         # effort rides the slug: -low/-high/-xhigh (+ -fast)
+cost = { in = 2.00, out = 6.00 }
+tags = ["feature", "adversarial", "third-family"]
+use_for = "Third-family adversarial reviewer — the tiebreaker when Claude and OpenAI disagree."
+avoid_for = "Routine bulk work (drains the small Cursor budget fast)."
+max_minutes = 25
+
+# ---- routing: MENUS of capable peers spanning three pools; balance by `parable-usage.sh` ----
+[routing]
+mechanical    = ["luna", "sonnet", "composer"]
+feature       = ["terra", "sonnet", "grok"]
+refactor_wide = ["sol", "sonnet"]
+gnarly        = ["sol", "opus"]
+review        = ["luna", "sonnet", "terra", "grok", "opus", "sol"]
+smoke_test    = ["opus", "terra"]
+escalation    = ["luna", "terra", "sonnet", "sol", "opus"]
+notes = """
+Chains are menus, not ladders. Read `parable-usage.sh` before a batch (zero model tokens):
+Claude 5h/7d %, ChatGPT 5h/7d %, Cursor $ left this cycle. Route each dispatch to the
+freest pool among the executors capable of the task. Guard the Claude window — it also
+funds the orchestrator. Cursor is boutique (small budget, overage bills in arrears): use
+composer/grok for fast bursts and third-family review, not bulk. Reviewer never shares the
+author's family when a peer exists; grok is the cross-family tiebreaker.
+"""

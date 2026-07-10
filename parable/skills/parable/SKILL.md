@@ -24,12 +24,39 @@ ladder live in `references/routing.md`. No config file means Tier-0 defaults:
 `sonnet` implements and `opus` reviews as Claude subagents, no keys needed — and with no
 configured checks, `parable-verify.sh` passes vacuously until the user declares some.
 
+## Load-balancing across subscriptions (the point of a multi-pool cast)
+
+The reason to configure more than one pool is that each subscription is a separate,
+mostly-fixed budget, and the expensive failure is exhausting one while another sits idle.
+A cast can span three subscription pools — the Claude plan (subagent executors), a ChatGPT
+plan (`codex-native` executors), and a Cursor plan (`cursor` executors) — plus metered
+API-key providers (codex/pi) as an overflow valve. Marginal cost on the subscription pools is
+zero until their window/budget is spent, so routing is not about per-token price; it is about
+**keeping every pool's headroom above water and never starving the one that also funds you**
+(your own orchestration tokens draw on the Claude plan).
+
+`scripts/parable-usage.sh` makes this measurable instead of reactive: it reads each pool's own
+usage endpoint — Claude's 5h/7d window %, ChatGPT's 5h/7d window %, Cursor's dollars left this
+cycle — for zero model tokens and no turn. Read it before a batch and whenever a pool feels
+tight, and route the next dispatch to the pool with the most room among the executors capable of
+the task. The routing chains in the config are **menus of capable peers, not priority ladders**:
+the config author writes which executors can do each task class; you pick among them by live
+headroom. Don't wait for a throttle error to learn a pool is empty — that error is the failure
+this tool exists to prevent. The per-pool selection detail lives in `references/routing.md`.
+
 ## The tools
 
+- `scripts/parable-usage.sh [--all] [--json]` — live subscription headroom for every pool the
+  cast routes to (Claude plan window %, ChatGPT plan window %, Cursor dollars-left-this-cycle),
+  read from each harness's own usage endpoint for zero model tokens and no turn. Read it BEFORE
+  a batch and whenever a pool feels tight: this is the measured load-balancing signal, so you
+  spread work by headroom instead of discovering a spent pool through a throttle error. A pool
+  at ≥80% used prints `TIGHT` and stops being a default. Fails soft — an unreadable credential
+  reports `unknown` (route as if it has room), never an error.
 - `scripts/parable-run.sh <executor> <plan.md> [workdir] [--effort <level>]` — dispatch a
-  codex- or pi-backed executor headlessly; prints status, session id, turns, tokens and cost,
-  last message, and the run dir. Subagent executors (`sonnet`, `opus`, …) dispatch via the
-  Agent tool with the plan as the prompt — use the general-purpose agent type with the
+  codex-, pi-, or cursor-backed executor headlessly; prints status, session id, turns, tokens
+  and cost, last message, and the run dir. Subagent executors (`sonnet`, `opus`, …) dispatch via
+  the Agent tool with the plan as the prompt — use the general-purpose agent type with the
   executor's model; custom agent-type names are install-specific.
 - `scripts/parable-resume.sh <run-dir> "<message>"` — continue an executor's existing session
   (caching economics: facts below). Sessions do not transfer between executors.

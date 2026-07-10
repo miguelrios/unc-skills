@@ -7,6 +7,7 @@ harness logs; it calls these subcommands and reads their compact reports.
 Subcommands:
   config [--validate] [--json]   Show merged config summary the brain reads at session start
   list                           One line per executor: id, model, cost, status, tags
+  usage [--all] [--json]         Live subscription headroom per pool (zero model tokens)
   run <executor> <plan> [workdir] [--slug S] [--effort E]   Dispatch a plan to a codex- or pi-backed executor
   resume <run-dir|uuid> <delta prompt>            Continue a prior run's session with a fix-up
   status <run-dir>               6- or 7-line status parsed from the run's event stream
@@ -39,7 +40,7 @@ except ImportError:  # pragma: no cover
         sys.exit("parable requires Python >= 3.11 (or `pip install tomli`)")
 
 SCHEMA_VERSION = 1
-SUPPORTED_PROVIDER_TYPES = ("codex", "codex-native", "subagent", "pi")
+SUPPORTED_PROVIDER_TYPES = ("codex", "codex-native", "subagent", "pi", "cursor")
 CHECK_WHEN_VALUES = ("post-implement", "pre-commit")
 EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 # "max"/"ultra" ship with GPT-5.6-class models; "ultra" additionally flips codex into
@@ -199,6 +200,10 @@ def validate_config(cfg: dict) -> list[str]:
             api = prov.get("api", "openai-completions")
             if api not in PI_API_VALUES:
                 problems.append(f"provider '{pid}': api='{api}' (supported: {', '.join(PI_API_VALUES)})")
+        if ptype == "cursor":
+            # cursor-agent authenticates via CURSOR_API_KEY by default; env_key overrides the name.
+            if prov.get("base_url"):
+                problems.append(f"provider '{pid}': type=cursor takes no base_url (cursor-agent owns its endpoint)")
     for eid, ex in executors.items():
         pid = ex.get("provider")
         if pid not in providers:
@@ -208,8 +213,16 @@ def validate_config(cfg: dict) -> list[str]:
         effort = ex.get("effort")
         if effort is not None:
             ptype = providers.get(pid, {}).get("type")
-            allowed = PI_THINKING_LEVELS if ptype == "pi" else EFFORT_LEVELS
-            if effort not in allowed:
+            # cursor pins effort inside the model slug (e.g. grok-4.5-high) and some
+            # first-party models (composer) have no effort variant — so effort is
+            # advisory metadata there, not gated against the codex/pi enum.
+            if ptype == "cursor":
+                allowed = None
+            elif ptype == "pi":
+                allowed = PI_THINKING_LEVELS
+            else:
+                allowed = EFFORT_LEVELS
+            if allowed is not None and effort not in allowed:
                 problems.append(f"executor '{eid}': effort='{effort}' (allowed for {ptype}: {', '.join(allowed)})")
     for klass, chain in cfg.get("routing", {}).items():
         if klass == "notes" or not isinstance(chain, list):
@@ -244,6 +257,10 @@ def env_key_status(cfg: dict, executor_id: str) -> str:
         return "subagent"
     if ptype == "codex-native":
         return "codex-native"
+    # cursor authenticates via CURSOR_API_KEY unless env_key overrides the name
+    if ptype == "cursor":
+        key = prov.get("env_key", "CURSOR_API_KEY")
+        return "ready" if os.environ.get(key) else f"missing {key}"
     # codex and pi providers both authenticate via a named env var
     key = prov.get("env_key", "")
     return "ready" if os.environ.get(key) else f"missing {key}"
@@ -420,9 +437,99 @@ def parse_pi_events(jsonl_path: Path) -> dict:
     return facts
 
 
+# ---------------------------------------------------------------------------
+# cursor harness — cursor-agent -p --output-format stream-json
+# ---------------------------------------------------------------------------
+
+CURSOR_DEFAULT_ENV_KEY = "CURSOR_API_KEY"
+
+
+def build_cursor_argv(cfg: dict, executor_id: str, workdir: Path,
+                      resume_chat_id: str | None = None) -> tuple[list[str], list[str]]:
+    """cursor-agent headless dispatch. effort is pinned inside the model slug
+    (e.g. grok-4.5-high); composer has no effort variant so the bare slug is used.
+    Returns (argv, overrides) — overrides carries the model+workspace flags a
+    resume must replay to reopen the same chat."""
+    ex = cfg["executors"][executor_id]
+    overrides = ["--output-format", "stream-json", "--force",
+                 "--model", ex["model"], "--workspace", str(workdir), "--trust"]
+    argv = ["cursor-agent", "-p"] + overrides
+    if resume_chat_id:
+        argv += ["--resume", resume_chat_id]
+    return argv, overrides
+
+
+def cursor_env(cfg: dict, executor_id: str) -> dict:
+    """cursor-agent reads CURSOR_API_KEY (or the provider's env_key alias) from
+    the environment — passed through, never written to disk."""
+    ex = cfg["executors"].get(executor_id, {})
+    prov = cfg["providers"].get(ex.get("provider"), {})
+    key_name = prov.get("env_key", CURSOR_DEFAULT_ENV_KEY)
+    env = dict(os.environ)
+    if key_name != CURSOR_DEFAULT_ENV_KEY and os.environ.get(key_name):
+        env[CURSOR_DEFAULT_ENV_KEY] = os.environ[key_name]
+    return env
+
+
+def parse_cursor_events(jsonl_path: Path) -> dict:
+    """Compact facts from a cursor-agent stream-json stream, normalized to the
+    same keys codex/pi emit. Event shapes (verified live):
+      {"type":"system","subtype":"init","session_id":...,"model":...}
+      {"type":"tool_call","subtype":"started"|"completed",...}
+      {"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":...}]}}
+      {"type":"result","subtype":"success","is_error":bool,"session_id":...,
+       "usage":{"inputTokens","outputTokens","cacheReadTokens","cacheWriteTokens"}}
+    """
+    facts: dict = {
+        "session_id": None, "turns": 0, "tool_calls": 0,
+        "last_message": "", "errors": [], "usage": {}, "phase": "unknown",
+    }
+    if not jsonl_path.is_file():
+        return facts
+    with open(jsonl_path, errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            t = d.get("type")
+            if d.get("session_id") and not facts["session_id"]:
+                facts["session_id"] = d["session_id"]
+            if t == "system" and d.get("subtype") == "init":
+                facts["phase"] = "running"
+                facts["turns"] = 1  # cursor-agent runs one turn per -p invocation
+            elif t == "tool_call" and d.get("subtype") == "started":
+                facts["tool_calls"] += 1
+            elif t == "assistant":
+                texts = [c.get("text", "") for c in d.get("message", {}).get("content", [])
+                         if c.get("type") == "text"]
+                if texts and texts[-1]:
+                    facts["last_message"] = texts[-1]
+            elif t == "result":
+                if d.get("is_error"):
+                    facts["phase"] = "error"
+                    facts["errors"].append(str(d.get("result") or d.get("subtype"))[:200])
+                else:
+                    facts["phase"] = "complete"
+                    if d.get("result"):
+                        facts["last_message"] = str(d["result"])
+                usage = d.get("usage", {})
+                for src, dst in (("inputTokens", "input_tokens"),
+                                 ("cacheReadTokens", "cached_input_tokens"),
+                                 ("outputTokens", "output_tokens")):
+                    if isinstance(usage.get(src), (int, float)):
+                        facts["usage"][dst] = facts["usage"].get(dst, 0) + usage[src]
+    return facts
+
+
 def parse_harness_events(harness: str, jsonl_path: Path) -> dict:
     if harness == "pi":
         return parse_pi_events(jsonl_path)
+    if harness == "cursor":
+        return parse_cursor_events(jsonl_path)
     return parse_events(jsonl_path)
 
 
@@ -441,8 +548,12 @@ def run_harness_process(argv: list[str], events_path: Path, harness: str,
         except subprocess.TimeoutExpired:
             return 124, "TIMEOUT"
         except FileNotFoundError:
-            sys.exit(f"parable: {PI_INSTALL_HINT}" if harness == "pi"
-                     else "parable: 'codex' not found on PATH — install the codex CLI")
+            if harness == "pi":
+                sys.exit(f"parable: {PI_INSTALL_HINT}")
+            if harness == "cursor":
+                sys.exit("parable: 'cursor-agent' not found on PATH — "
+                         "install with: curl https://cursor.com/install -fsS | bash")
+            sys.exit("parable: 'codex' not found on PATH — install the codex CLI")
     return proc.returncode, ("OK" if proc.returncode == 0 else "FAILED")
 
 
@@ -576,6 +687,58 @@ def cmd_list(_args: argparse.Namespace) -> int:
     return 0
 
 
+# Which usage probe backs each provider type — subscription-covered providers only.
+# Metered providers (codex/pi with an API key) have no plan headroom to read.
+POOL_FOR_PROVIDER_TYPE = {"subagent": "claude", "codex-native": "codex", "cursor": "cursor"}
+
+
+def pools_in_config(cfg: dict) -> list[str]:
+    """The subscription pools this cast actually routes to, in a stable order."""
+    seen: set[str] = set()
+    for ex in cfg.get("executors", {}).values():
+        ptype = cfg.get("providers", {}).get(ex.get("provider"), {}).get("type")
+        pool = POOL_FOR_PROVIDER_TYPE.get(ptype)
+        if pool:
+            seen.add(pool)
+    return [p for p in ("claude", "codex", "cursor") if p in seen]
+
+
+def cursor_env_key_in_config(cfg: dict) -> str:
+    for ex in cfg.get("executors", {}).values():
+        prov = cfg.get("providers", {}).get(ex.get("provider"), {})
+        if prov.get("type") == "cursor":
+            return prov.get("env_key", CURSOR_DEFAULT_ENV_KEY)
+    return CURSOR_DEFAULT_ENV_KEY
+
+
+def cmd_usage(args: argparse.Namespace) -> int:
+    """Live subscription headroom across the pools this cast routes to, read
+    from each harness's own usage endpoint — zero model tokens, no turn. The
+    brain reads this BEFORE routing so load-balancing is measured, not guessed
+    from throttle-after-the-fact."""
+    try:
+        import parable_usage
+    except ImportError:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import parable_usage  # noqa: E402
+    cfg, _ = load_config(git_root())
+    pools = ["claude", "codex", "cursor"] if args.all else pools_in_config(cfg)
+    if not pools:
+        print("parable usage — no subscription-covered pools in this cast (nothing to probe)")
+        return 0
+    reports = parable_usage.probe_all(pools, cursor_env_key=cursor_env_key_in_config(cfg))
+    if args.json:
+        print(json.dumps(reports, indent=1))
+        return 0
+    print("parable usage — live subscription headroom (zero model tokens)")
+    print(parable_usage.format_report(reports))
+    tight = [r["pool"] for r in reports
+             if r.get("status") == "ok" and (parable_usage.worst_used_pct(r) or 0) >= 80]
+    if tight:
+        print(f"\nTIGHT: {', '.join(tight)} — route bulk work to a pool with more room.")
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     root = git_root()
     cfg, _ = load_config(root)
@@ -600,6 +763,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         sys.exit(f"parable: executor '{eid}' is a Claude subagent — dispatch it via the Agent tool, not parable.py run")
     if prov.get("type") in ("codex", "pi") and not os.environ.get(prov.get("env_key", "")):
         sys.exit(f"parable: env var {prov.get('env_key')} is not set (required by executor '{eid}')")
+    if prov.get("type") == "cursor":
+        key_name = prov.get("env_key", CURSOR_DEFAULT_ENV_KEY)
+        if not os.environ.get(key_name):
+            sys.exit(f"parable: env var {key_name} is not set (required by executor '{eid}')")
     plan_path = Path(args.plan)
     if not plan_path.is_file():
         sys.exit(f"parable: plan file not found: {plan_path}")
@@ -612,11 +779,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     (run_dir / "plan.md").write_text(
         WORKSPACE_CONTRACT + "\n\n" + plan_path.read_text(errors="replace"))
 
-    harness = "pi" if prov.get("type") == "pi" else "codex"
+    harness = {"pi": "pi", "cursor": "cursor"}.get(prov.get("type"), "codex")
     if harness == "pi":
         session_id = str(uuid.uuid4())
         write_pi_agent_dir(run_dir, build_pi_models_json(ex["provider"], prov, ex, eid))
         argv, overrides = build_pi_argv(cfg, eid, run_dir, session_id, run_dir / "plan.md")
+    elif harness == "cursor":
+        session_id = None  # cursor-agent mints the chat id; captured from the stream
+        argv, overrides = build_cursor_argv(cfg, eid, workdir)
     else:
         session_id = None
         argv, overrides = build_run_argv(cfg, eid, workdir, run_dir / "last-message.txt")
@@ -638,6 +808,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     if harness == "pi":
         exit_code, status = run_harness_process(argv, events_path, harness, max_minutes,
                                                 cwd=workdir, env=pi_env(run_dir))
+    elif harness == "cursor":
+        with open(run_dir / "plan.md", "rb") as plan_f:
+            exit_code, status = run_harness_process(argv, events_path, harness, max_minutes,
+                                                    cwd=workdir, env=cursor_env(cfg, eid), stdin=plan_f)
     else:
         with open(run_dir / "plan.md", "rb") as plan_f:
             exit_code, status = run_harness_process(argv, events_path, harness, max_minutes,
@@ -679,11 +853,20 @@ def cmd_resume(args: argparse.Namespace) -> int:
     events_path = run_dir / f"resume-{n}.jsonl"
     harness = meta.get("harness", "codex")
     env = None
+    resume_stdin = subprocess.DEVNULL
     if harness == "pi":
         # Replayed overrides carry --session-dir/--session-id: same id in the
         # same dir opens the existing session and continues it.
         argv = ["pi", "-p"] + meta.get("overrides", []) + [args.prompt]
         env = pi_env(run_dir)
+    elif harness == "cursor":
+        # Replay model/workspace overrides + --resume <chat id>; the delta prompt
+        # goes in on stdin (cursor-agent reads a piped prompt), same as a fresh run.
+        argv = (["cursor-agent", "-p"] + meta.get("overrides", [])
+                + ["--resume", meta["session_id"]])
+        env = cursor_env(cfg, meta.get("executor"))
+        (run_dir / f"resume-{n}-prompt.txt").write_text(args.prompt)
+        resume_stdin = open(run_dir / f"resume-{n}-prompt.txt", "rb")
     else:
         # `codex exec resume` does not accept -C; the session runs in the process cwd.
         argv = ["codex", "exec", "resume", meta["session_id"], "--yolo", "--json"]
@@ -693,7 +876,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
     ex = cfg["executors"].get(meta.get("executor"), {})
     max_minutes = float(ex.get("max_minutes", 20))
     exit_code, status = run_harness_process(argv, events_path, harness, max_minutes,
-                                            cwd=meta["workdir"], env=env)
+                                            cwd=meta["workdir"], env=env, stdin=resume_stdin)
     meta["resumes"] = n
     meta["exit_code"] = exit_code
     meta["status"] = status
@@ -883,6 +1066,8 @@ def cmd_review(args: argparse.Namespace) -> int:
         sys.exit(f"parable: executor '{eid}' is a Claude subagent — review via the Agent tool")
     if prov.get("type") in ("codex", "pi") and not os.environ.get(prov.get("env_key", "")):
         sys.exit(f"parable: env var {prov.get('env_key')} is not set (required by reviewer '{eid}')")
+    if prov.get("type") == "cursor" and not os.environ.get(prov.get("env_key", CURSOR_DEFAULT_ENV_KEY)):
+        sys.exit(f"parable: env var {prov.get('env_key', CURSOR_DEFAULT_ENV_KEY)} is not set (required by reviewer '{eid}')")
     if args.author:
         author = cfg["executors"].get(args.author, {})
         if author.get("model") == ex.get("model"):
@@ -931,6 +1116,8 @@ def cmd_review(args: argparse.Namespace) -> int:
     review_dir.mkdir(parents=True, exist_ok=True)
     if prov.get("type") == "pi":
         rc, out = review_via_pi(cfg, eid, ex, prov, review_dir, workdir, prompt, max_minutes, effort)
+    elif prov.get("type") == "cursor":
+        rc, out = review_via_cursor(cfg, eid, ex, review_dir, workdir, prompt, max_minutes)
     else:
         rc, out = review_via_codex(ex, prov, workdir, prompt, max_minutes, effort)
     # The full review always lands in an artifact file: stdout tails are lossy
@@ -969,6 +1156,25 @@ def review_via_pi(cfg: dict, eid: str, ex: dict, prov: dict, review_dir: Path,
     return exit_code, out
 
 
+def review_via_cursor(cfg: dict, eid: str, ex: dict, review_dir: Path,
+                      workdir: Path, prompt: str, max_minutes: float) -> tuple[int, str]:
+    """One-shot cursor-agent review in read-only plan mode (--plan: analyze, no
+    edits), the rubric+diff piped on stdin. Effort rides the model slug, so no
+    effort flag here. Returns (exit_code, review_text)."""
+    prompt_file = review_dir / "prompt.md"
+    prompt_file.write_text(prompt)
+    argv = ["cursor-agent", "-p", "--plan", "--output-format", "stream-json",
+            "--model", ex["model"], "--workspace", str(workdir), "--trust"]
+    events_path = review_dir / "harness.jsonl"
+    with open(prompt_file, "rb") as pf:
+        exit_code, status = run_harness_process(argv, events_path, "cursor", max_minutes,
+                                                cwd=workdir, env=cursor_env(cfg, eid), stdin=pf)
+    out = parse_cursor_events(events_path).get("last_message", "").strip()
+    if status == "TIMEOUT" and not out:
+        return 124, ""
+    return exit_code, out
+
+
 def review_via_codex(ex: dict, prov: dict, workdir: Path, prompt: str,
                      max_minutes: float, effort: str) -> tuple[int, str]:
     """Codex review reads the rubric+diff from stdin and answers in prose.
@@ -1001,6 +1207,11 @@ def main() -> int:
 
     p = sub.add_parser("list", help="list executors")
     p.set_defaults(fn=cmd_list)
+
+    p = sub.add_parser("usage", help="live subscription headroom per pool (zero model tokens)")
+    p.add_argument("--all", action="store_true", help="probe all pools, not just those in the cast")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_usage)
 
     p = sub.add_parser("run", help="dispatch a plan to an executor")
     p.add_argument("executor")

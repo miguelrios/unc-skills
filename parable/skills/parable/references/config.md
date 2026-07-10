@@ -34,9 +34,9 @@ Schema is versioned: `[parable] version = 1`. Unknown versions refuse to load.
 
 | Field | Applies to | Meaning |
 |---|---|---|
-| `type` | all | `codex` (custom provider via codex CLI) · `codex-native` (codex's own auth/models) · `pi` (any chat-completions/anthropic/responses endpoint via the pi coding agent CLI) · `subagent` (Claude Agent tool) |
-| `base_url` | codex, pi | API root (codex: must serve `/responses`; pi: whatever `api` says) |
-| `env_key` | codex, pi | NAME of the env var holding the API key — never the key itself |
+| `type` | all | `codex` (custom provider via codex CLI) · `codex-native` (codex's own auth/models) · `pi` (any chat-completions/anthropic/responses endpoint via the pi coding agent CLI) · `cursor` (Cursor CLI `cursor-agent`; Composer + Grok + mirrors, subscription auth) · `subagent` (Claude Agent tool) |
+| `base_url` | codex, pi | API root (codex: must serve `/responses`; pi: whatever `api` says). `cursor` rejects it — the CLI owns its endpoint. |
+| `env_key` | codex, pi, cursor | NAME of the env var holding the API key — never the key itself. `cursor` defaults to `CURSOR_API_KEY`. |
 | `wire_api` | codex | must be `"responses"` (validation enforces it) |
 | `api` | pi | `openai-completions` (default) · `openai-responses` · `anthropic-messages` |
 | `http_headers` | codex | optional map of static headers |
