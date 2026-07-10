@@ -93,15 +93,41 @@ def probe_claude() -> dict:
     except Exception as e:
         return _unknown("claude", f"probe failed ({e})")
 
-    windows = []
-    for key, label in (("five_hour", "5h"), ("seven_day", "7d"), ("seven_day_opus", "7d-opus")):
-        w = body.get(key)
-        if isinstance(w, dict) and w.get("utilization") is not None:
-            windows.append({"window": label,
-                            "used_pct": round(float(w["utilization"]), 1),
-                            "resets_in_min": _mins_until(w.get("resets_at"))})
     return {"pool": "claude", "status": "ok", "plan": oauth.get("subscriptionType"),
-            "windows": windows}
+            "windows": claude_windows(body)}
+
+
+def claude_windows(body: dict) -> list[dict]:
+    """Normalize the /api/oauth/usage body into window dicts. Prefers the newer
+    limits[] array: it carries weekly_scoped (per-model) buckets the flat
+    five_hour/seven_day fields omit — and the scoped weekly cap on the brain's own
+    model is often the TIGHTEST window, so missing it under-counts real budget
+    pressure. Falls back to the flat fields when limits[] is absent."""
+    windows = []
+    limits = body.get("limits")
+    if isinstance(limits, list) and limits:
+        label_for = {"session": "5h", "weekly_all": "7d"}
+        for lim in limits:
+            if not isinstance(lim, dict) or lim.get("percent") is None:
+                continue
+            kind = lim.get("kind")
+            if kind == "weekly_scoped":
+                model = ((lim.get("scope") or {}).get("model") or {}).get("display_name") or "scoped"
+                label = f"7d-{model.lower()}"
+            else:
+                label = label_for.get(kind, kind or "?")
+            windows.append({"window": label,
+                            "used_pct": round(float(lim["percent"]), 1),
+                            "resets_in_min": _mins_until(lim.get("resets_at")),
+                            "severity": lim.get("severity")})
+    if not windows:  # fall back to the flat fields if limits[] is absent/empty
+        for key, label in (("five_hour", "5h"), ("seven_day", "7d"), ("seven_day_opus", "7d-opus")):
+            w = body.get(key)
+            if isinstance(w, dict) and w.get("utilization") is not None:
+                windows.append({"window": label,
+                                "used_pct": round(float(w["utilization"]), 1),
+                                "resets_in_min": _mins_until(w.get("resets_at"))})
+    return windows
 
 
 # ---------------------------------------------------------------------------

@@ -164,8 +164,10 @@ using the same on-disk credential the local harness stored (it never mints or wr
 
 - **claude** — `GET https://api.anthropic.com/api/oauth/usage`, bearer
   `~/.claude/.credentials.json → .claudeAiOauth.accessToken` (needs `user:profile` scope),
-  `anthropic-beta: oauth-2025-04-20`. Windows: `five_hour`, `seven_day`, `seven_day_opus`
-  (`utilization` 0–100, `resets_at` ISO).
+  `anthropic-beta: oauth-2025-04-20`. Prefers the newer `limits[]` array (`kind` = `session`
+  (5h) / `weekly_all` / `weekly_scoped` per-model, `percent` 0–100, `resets_at` ISO) — the
+  per-model `weekly_scoped` bucket (e.g. the brain's own model) is often the tightest window
+  and the flat `five_hour`/`seven_day` fields omit it; those flat fields are the fallback.
 - **codex** — `GET https://chatgpt.com/backend-api/wham/usage`, bearer
   `~/.codex/auth.json → .tokens.access_token` + header `ChatGPT-Account-Id: .tokens.account_id`.
   Windows: `rate_limit.primary_window` (5h), `secondary_window` (weekly) (`used_percent`,

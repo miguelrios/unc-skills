@@ -639,6 +639,32 @@ class TestUsageProbe(unittest.TestCase):
         self.assertEqual(self.pu.worst_used_pct(report), 88.0)
         self.assertIsNone(self.pu.worst_used_pct({"pool": "x", "windows": []}))
 
+    def test_claude_limits_array_surfaces_scoped_bucket(self):
+        # The newer limits[] array carries a per-model weekly_scoped bucket that the flat
+        # five_hour/seven_day fields omit; claude_windows must prefer it and label by model.
+        windows = self.pu.claude_windows({
+            "five_hour": {"utilization": 35},
+            "seven_day": {"utilization": 25},
+            "limits": [
+                {"kind": "session", "percent": 35, "severity": "normal"},
+                {"kind": "weekly_all", "percent": 25, "severity": "normal"},
+                {"kind": "weekly_scoped", "percent": 41, "severity": "normal",
+                 "scope": {"model": {"display_name": "Fable"}}},
+            ],
+        })
+        labels = {w["window"]: w["used_pct"] for w in windows}
+        self.assertEqual(labels, {"5h": 35.0, "7d": 25.0, "7d-fable": 41.0})
+        self.assertEqual(self.pu.worst_used_pct({"windows": windows}), 41.0)
+
+    def test_claude_windows_falls_back_to_flat_fields(self):
+        # No limits[] array (older server / other account) -> flat fields still parse.
+        windows = self.pu.claude_windows({
+            "five_hour": {"utilization": 12, "resets_at": None},
+            "seven_day": {"utilization": 60, "resets_at": None},
+        })
+        self.assertEqual({w["window"]: w["used_pct"] for w in windows},
+                         {"5h": 12.0, "7d": 60.0})
+
 
 if __name__ == "__main__":
     unittest.main()
