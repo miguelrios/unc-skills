@@ -182,6 +182,13 @@ versions, so every probe fails soft to `unknown` on a missing credential, a stal
 a shape change — the tool informs routing, it never blocks it. A 401 means the token is stale;
 run any command for that CLI (or `codex login status`) to refresh it, then re-probe.
 
+**Rate-limit note.** These endpoints throttle rapid polling — Claude's `/api/oauth/usage` in
+particular trips a multi-minute HTTP 429 cooldown after a burst. `parable-usage.sh` therefore
+caches each pool's read on disk for ~45s (`CACHE_TTL_SECONDS`): repeated calls within the window
+reuse the last read instead of re-hitting the endpoint, and if a live probe does 429, the last
+good read is served marked `(cached Ns)` rather than dropping the pool to `unknown`. So you can
+call `parable usage` freely; don't build a sub-second poller around the raw endpoints yourself.
+
 ## Driving codex directly (beyond parable.py)
 
 The dispatcher covers the common path; codex itself offers more when the brain needs it:

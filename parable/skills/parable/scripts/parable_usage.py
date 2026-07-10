@@ -34,12 +34,22 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
 HTTP_TIMEOUT = 6.0  # seconds; a probe is a pre-flight, never a bottleneck
+
+# The usage endpoints throttle rapid polling — Claude's /api/oauth/usage in particular
+# trips into a multi-minute HTTP 429 cooldown after a burst. A short on-disk cache means
+# repeated `parable usage` calls within a window reuse the last read instead of re-hitting
+# the endpoint, so the brain can poll freely without ever tripping the limit. Headroom
+# does not move meaningfully second-to-second, so a stale-by-seconds read is fine.
+CACHE_TTL_SECONDS = 45
+_CACHE_PATH = Path(tempfile.gettempdir()) / f"parable-usage-cache-{os.getuid() if hasattr(os, 'getuid') else 'u'}.json"
 
 
 def _get_json(url: str, headers: dict, data: bytes | None = None) -> dict:
@@ -212,13 +222,61 @@ def probe_cursor(env_key: str = "CURSOR_API_KEY") -> dict:
 PROBES = {"claude": probe_claude, "codex": probe_codex, "cursor": probe_cursor}
 
 
-def probe_all(pools: list[str] | None = None, cursor_env_key: str = "CURSOR_API_KEY") -> list[dict]:
-    out = []
+def _probe_one(name: str, cursor_env_key: str) -> dict:
+    if name == "cursor":
+        return probe_cursor(cursor_env_key)
+    if name in PROBES:
+        return PROBES[name]()
+    return _unknown(name, "no such pool")
+
+
+def _read_cache() -> dict:
+    try:
+        return json.loads(_CACHE_PATH.read_text())
+    except Exception:
+        return {}
+
+
+def _write_cache(cache: dict) -> None:
+    try:  # best-effort; a probe must never fail because its cache is unwritable
+        tmp = _CACHE_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(cache))
+        tmp.replace(_CACHE_PATH)
+        os.chmod(_CACHE_PATH, 0o600)
+    except Exception:
+        pass
+
+
+def probe_all(pools: list[str] | None = None, cursor_env_key: str = "CURSOR_API_KEY",
+              ttl: int = CACHE_TTL_SECONDS, use_cache: bool = True) -> list[dict]:
+    """Probe each pool, backed by a per-pool short-TTL disk cache. A fresh cached
+    entry is returned without hitting the network; on a live-probe failure the last
+    good cached read is served (marked cached+stale) rather than reverting to
+    unknown — so a throttled endpoint keeps informing routing. Set use_cache=False
+    (or ttl=0) to force a live read of every pool."""
+    now = time.time()
+    cache = _read_cache() if use_cache else {}
+    out, dirty = [], False
     for name in (pools or list(PROBES)):
-        if name == "cursor":
-            out.append(probe_cursor(cursor_env_key))
-        elif name in PROBES:
-            out.append(PROBES[name]())
+        entry = cache.get(name) if use_cache else None
+        if entry and entry.get("_ok") and (now - entry.get("_ts", 0)) < ttl:
+            out.append({k: v for k, v in entry.items() if not k.startswith("_")} | {"cached": True})
+            continue
+        fresh = _probe_one(name, cursor_env_key)
+        if fresh.get("status") == "ok":
+            cache[name] = {**fresh, "_ts": now, "_ok": True}
+            dirty = True
+            out.append(fresh)
+        elif entry and entry.get("_ok"):
+            # live probe failed (e.g. HTTP 429) but we have a prior good read — serve it
+            # stale rather than dropping the pool to unknown mid-batch.
+            age = round(now - entry.get("_ts", 0))
+            out.append({k: v for k, v in entry.items() if not k.startswith("_")}
+                       | {"cached": True, "stale_seconds": age, "live_probe": fresh.get("reason")})
+        else:
+            out.append(fresh)
+    if dirty:
+        _write_cache(cache)
     return out
 
 
@@ -242,6 +300,10 @@ def format_report(reports: list[dict]) -> str:
             + (f"↻{w['resets_in_min']}m" if w.get("resets_in_min") is not None else "")
             for w in r["windows"])
         flag = " ⚠ TIGHT" if worst is not None and worst >= 80 else ""
+        if r.get("stale_seconds") is not None:
+            flag += f" (cached {r['stale_seconds']}s — live probe: {r.get('live_probe')})"
+        elif r.get("cached"):
+            flag += " (cached)"
         lines.append(f"{head} {wins}{flag}")
     return "\n".join(lines) if lines else "  (no pools probed)"
 

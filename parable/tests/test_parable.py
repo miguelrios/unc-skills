@@ -619,7 +619,8 @@ class TestUsageProbe(unittest.TestCase):
         _os.environ["CLAUDE_CONFIG_DIR"] = "/nonexistent-xyz"
         _os.environ["CODEX_HOME"] = "/nonexistent-xyz"
         try:
-            r = {x["pool"]: x for x in self.pu.probe_all()}
+            # use_cache=False so a real machine's warm cache can't serve a stale good read
+            r = {x["pool"]: x for x in self.pu.probe_all(use_cache=False)}
             self.assertEqual(r["claude"]["status"], "unknown")
             self.assertEqual(r["codex"]["status"], "unknown")
             self.assertEqual(r["cursor"]["status"], "unknown")
@@ -664,6 +665,59 @@ class TestUsageProbe(unittest.TestCase):
         })
         self.assertEqual({w["window"]: w["used_pct"] for w in windows},
                          {"5h": 12.0, "7d": 60.0})
+
+
+class TestUsageCache(unittest.TestCase):
+    """The disk cache exists because the usage endpoints throttle rapid polling
+    (Claude's /api/oauth/usage trips a multi-minute 429). It must (a) reuse a fresh
+    read without re-hitting the endpoint and (b) serve the last good read stale when
+    a live probe fails, rather than dropping the pool to unknown mid-batch."""
+    def setUp(self):
+        import importlib, sys as _sys, tempfile, os
+        _sys.path.insert(0, str(Path(parable.__file__).resolve().parent))
+        self.pu = importlib.import_module("parable_usage")
+        # isolate the cache file to this test
+        self._orig_path = self.pu._CACHE_PATH
+        self.pu._CACHE_PATH = Path(tempfile.mkdtemp()) / "cache.json"
+        self._orig_probe = self.pu._probe_one
+        self.calls = []
+
+    def tearDown(self):
+        self.pu._CACHE_PATH = self._orig_path
+        self.pu._probe_one = self._orig_probe
+
+    def _stub(self, results):
+        """results: dict name -> report to return; records each call."""
+        def stub(name, cursor_env_key):
+            self.calls.append(name)
+            return results[name]
+        self.pu._probe_one = stub
+
+    def test_fresh_entry_reused_within_ttl(self):
+        good = {"pool": "codex", "status": "ok", "plan": "pro", "windows": []}
+        self._stub({"codex": good})
+        self.pu.probe_all(["codex"], ttl=45)          # live hit, populates cache
+        self.pu.probe_all(["codex"], ttl=45)          # should reuse cache
+        self.assertEqual(self.calls, ["codex"])       # only ONE live probe
+        r = self.pu.probe_all(["codex"], ttl=45)[0]
+        self.assertTrue(r.get("cached"))
+
+    def test_stale_served_when_live_probe_fails(self):
+        good = {"pool": "claude", "status": "ok", "plan": "max", "windows": []}
+        self._stub({"claude": good})
+        self.pu.probe_all(["claude"], ttl=0)          # ttl=0 always re-probes; seeds cache
+        # now the live probe starts failing (simulate HTTP 429)
+        self._stub({"claude": self.pu._unknown("claude", "HTTP 429")})
+        r = self.pu.probe_all(["claude"], ttl=0)[0]
+        self.assertEqual(r["status"], "ok")           # served the prior good read
+        self.assertTrue(r.get("cached"))
+        self.assertIn("stale_seconds", r)
+        self.assertEqual(r["live_probe"], "HTTP 429")
+
+    def test_no_prior_read_stays_unknown(self):
+        self._stub({"cursor": self.pu._unknown("cursor", "$CURSOR_API_KEY not set")})
+        r = self.pu.probe_all(["cursor"], ttl=0)[0]
+        self.assertEqual(r["status"], "unknown")      # nothing to serve stale -> honest unknown
 
 
 if __name__ == "__main__":
