@@ -15,16 +15,21 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 PARSER_VERSION = 1
 MAX_TOOL_INPUT = 2048
 MAX_TOOL_OUTPUT = 4096
+FTS_LEG_LIMIT = 400
 SECRET_RE = re.compile(
     r"[\"']?(?:api[_-]?key|token|secret|password|bearer|authorization)[\"']?\s*[=:]\s*[\"']?(?:Bearer\s+)?\S{12,}|"
     r"sk-[A-Za-z0-9]{20,}|xox[bp]-|ghs_[A-Za-z0-9]{20,}|AKIA[A-Z0-9]{16}", re.I)
 PATH_RE = re.compile(r"(?<!\w)(?:/[A-Za-z0-9_@.+~#%=-]+(?:/[A-Za-z0-9_@.+~#%=-]+)+|(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_@.+~#%=-]+\.[A-Za-z0-9]+)")
 URL_RE = re.compile(r"https?://[^\s<>\]\[\"']+")
 UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\b|\b[0-9a-fA-F]{8}\b")
+STOPWORDS = frozenset("""the a an of in on we i was which that did do how what when where why to for with
+and or not it its this those these from by at as is are were be been about into over after before
+one ones our my me you us your their them they he she his her can could would should will just
+than then if else""".split())
 
 
 def paths() -> tuple[Path, Path, Path]:
@@ -114,6 +119,7 @@ def create_schema(conn: sqlite3.Connection) -> None:
     CREATE INDEX IF NOT EXISTS chunks_session_idx ON chunks(session_id);
     CREATE INDEX IF NOT EXISTS entities_chunk_idx ON entities(chunk_id);
     CREATE INDEX IF NOT EXISTS entities_value_idx ON entities(value);
+    CREATE INDEX IF NOT EXISTS entities_value_lower_idx ON entities(lower(value));
     CREATE INDEX IF NOT EXISTS sessions_file_idx ON sessions(file_id);
     CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
     """)
@@ -372,38 +378,115 @@ def query_terms(query: str) -> list[str]:
     return [x for x in re.findall(r"[A-Za-z0-9_./#-]+", query) if x]
 
 
+def informative_terms(query: str) -> list[str]:
+    """Terms suitable for broad retrieval; phrases retain the original wording."""
+    result = []
+    for term in query_terms(query):
+        lower = term.lower()
+        if lower in STOPWORDS or (len(lower) <= 2 and not any(c.isdigit() for c in lower)):
+            continue
+        if lower not in result:
+            result.append(lower)
+    return result
+
+
+def phrase_queries(query: str) -> list[str]:
+    """Safe FTS phrases for the whole query, quotes, and error-like word runs."""
+    phrases = []
+
+    def add(value: str) -> None:
+        normalized = " ".join(query_terms(value))
+        if normalized and normalized not in phrases:
+            phrases.append(normalized)
+
+    add(query)
+    for quoted in re.findall(r"[\"']([^\"']+)[\"']", query):
+        add(quoted)
+    words = re.findall(r"\S+", query)
+    # Error strings often have a short natural-language frame plus punctuation
+    # (for example, "TypeError: expected str got None").  Preserve those runs.
+    for width in range(3, min(8, len(words)) + 1):
+        for start in range(0, len(words) - width + 1):
+            run = words[start:start + width]
+            if any(re.search(r"[^A-Za-z0-9]", word) for word in run):
+                add(" ".join(run))
+    return phrases[:12]
+
+
+def identifier_terms(terms: list[str]) -> list[str]:
+    return [term for term in terms if re.search(r"\d|[-_./#]", term)
+            or re.fullmatch(r"[0-9a-f]{8,}", term)]
+
+
 def search_rows(conn, args):
     terms = query_terms(args.query)
-    if not terms: return []
+    informative = informative_terms(args.query)
+    if not informative:
+        return []
     where, params = filters_sql(args)
-    quoted_terms = ['"' + x.replace('"', '""') + '"' for x in terms]
-    match = " AND ".join(quoted_terms)
-    base = """SELECT c.id,c.session_id,c.ts,c.surface,c.text,s.cwd,s.slot,s.git_branch,s.started_at,
-                      f.path,bm25(chunks_fts) AS bm
-               FROM chunks_fts JOIN chunks c ON c.id=chunks_fts.rowid
-               JOIN sessions s ON s.id=c.session_id JOIN files f ON f.id=s.file_id"""
+    match_count_sql = " + ".join(
+        "CASE WHEN instr(lower(c.text), ?) > 0 THEN 1 ELSE 0 END" for _ in informative)
+    common = """c.id,c.session_id,c.ts,c.surface,c.text,s.cwd,s.slot,s.git_branch,s.started_at,
+                       f.path,{bm} AS bm,{matched} AS matched_count
+                FROM chunks c JOIN sessions s ON s.id=c.session_id JOIN files f ON f.id=s.file_id"""
+    fts_base = "SELECT " + common.format(bm="bm25(chunks_fts)", matched=match_count_sql) + \
+        " JOIN chunks_fts ON c.id=chunks_fts.rowid"
+    direct_base = "SELECT DISTINCT " + common.format(bm="-25.0", matched=match_count_sql) + \
+        " JOIN entities e ON e.chunk_id=c.id"
+    candidates: dict[int, tuple[sqlite3.Row, set[str]]] = {}
+
+    def merge(rows, leg: str) -> None:
+        for row in rows:
+            existing = candidates.get(row["id"])
+            if existing is None:
+                candidates[row["id"]] = (row, {leg})
+            else:
+                best, legs = existing
+                legs.add(leg)
+                if float(row["bm"]) < float(best["bm"]):
+                    candidates[row["id"]] = (row, legs)
+
+    def fts(match: str, leg: str) -> None:
+        sql = fts_base + " WHERE chunks_fts MATCH ? AND " + where + f" ORDER BY bm25(chunks_fts) LIMIT {FTS_LEG_LIMIT}"
+        merge(conn.execute(sql, [*informative, match, *params]).fetchall(), leg)
+
     try:
-        rows = conn.execute(base + " WHERE chunks_fts MATCH ? AND " + where + " ORDER BY bm25(chunks_fts) LIMIT 1000", [match, *params]).fetchall()
-        if len(rows) < 3 * args.limit:
-            partial = conn.execute(base + " WHERE chunks_fts MATCH ? AND " + where + " ORDER BY bm25(chunks_fts) LIMIT 1000", [" OR ".join(quoted_terms), *params]).fetchall()
-            seen = {row["id"] for row in rows}
-            rows.extend(row for row in partial if row["id"] not in seen)
+        # Leg A: exact titles, quoted text, and error strings as complete phrases.
+        for phrase in phrase_queries(args.query):
+            fts('"' + phrase.replace('"', '""') + '"', "A")
+
+        # Leg B: entity retrieval does not depend on the FTS rank cutoff.
+        identifiers = identifier_terms(informative)
+        if identifiers:
+            entity_parts, entity_params = [], []
+            for term in identifiers:
+                entity_parts.append("lower(e.value)=?")
+                entity_params.append(term)
+                if re.fullmatch(r"[0-9a-f]{8,}", term):
+                    entity_parts.append("lower(e.value) LIKE ?")
+                    entity_params.append(term + "%")
+            merge(conn.execute(direct_base + " WHERE (" + " OR ".join(entity_parts) + ") AND " + where +
+                               f" LIMIT {FTS_LEG_LIMIT}", [*informative, *entity_params, *params]).fetchall(), "B")
+
+        # Leg C: all informative words; this is the strongest broad retrieval leg.
+        fts(" AND ".join('"' + term.replace('"', '""') + '"' for term in informative), "C")
+        # Leg D: only broaden if the precise legs did not produce enough chunks.
+        if len(candidates) < 3 * args.limit:
+            fts(" OR ".join('"' + term.replace('"', '""') + '"' for term in informative), "D")
     except sqlite3.OperationalError:
-        likes = " OR ".join("c.text LIKE ?" for _ in terms)
-        rows = conn.execute(base.replace(",bm25(chunks_fts) AS bm", ",0 AS bm") + " WHERE (" + likes + ") AND " + where + " ORDER BY c.ts DESC LIMIT 1000", [*("%"+x+"%" for x in terms), *params]).fetchall()
-    identifiers = [x.lower() for x in terms if re.search(r"\d|[-_./#]", x)]
-    hit_ids = set()
-    if identifiers:
-        q = ",".join("?" for _ in identifiers)
-        hit_ids = {r[0] for r in conn.execute("SELECT DISTINCT chunk_id FROM entities WHERE lower(value) IN ("+q+")", identifiers)}
+        likes = " OR ".join("lower(c.text) LIKE ?" for _ in informative)
+        fallback = "SELECT " + common.format(bm="0.0", matched=match_count_sql) + \
+            " WHERE (" + likes + ") AND " + where + f" ORDER BY c.ts DESC LIMIT {FTS_LEG_LIMIT}"
+        merge(conn.execute(fallback, [*informative, *("%" + term + "%" for term in informative), *params]).fetchall(), "D")
     now = time.time()
     result = []
-    for row in rows:
+    for row, legs in candidates.values():
         raw = max(0.01, -float(row["bm"]) + 1.0)
         raw *= {"user": 4.0, "assistant": 2.0, "tool_input": 1.5, "tool_output": 1.0}[row["surface"]]
-        score = raw + (10.0 if row["id"] in hit_ids else 0.0)
+        score = raw + (10.0 if "B" in legs else 0.0)
         score *= 1 / (1 + max(0, now - (row["ts"] or row["started_at"] or now)) / 86400 / 180)
-        result.append((row, score, [x for x in terms if x.lower() in row["text"].lower()], row["id"] in hit_ids))
+        matched = [] if args.paths else [x for x in terms if x.lower() in row["text"].lower()]
+        result.append((row, score, matched, legs, len(informative)))
     return result
 
 
@@ -414,12 +497,17 @@ def search(args) -> int:
         return 0
     conn = connect_ro(db)
     grouped = {}
-    for row, score, matched, entity in search_rows(conn, args):
-        item = grouped.setdefault(row["session_id"], {"row": row, "best": (score, matched, entity), "count": 0})
+    for row, score, matched, legs, informative_count in search_rows(conn, args):
+        item = grouped.setdefault(row["session_id"], {"row": row, "best": (score, matched, legs, informative_count), "count": 0})
         item["count"] += 1
-        if score > item["best"][0]: item["row"], item["best"] = row, (score, matched, entity)
+        if score > item["best"][0]: item["row"], item["best"] = row, (score, matched, legs, informative_count)
     ranked = []
     for item in grouped.values():
+        best_row = item["row"]
+        _, _, legs, informative_count = item["best"]
+        enough_terms = best_row["matched_count"] >= math.ceil(.6 * informative_count)
+        if not ({"A", "B"} & legs) and not enough_terms:
+            continue
         score = item["best"][0] + .2 * math.log(1 + item["count"])
         ranked.append((score, item))
     ranked.sort(key=lambda x: x[0], reverse=True)
@@ -429,7 +517,7 @@ def search(args) -> int:
             print(row["path"]); continue
         date = datetime.fromtimestamp(row["ts"] or row["started_at"] or 0, timezone.utc).isoformat()
         snippet = re.sub(r"\s+", " ", row["text"])[:200]
-        why = "terms=" + ",".join(item["best"][1]) + ("; exact entity" if item["best"][2] else "")
+        why = "terms=" + ",".join(item["best"][1]) + "; legs=" + ",".join(sorted(item["best"][2]))
         print(f"{rank}. {row['path']}\n   {date} cwd={row['cwd'] or '-'} slot={row['slot'] or '-'} branch={row['git_branch'] or '-'}\n   [{row['surface']}] {snippet}\n   WHY: {why}")
     conn.close(); return 0
 
@@ -539,7 +627,8 @@ def doctor(args) -> int:
     try: days = json.loads(settings.read_text()).get("cleanupPeriodDays")
     except (OSError, json.JSONDecodeError): pass
     print(f"{'OK' if isinstance(days,(int,float)) and days >= 3650 else 'WARN'} cleanupPeriodDays={days}")
-    archives = Path.home()/"archives"; manifests = list(archives.rglob("*manifest*")) if archives.exists() else []
+    manifests_dir = Path.home()/"archives/manifests"
+    manifests = list(manifests_dir.glob("*.json")) if manifests_dir.exists() else []
     age = (time.time()-max(p.stat().st_mtime for p in manifests))/3600 if manifests else None
     print(f"{'WARN' if age is None or age > 48 else 'OK'} archives_manifest_age_hours={age:.1f}" if age is not None else "WARN archives_manifest_age_hours=missing")
     if conn is not None: conn.close()

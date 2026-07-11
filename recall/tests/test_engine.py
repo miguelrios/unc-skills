@@ -126,12 +126,51 @@ class RecallEngineTest(unittest.TestCase):
         self.assertEqual(stored[0], "[redacted-secret-line]")
 
     def test_partial_fts_or_fallback_returns_natural_partial_matches(self):
-        (self.claude / "alpha.jsonl").write_text(json.dumps({"type":"user", "timestamp":"2026-01-01T00:00:00Z", "message":{"content":"alpha only"}}) + "\n")
-        (self.claude / "beta.jsonl").write_text(json.dumps({"type":"user", "timestamp":"2026-01-01T00:00:01Z", "message":{"content":"beta only"}}) + "\n")
+        (self.claude / "alpha.jsonl").write_text(json.dumps({"type":"user", "timestamp":"2026-01-01T00:00:00Z", "message":{"content":"alpha beta only"}}) + "\n")
+        (self.claude / "beta.jsonl").write_text(json.dumps({"type":"user", "timestamp":"2026-01-01T00:00:01Z", "message":{"content":"alpha gamma only"}}) + "\n")
         self.cli("index")
-        paths = self.cli("search", "alpha beta", "--paths")
+        paths = self.cli("search", "alpha beta gamma", "--paths")
         self.assertIn("alpha.jsonl", paths)
         self.assertIn("beta.jsonl", paths)
+
+    def test_phrase_leg_finds_exact_error_among_common_decoys(self):
+        error = "TypeError expected str got None"
+        for number in range(8):
+            (self.claude / f"decoy-{number}.jsonl").write_text(json.dumps({
+                "type":"assistant", "timestamp":"2026-01-01T00:00:00Z",
+                "message":{"content":"TypeError expected another value"}}) + "\n")
+        target = self.claude / "error-target.jsonl"
+        target.write_text(json.dumps({"type":"assistant", "timestamp":"2026-01-01T00:00:01Z",
+                                      "message":{"content":"prefix " + error + " suffix"}}) + "\n")
+        self.cli("index")
+        self.assertEqual(Path(self.cli("search", error, "--paths").splitlines()[0]), target)
+
+    def test_entity_direct_survives_fts_leg_cutoff(self):
+        uuid = "deadbeef-1234-1234-1234-123456789abc"
+        target = self.claude / "entity-target.jsonl"
+        target.write_text(json.dumps({"type":"assistant", "timestamp":"2026-01-01T00:00:00Z",
+                                      "message":{"content":[{"type":"tool_result", "content":uuid}]}}) + "\n")
+        decoy = self.claude / "entity-decoys.jsonl"
+        decoy.write_text(json.dumps({"type":"user", "timestamp":"2026-01-01T00:00:00Z",
+                                     "message":{"content":"seed"}}) + "\n")
+        self.cli("index")
+        conn = engine.connect(self.db)
+        decoy_session = conn.execute("select s.id from sessions s join files f on f.id=s.file_id where f.path like '%entity-decoys.jsonl'").fetchone()[0]
+        for _ in range(4):
+            chunk_id = conn.execute("insert into chunks(session_id,ts,surface,text) values (?,?,?,?)", (decoy_session, 1, "assistant", "common " + uuid + " " + uuid)).lastrowid
+            conn.execute("insert into chunks_fts(rowid,text) values (?,?)", (chunk_id, "common " + uuid + " " + uuid))
+        conn.commit(); conn.close()
+        old_limit = engine.FTS_LEG_LIMIT
+        engine.FTS_LEG_LIMIT = 2
+        try:
+            self.assertEqual(Path(self.cli("search", "common " + uuid, "--paths").splitlines()[0]), target)
+        finally:
+            engine.FTS_LEG_LIMIT = old_limit
+
+    def test_negative_and_stopword_queries_are_empty(self):
+        self.write_claude(); self.copy_codex(); self.cli("index")
+        self.assertEqual(self.cli("search", "kafka consumer rebalancing tuning", "--paths"), "")
+        self.assertEqual(self.cli("search", "the and of to", "--paths"), "")
 
     def test_fts_limit_keeps_bm25_best_candidate(self):
         filler = self.claude / "filler.jsonl"
