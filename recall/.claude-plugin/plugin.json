@@ -1,0 +1,21 @@
+{
+  "name": "recall",
+  "description": "Indexed search over Claude Code + Codex session history — find, continue, repeat, or skill-ify prior work",
+  "version": "0.1.0",
+  "author": {
+    "name": "Miguel Rios",
+    "url": "https://github.com/miguelrios"
+  },
+  "homepage": "https://github.com/miguelrios/unc-skills/tree/main/recall",
+  "repository": "https://github.com/miguelrios/unc-skills/tree/main/recall",
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "codex",
+    "session-history",
+    "search",
+    "memory",
+    "recall"
+  ],
+  "skills": "./skills/"
+}
