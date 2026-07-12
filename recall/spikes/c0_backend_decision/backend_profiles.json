@@ -1,0 +1,23 @@
+{
+  "recall-native-postgres": {
+    "persistent_components": 2,
+    "credential_classes": 2,
+    "transformation_steps": 1,
+    "vendor_specific_record_types": 0,
+    "notes": "API plus Postgres; source envelope is stored without page conversion"
+  },
+  "gbrain-pglite-adapter": {
+    "persistent_components": 3,
+    "credential_classes": 2,
+    "transformation_steps": 3,
+    "vendor_specific_record_types": 2,
+    "notes": "Production remote shape requires adapter, GBrain HTTP service, and Postgres; events become pages/chunks"
+  },
+  "managed-memory-http-adapter": {
+    "persistent_components": 2,
+    "credential_classes": 2,
+    "transformation_steps": 2,
+    "vendor_specific_record_types": 1,
+    "notes": "Adapter plus managed service; C0 uses a contract-faithful local HTTP server, not vendor retrieval"
+  }
+}

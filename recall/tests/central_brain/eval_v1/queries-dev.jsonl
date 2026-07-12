@@ -1,0 +1,41 @@
+{"answers": ["recall://codex:linux/session-001:turn-7"], "id": "p001", "query": "stopped repeated upstream failures with a trip-and-cooldown guard", "split": "dev", "stratum": "semantic-paraphrase"}
+{"answers": ["recall://claude:mac/session-002:turn-7"], "id": "p002", "query": "moved durable records to the new relational schema without downtime", "split": "dev", "stratum": "semantic-paraphrase"}
+{"answers": ["recall://codex:linux/session-003:turn-7"], "id": "p003", "query": "capped repeated attempts so degraded dependencies could recover", "split": "dev", "stratum": "semantic-paraphrase"}
+{"answers": ["recall://claude:mac/session-004:turn-7"], "id": "p004", "query": "renewed short-lived credentials before requests began failing", "split": "dev", "stratum": "semantic-paraphrase"}
+{"answers": ["recall://claude:mac/session-006:turn-7"], "id": "p006", "query": "slowed producers when workers could not drain pending jobs", "split": "dev", "stratum": "semantic-paraphrase"}
+{"answers": ["recall://codex:linux/session-007:turn-7"], "id": "p007", "query": "handled old and new event shapes during a rolling upgrade", "split": "dev", "stratum": "semantic-paraphrase"}
+{"answers": ["recall://claude:mac/session-010:turn-7"], "id": "p010", "query": "bounded request bursts independently for each caller", "split": "dev", "stratum": "semantic-paraphrase"}
+{"answers": ["recall://codex:linux/session-011:turn-7"], "id": "p011", "query": "prevented two workers from performing the same singleton task", "split": "dev", "stratum": "semantic-paraphrase"}
+{"answers": ["recall://claude:mac/session-012:turn-7"], "id": "p012", "query": "rebuilt projections deterministically from immutable source records", "split": "dev", "stratum": "semantic-paraphrase"}
+{"answers": ["recall://codex:linux/session-013:turn-7"], "id": "p013", "query": "removed credentials before text entered logs or derived indexes", "split": "dev", "stratum": "semantic-paraphrase"}
+{"answers": ["recall://claude:mac/session-014:turn-7"], "id": "p014", "query": "kept one principal from seeing another source with the same slug", "split": "dev", "stratum": "semantic-paraphrase"}
+{"answers": ["recall://codex:linux/session-017:turn-7"], "id": "p017", "query": "made repeated delivery return the original acknowledgement", "split": "dev", "stratum": "semantic-paraphrase"}
+{"answers": ["recall://claude:mac/session-018:turn-7"], "id": "p018", "query": "published a localhost application only to authorized private peers", "split": "dev", "stratum": "semantic-paraphrase"}
+{"answers": ["recall://codex:linux/session-019:turn-7"], "id": "p019", "query": "reopened the exact source window behind a search result", "split": "dev", "stratum": "semantic-paraphrase"}
+{"answers": ["recall://claude:mac/session-020:turn-7"], "id": "p020", "query": "called out stale or missing evidence instead of inventing an answer", "split": "dev", "stratum": "semantic-paraphrase"}
+{"answers": ["recall://codex:linux/session-021:turn-7"], "id": "p021", "query": "found work captured on a different machine and harness", "split": "dev", "stratum": "semantic-paraphrase"}
+{"answers": ["recall://claude:mac/session-022:turn-7"], "id": "p022", "query": "tracked how far each derived view had processed the event log", "split": "dev", "stratum": "semantic-paraphrase"}
+{"answers": ["recall://codex:linux/session-023:turn-7"], "id": "p023", "query": "recorded deletion while retaining an auditable history marker", "split": "dev", "stratum": "semantic-paraphrase"}
+{"answers": ["recall://claude:mac/session-024:turn-7"], "id": "p024", "query": "rejected a token minted for a different protected resource", "split": "dev", "stratum": "semantic-paraphrase"}
+{"answers": [], "id": "n002", "query": "quantum orchard scheduler", "split": "dev", "stratum": "negative"}
+{"answers": [], "id": "n003", "query": "satellite origami telemetry", "split": "dev", "stratum": "negative"}
+{"answers": [], "id": "n004", "query": "cobalt submarine payroll", "split": "dev", "stratum": "negative"}
+{"answers": [], "id": "n005", "query": "volcanic keyboard firmware", "split": "dev", "stratum": "negative"}
+{"answers": [], "id": "n006", "query": "antarctic invoice reconciliation", "split": "dev", "stratum": "negative"}
+{"answers": [], "id": "n007", "query": "ceramic compiler register allocator", "split": "dev", "stratum": "negative"}
+{"answers": [], "id": "n009", "query": "neutrino customer support routing", "split": "dev", "stratum": "negative"}
+{"answers": [], "id": "n010", "query": "mangrove websocket compression", "split": "dev", "stratum": "negative"}
+{"answers": [], "id": "n011", "query": "telescope tax withholding", "split": "dev", "stratum": "negative"}
+{"answers": [], "id": "n012", "query": "alpaca kernel panic triage", "split": "dev", "stratum": "negative"}
+{"answers": [], "id": "n013", "query": "glacier advertising attribution", "split": "dev", "stratum": "negative"}
+{"answers": [], "id": "n014", "query": "marble dns zone transfer", "split": "dev", "stratum": "negative"}
+{"answers": [], "id": "n015", "query": "seahorse database vacuum tuning", "split": "dev", "stratum": "negative"}
+{"answers": [], "id": "n016", "query": "paprika oauth device flow", "split": "dev", "stratum": "negative"}
+{"answers": [], "id": "n017", "query": "zeppelin mobile crash symbolication", "split": "dev", "stratum": "negative"}
+{"answers": [], "id": "n018", "query": "bonsai video transcoding pipeline", "split": "dev", "stratum": "negative"}
+{"answers": ["recall://private:owner-2/collision-002"], "filters": {"principal_id": "owner", "source_id": "private:owner-2"}, "forbidden_source_ids": ["private:decoy-0"], "id": "i002", "query": "isolation-token-002", "split": "dev", "stratum": "source-isolation"}
+{"answers": ["recall://private:owner-0/collision-003"], "filters": {"principal_id": "owner", "source_id": "private:owner-0"}, "forbidden_source_ids": ["private:decoy-1"], "id": "i003", "query": "isolation-token-003", "split": "dev", "stratum": "source-isolation"}
+{"answers": ["recall://private:owner-1/collision-004"], "filters": {"principal_id": "owner", "source_id": "private:owner-1"}, "forbidden_source_ids": ["private:decoy-0"], "id": "i004", "query": "isolation-token-004", "split": "dev", "stratum": "source-isolation"}
+{"answers": ["recall://private:owner-0/collision-006"], "filters": {"principal_id": "owner", "source_id": "private:owner-0"}, "forbidden_source_ids": ["private:decoy-0"], "id": "i006", "query": "isolation-token-006", "split": "dev", "stratum": "source-isolation"}
+{"answers": ["recall://private:owner-2/collision-008"], "filters": {"principal_id": "owner", "source_id": "private:owner-2"}, "forbidden_source_ids": ["private:decoy-0"], "id": "i008", "query": "isolation-token-008", "split": "dev", "stratum": "source-isolation"}
+{"answers": ["recall://private:owner-1/collision-010"], "filters": {"principal_id": "owner", "source_id": "private:owner-1"}, "forbidden_source_ids": ["private:decoy-0"], "id": "i010", "query": "isolation-token-010", "split": "dev", "stratum": "source-isolation"}

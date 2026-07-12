@@ -1,0 +1,21 @@
+{
+  "contamination_guard": "pass",
+  "counts": {
+    "corpus_records": 48,
+    "dev": 41,
+    "holdout": 13,
+    "negative": 18,
+    "queries": 54,
+    "semantic-paraphrase": 24,
+    "source-isolation": 12
+  },
+  "freeze_epoch": 1783891200,
+  "generator_sha256": "98cccf8ec18630b75e85f5468576a54ca82a176d587900b1498adfd2a0175fd4",
+  "holdout_policy": "After this manifest is committed, only byte hashing and aggregate scoring may read holdout; no tuning or per-query output.",
+  "sha256": {
+    "corpus.jsonl": "a259270fcccd735dbf6c6fb49b054f9100b7ce36605bc9746e4ad8228f7ace0f",
+    "queries-dev.jsonl": "b4c45d8b40e582b45c9592af52f556be1df6465169655754e2e2f7039a9fdd5b",
+    "queries-holdout.jsonl": "ad565e334d8d44264154f26073ceb1a1562378fe713bfccff2a7f597d1c2cb59"
+  },
+  "version": 1
+}
