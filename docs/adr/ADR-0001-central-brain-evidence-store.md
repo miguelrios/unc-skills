@@ -1,6 +1,7 @@
 # ADR-0001 — Use recall-native Postgres for the central evidence plane
 
-**Status:** Accepted for C1, falsifiable at later exit gates  
+**Status:** Accepted for C1, falsifiable at later exit gates
+
 **Date:** 2026-07-12
 
 ## Context
