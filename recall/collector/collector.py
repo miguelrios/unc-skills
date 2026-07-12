@@ -396,9 +396,15 @@ class Collector:
                 break
             acked_at = time.time()
             with self.db:
-                for row, receipt in zip(rows, receipts):
-                    self.db.execute("UPDATE outbox SET state='acked',acked_at=?,receipt=?,envelope_json='{}' WHERE id=?", (acked_at, receipt, row["id"]))
-                    self.db.execute("UPDATE active_records SET receipt=? WHERE path=? AND native_id=?", (receipt, row["path"], row["native_id"]))
+                acknowledgements = list(zip(rows, receipts, strict=True))
+                self.db.executemany(
+                    "UPDATE outbox SET state='acked',acked_at=?,receipt=?,envelope_json='{}' WHERE id=?",
+                    [(acked_at, receipt, row["id"]) for row, receipt in acknowledgements],
+                )
+                self.db.executemany(
+                    "UPDATE active_records SET receipt=? WHERE path=? AND native_id=?",
+                    [(receipt, row["path"], row["native_id"]) for row, receipt in acknowledgements],
+                )
                 for path in {row["path"] for row in rows}:
                     pending = self.db.execute("SELECT 1 FROM outbox WHERE path=? AND state='pending' LIMIT 1", (path,)).fetchone()
                     if not pending:
