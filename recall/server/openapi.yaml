@@ -1,0 +1,75 @@
+openapi: 3.1.0
+info:
+  title: Recall BrainStore API
+  version: 0.1.0-c1
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: http://127.0.0.1:8788
+    description: C1 localhost-only development server
+paths:
+  /healthz:
+    get:
+      summary: Check process health
+      operationId: getHealth
+      responses:
+        '200': {description: Healthy}
+        '503': {description: Unhealthy}
+  /v1/ingest/batches:
+    post:
+      summary: Commit an idempotent source-event batch
+      operationId: ingestBatch
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema: {type: string, maxLength: 200}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [events]
+              properties:
+                events:
+                  type: array
+                  items: {$ref: '#/components/schemas/EnvelopeV1'}
+      responses:
+        '201': {description: Committed}
+        '200': {description: Idempotent replay}
+        '400': {description: Invalid envelope}
+        '409': {description: Idempotency conflict}
+        '413': {description: Body too large}
+  /v1/receipts/resolve:
+    get:
+      summary: Resolve a sanitized evidence receipt
+      operationId: resolveReceipt
+      parameters:
+        - in: query
+          name: receipt
+          required: true
+          schema: {type: string}
+      responses:
+        '200': {description: Sanitized event metadata and projected items}
+        '404': {description: Receipt not found}
+components:
+  schemas:
+    EnvelopeV1:
+      type: object
+      required: [schema_version, source_id, native_id, kind, occurred_at, observed_at,
+        principal_id, visibility, content_type, content, content_sha256]
+      properties:
+        schema_version: {const: 1}
+        source_id: {type: string}
+        native_id: {type: string}
+        native_parent_id: {type: string}
+        kind: {type: string}
+        occurred_at: {type: string, format: date-time}
+        observed_at: {type: string, format: date-time}
+        principal_id: {type: string}
+        visibility: {enum: [private, shared]}
+        content_type: {type: string}
+        content: {}
+        content_sha256: {type: string, pattern: '^[a-f0-9]{64}$'}
