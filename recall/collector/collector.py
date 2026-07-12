@@ -107,6 +107,7 @@ class Collector:
         CREATE TABLE IF NOT EXISTS outbox(
           id INTEGER PRIMARY KEY, path TEXT NOT NULL, native_id TEXT NOT NULL,
           content_sha256 TEXT NOT NULL, start_offset INTEGER NOT NULL, end_offset INTEGER NOT NULL,
+          shard_key INTEGER NOT NULL DEFAULT 0,
           envelope_json TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
           queued_at REAL NOT NULL, acked_at REAL, receipt TEXT,
           UNIQUE(native_id,content_sha256));
@@ -120,6 +121,12 @@ class Collector:
         columns = {row["name"] for row in self.db.execute("PRAGMA table_info(outbox)")}
         if "start_offset" not in columns:
             self.db.execute("ALTER TABLE outbox ADD COLUMN start_offset INTEGER NOT NULL DEFAULT 0")
+        if "shard_key" not in columns:
+            self.db.execute("ALTER TABLE outbox ADD COLUMN shard_key INTEGER NOT NULL DEFAULT 0")
+            self.db.execute("CREATE INDEX IF NOT EXISTS outbox_path_idx ON outbox(path)")
+            for row in self.db.execute("SELECT DISTINCT path FROM outbox"):
+                self.db.execute("UPDATE outbox SET shard_key=? WHERE path=?", (self._path_shard(row["path"]), row["path"]))
+        self.db.execute("CREATE INDEX IF NOT EXISTS outbox_shard_state_id ON outbox(shard_key,state,id)")
         self.db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('collector_version',?)", (str(COLLECTOR_VERSION),))
         self.db.commit()
 
@@ -135,6 +142,10 @@ class Collector:
     def _file_key(self, path: Path) -> str:
         relative = str(path.relative_to(self.root))
         return hashlib.sha256((self.harness + "\x1f" + relative).encode()).hexdigest()[:24]
+
+    @staticmethod
+    def _path_shard(path: str) -> int:
+        return int.from_bytes(hashlib.sha256(path.encode()).digest()[:8], "big") & ((1 << 63) - 1)
 
     def _envelope(self, path: Path, native_id: str, kind: str, content: Any,
                   occurred_at: str, start: int, end: int) -> dict:
@@ -175,8 +186,8 @@ class Collector:
 
     def _queue(self, path: Path, envelope: dict, end_offset: int) -> bool:
         cursor = self.db.execute(
-            "INSERT OR IGNORE INTO outbox(path,native_id,content_sha256,start_offset,end_offset,envelope_json,queued_at) VALUES (?,?,?,?,?,?,?)",
-            (str(path), envelope["native_id"], envelope["content_sha256"], envelope["provenance"]["byte_start"], end_offset,
+            "INSERT OR IGNORE INTO outbox(path,native_id,content_sha256,start_offset,end_offset,shard_key,envelope_json,queued_at) VALUES (?,?,?,?,?,?,?,?)",
+            (str(path), envelope["native_id"], envelope["content_sha256"], envelope["provenance"]["byte_start"], end_offset, self._path_shard(str(path)),
              canonical_json(envelope).decode(), time.time()),
         )
         return cursor.rowcount == 1
@@ -354,10 +365,11 @@ class Collector:
         recovery = self.recover_dead_payloads() if self.shard_index == 0 else {"recovered": 0, "unrecoverable": 0}
         result = {"batches": 0, "acked": 0, "replayed_batches": 0, "errors": 0, **recovery}
         while True:
-            candidates = [self._repair_pending_envelope(row) for row in self.db.execute(
-                "SELECT * FROM outbox WHERE state='pending' AND (id % ?) = ? ORDER BY id LIMIT ?",
+            raw_candidates = list(self.db.execute(
+                "SELECT * FROM outbox WHERE state='pending' AND (shard_key % ?) = ? ORDER BY id LIMIT ?",
                 (self.shard_count, self.shard_index, self.batch_size),
-            )]
+            ))
+            candidates = [self._repair_pending_envelope(row) for row in raw_candidates]
             self.db.commit()
             rows: list[dict] = []
             body_size = len(b'{"events":[]}')
