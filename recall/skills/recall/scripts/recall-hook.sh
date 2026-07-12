@@ -20,6 +20,14 @@ except Exception:
 fi
 
 branch="$(git -C "$cwd" branch --show-current 2>/dev/null)" || branch=""
+
+# Shallow non-git dirs (/tmp, /var, $HOME itself) are scratch space: cwd
+# substring matching would surface every session rooted anywhere under them,
+# which is noise at session start. Stay silent there.
+if [ -z "$branch" ] && ! git -C "$cwd" rev-parse --git-dir >/dev/null 2>&1; then
+  depth="$(printf '%s' "$cwd" | tr -cd '/' | wc -c)"
+  [ "$depth" -lt 3 ] && exit 0
+fi
 related=""
 if [ -f "$ENGINE" ] && command -v python3 >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
   related="$(timeout 1 python3 "$ENGINE" related --cwd "$cwd" ${branch:+--branch "$branch"} --limit 4 --mains-only --fast 2>/dev/null)" || related=""
@@ -51,7 +59,8 @@ if [ -n "$related" ]; then
   done <<EOF
 $related
 EOF
-  printf '%s\n' "$block" | head -c 800
+  # Whole lines only under the byte cap — a mid-path clip reads as corruption.
+  printf '%s\n' "$block" | awk '{total += length($0) + 1; if (total > 800) exit; print}'
 fi
 
 lock="$HOME/.recall/.index.lock"
