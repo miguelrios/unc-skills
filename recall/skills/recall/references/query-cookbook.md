@@ -6,10 +6,10 @@ Worked examples per query shape. All commands relative to the skill directory;
 ## Exact identifier (strongest evidence — always include it)
 
 ```bash
-$R search "api-prod-6fcdc84dd4-mmjpj OOM"          # pod name
-$R search "d7d212df heartbeat job"                  # 8-hex uuid prefix works
-$R search "#6644"                                   # PR number
-$R search "grep-expert-base-v5"                     # snapshot/artifact name
+$R search "api-7f9c4b2d1e-xkq2p OOM"               # pod name
+$R search "3fa2b1c9 heartbeat job"                  # 8-hex uuid prefix works
+$R search "#4471"                                   # PR number
+$R search "myapp-base-v3"                           # snapshot/artifact name
 ```
 
 Identifiers are matched exactly via the entity index and a dedicated token
@@ -36,9 +36,9 @@ setting the window, and prefer a window one day wider on each side.
 ## Cross-worktree / cross-harness
 
 ```bash
-$R search "flue harness origin" --cwd grep5        # work done in another slot
-$R search "hermes agent cron telegram" --harness codex
-$R related --cwd ~/worktrees/pool/grep5/parcha     # no query at all
+$R search "billing harness origin" --cwd side-project   # work done in another checkout
+$R search "queue worker cron integration" --harness codex
+$R related --cwd ~/work/projects/myrepo                  # no query at all
 ```
 
 ## Paraphrase (you remember the shape, not the words)

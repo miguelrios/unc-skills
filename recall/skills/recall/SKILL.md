@@ -41,7 +41,7 @@ python3 scripts/recall.py search "<what the user said>" [filters]
   | ask | flag |
   |---|---|
   | "last 48h", "back in May" | `--since 2026-05-01 --until 2026-06-01` (UTC, both bounds inclusive of the instant — to cover a full local day, use the NEXT day's date as `--until`; convert the user's local day first) |
-  | "in the other worktree", "on slot 5" | `--cwd grep5` (any cwd substring) |
+  | "in the other worktree/checkout" | `--cwd <any-cwd-substring>` |
   | "what did codex do" | `--harness codex` |
   | branch-scoped | `--branch <substring>` |
 - Output is ranked sessions with date, cwd, slot, branch, a matched snippet,
