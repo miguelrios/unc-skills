@@ -107,11 +107,11 @@ class CollectorTest(unittest.TestCase):
         collector = self.collector()
         collector.scan()
         AckServer.drop_after_first_commit = True
-        self.assertEqual(collector.flush()["acked"], 0)
-        self.assertEqual(collector.doctor()["pending"], 1)
         result = collector.flush()
         self.assertEqual(result["acked"], 1)
         self.assertEqual(result["replayed_batches"], 1)
+        self.assertEqual(collector.doctor()["pending"], 0)
+        self.assertEqual(AckServer.requests, 2)
         self.assertEqual(len(AckServer.batches), 1)
         receipt = next(iter(AckServer.batches.values()))["receipts"][0]
         located = collector.locate_receipt(receipt)

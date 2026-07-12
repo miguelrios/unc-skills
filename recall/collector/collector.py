@@ -400,14 +400,27 @@ class Collector:
                 self.endpoint + "/v1/ingest/batches", data=body, method="POST",
                 headers={"Authorization": "Bearer " + self.token, "Content-Type": "application/json", "Idempotency-Key": key},
             )
-            try:
-                with urllib.request.urlopen(request, timeout=15, context=ssl.create_default_context()) as response:
-                    acknowledgement = json.loads(response.read())
-                    if response.status not in {200, 201} or acknowledgement.get("status") != "committed":
-                        raise RuntimeError("server did not return a commit acknowledgement")
-            except (OSError, urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, RuntimeError):
-                result["errors"] += 1
-                break
+            acknowledgement = None
+            for attempt in range(5):
+                try:
+                    with urllib.request.urlopen(request, timeout=60, context=ssl.create_default_context()) as response:
+                        acknowledgement = json.loads(response.read())
+                        if response.status not in {200, 201} or acknowledgement.get("status") != "committed":
+                            raise RuntimeError("server did not return a commit acknowledgement")
+                    break
+                except urllib.error.HTTPError as exc:
+                    result["errors"] += 1
+                    if exc.code < 500:
+                        return result
+                except (OSError, urllib.error.URLError):
+                    result["errors"] += 1
+                except (json.JSONDecodeError, RuntimeError):
+                    result["errors"] += 1
+                    return result
+                if attempt < 4:
+                    time.sleep(min(2 ** attempt, 10))
+            if acknowledgement is None:
+                return result
             receipts = acknowledgement.get("receipts", [])
             if len(receipts) != len(rows):
                 result["errors"] += 1
