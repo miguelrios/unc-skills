@@ -1,0 +1,36 @@
+{
+  "name": "@parcha/recall",
+  "version": "0.1.0",
+  "description": "Indexed search over Claude Code + Codex session history — find, continue, repeat, or skill-ify prior work",
+  "bin": {
+    "recall-plugin": "./bin/recall.js"
+  },
+  "files": [
+    "bin/",
+    "skills/",
+    "install.sh",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "python3 -m unittest discover -s tests -v && python3 -m py_compile skills/recall/scripts/recall.py && python3 -m json.tool .claude-plugin/plugin.json >/dev/null && node --check bin/recall.js",
+    "pack:check": "npm pack --dry-run"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/miguelrios/unc-skills.git",
+    "directory": "recall"
+  },
+  "keywords": [
+    "claude-code",
+    "codex",
+    "session-history",
+    "search",
+    "memory"
+  ],
+  "author": "Parcha Labs (https://parcha.com)",
+  "license": "MIT"
+}

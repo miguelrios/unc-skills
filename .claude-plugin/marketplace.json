@@ -25,6 +25,12 @@
       "source": "./cascade",
       "version": "0.1.0",
       "description": "Cascading development loops — plan, advance, or take over a chain of bounded, evidence-gated development loops."
+    },
+    {
+      "name": "recall",
+      "source": "./recall",
+      "version": "0.1.0",
+      "description": "Indexed search over Claude Code + Codex session history — find, continue, repeat, or skill-ify prior work"
     }
   ]
 }
