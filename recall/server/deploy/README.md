@@ -24,7 +24,8 @@ tailscale serve --bg --https=9443 unix:/run/user/$(id -u)/recall-brain.sock
 
 Do not use Funnel. Preserve unrelated Serve listeners by configuring only the dedicated 9443
 listener. Collectors receive revocable tokens from `recall_server.cli token-create`; plaintext
-is shown once and only its SHA-256 is stored.
+is emitted once and only its SHA-256 is stored. Use `--output /secure/mode-0600-file.json` so the
+plaintext never enters terminal or session logs; the command refuses to overwrite an existing file.
 
 The pilot uses a five-minute logical-backup timer for a bounded RPO. Before multi-user scale or
 C10 production cutover, replace it with continuous WAL archival plus daily base backups; the
