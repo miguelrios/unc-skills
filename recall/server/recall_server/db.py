@@ -104,6 +104,8 @@ class BrainStore:
     def ingest(self, idempotency_key: str, events: list[dict]) -> tuple[dict, bool]:
         if not idempotency_key or len(idempotency_key) > 200:
             raise ValueError("invalid idempotency key")
+        if not events:
+            raise ValueError("empty ingest batch")
         for envelope in events:
             validate_envelope(envelope)
         request_hash = hashlib.sha256(canonical_json(events)).hexdigest()
@@ -150,26 +152,37 @@ class BrainStore:
                         "INSERT INTO source_grants(source_id,principal_id,permission) VALUES (%s,%s,'owner') ON CONFLICT DO NOTHING",
                         (source_id, principal_id),
                     )
+                identities = sorted({(envelope["source_id"], envelope["native_id"]) for envelope in events})
+                lock_keys = [advisory_lock_key(source_id, native_id) for source_id, native_id in identities]
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(value,0)) FROM unnest(%s::text[]) AS locks(value) ORDER BY value",
+                    (lock_keys,),
+                ).fetchall()
+                wanted = ",".join(["(%s,%s)"] * len(identities))
+                identity_params = [value for identity in identities for value in identity]
+                existing_rows = conn.execute(
+                    f"""WITH wanted(source_id,native_id) AS (VALUES {wanted})
+                        SELECT event.id,event.source_id,event.native_id,event.content_sha256,event.revision
+                        FROM source_events event JOIN wanted USING(source_id,native_id)""",
+                    identity_params,
+                ).fetchall()
+                existing_by_content = {
+                    (row["source_id"], row["native_id"], row["content_sha256"]): row["revision"]
+                    for row in existing_rows
+                }
+                max_revision = {}
+                for row in existing_rows:
+                    identity = (row["source_id"], row["native_id"])
+                    max_revision[identity] = max(max_revision.get(identity, 0), row["revision"])
                 for envelope in events:
                     source_id = envelope["source_id"]
-                    # Serialize revision allocation for one source-native identity while
-                    # allowing unrelated identities to ingest concurrently.
-                    conn.execute(
-                        "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
-                        (advisory_lock_key(source_id, envelope["native_id"]),),
-                    )
-                    existing_event = conn.execute(
-                        "SELECT id,revision FROM source_events WHERE source_id=%s AND native_id=%s AND content_sha256=%s",
-                        (source_id, envelope["native_id"], envelope["content_sha256"]),
-                    ).fetchone()
-                    if existing_event:
-                        revision = existing_event["revision"]
+                    identity = (source_id, envelope["native_id"])
+                    content_identity = (*identity, envelope["content_sha256"])
+                    if content_identity in existing_by_content:
+                        revision = existing_by_content[content_identity]
                         duplicate_events += 1
                     else:
-                        revision = conn.execute(
-                            "SELECT COALESCE(max(revision),0)+1 AS revision FROM source_events WHERE source_id=%s AND native_id=%s",
-                            (source_id, envelope["native_id"]),
-                        ).fetchone()["revision"]
+                        revision = max_revision.get(identity, 0) + 1
                         row = conn.execute(
                             """INSERT INTO source_events(source_id,native_id,native_parent_id,kind,occurred_at,observed_at,
                                principal_id,visibility,content_type,content_sha256,revision,envelope,is_tombstone,batch_id)
@@ -180,6 +193,8 @@ class BrainStore:
                              json.dumps(envelope), envelope["kind"] == "tombstone", batch_id),
                         ).fetchone()
                         self._project_one(conn, row["id"], envelope, revision)
+                        existing_by_content[content_identity] = revision
+                        max_revision[identity] = revision
                         inserted += 1
                     receipts.append(event_receipt(source_id, envelope["native_id"], revision))
 
