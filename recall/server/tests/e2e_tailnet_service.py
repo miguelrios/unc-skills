@@ -79,6 +79,7 @@ def main() -> None:
     collector_data = json.loads(Path(os.environ["RECALL_COLLECTOR_TOKEN_FILE"]).read_text())
     metrics_data = json.loads(Path(os.environ["RECALL_METRICS_TOKEN_FILE"]).read_text())
     collector_token = collector_data["token"]
+    collector_name = collector_data["name"]
     metrics_token = metrics_data["token"]
     run_id = os.environ.get("RECALL_E2E_RUN_ID", "pilot")
     source_id = os.environ.get("RECALL_E2E_SOURCE", "pilot:collector")
@@ -132,7 +133,7 @@ def main() -> None:
     assert all(no_tcp.values())
 
     # Revocation is immediate on the next request.
-    assert BrainStore(dsn).revoke_collector_token("pilot-collector")
+    assert BrainStore(dsn).revoke_collector_token(collector_name)
     revoked_status, _, _ = http(base, "GET", "/v1/receipts/resolve?" + encoded, token=collector_token)
     assert revoked_status == 401
 
