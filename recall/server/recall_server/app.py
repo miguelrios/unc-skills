@@ -53,11 +53,15 @@ class Handler(BaseHTTPRequestHandler):
     def trusted_proxy_peer(self) -> bool:
         """Trust identity headers only from root/tailscaled over a Unix socket."""
         if not getattr(self.server, "is_unix_socket", False):
+            LOG.warning("tailscale identity rejected transport=tcp")
             return False
         try:
-            _pid, uid, _gid = struct.unpack("3i", self.connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
-            return uid == 0
+            pid, uid, _gid = struct.unpack("3i", self.connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+            trusted = uid == 0
+            LOG.info("tailscale proxy peer trusted=%s uid=%s pid=%s identity_header_present=%s", trusted, uid, pid, bool(self.headers.get("Tailscale-User-Login")))
+            return trusted
         except (AttributeError, OSError, struct.error):
+            LOG.exception("tailscale identity rejected reason=peer_credential_error")
             return False
 
     def require(self, scope: str) -> dict | None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from .db import BrainStore
 
 
 def main() -> None:
+    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format="%(levelname)s %(message)s")
     ap = argparse.ArgumentParser(prog="recall-server")
     ap.add_argument("--dsn", default=os.environ.get("RECALL_DATABASE_URL"))
     sub = ap.add_subparsers(dest="command", required=True)
