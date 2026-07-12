@@ -33,6 +33,16 @@ The pilot uses a five-minute logical-backup timer for a bounded RPO. Before mult
 C10 production cutover, replace it with continuous WAL archival plus daily base backups; the
 same blank-database restore/fingerprint contract remains the gate.
 
+Linux history collectors use `recall-collector@.service` with separate `claude` and `codex`
+environment/token files. Issue one source-scoped credential per unit, install the two example
+environment files with mode 0600 after replacing every value, then enable the instances:
+
+```bash
+install -m 0644 ~/services/recall-brain/recall/server/deploy/recall-collector@.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now recall-collector@claude recall-collector@codex
+```
+
 Back up and run a blank-database restore proof:
 
 ```bash

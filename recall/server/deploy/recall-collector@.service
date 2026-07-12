@@ -1,0 +1,21 @@
+[Unit]
+Description=Recall %i history collector
+After=network-online.target recall-brain.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/services/recall-brain/recall
+EnvironmentFile=%h/.config/recall-brain/collector-%i.env
+ExecStart=%h/.config/recall-brain/venv/bin/python -m collector.cli watch --harness ${RECALL_HARNESS} --root ${RECALL_ROOT} --source-id ${RECALL_SOURCE_ID} --spool ${RECALL_SPOOL} --endpoint ${RECALL_ENDPOINT} --token-file ${RECALL_COLLECTOR_TOKEN_FILE} --interval 30
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/state/recall-brain
+
+[Install]
+WantedBy=default.target
