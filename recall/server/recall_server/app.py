@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlsplit
 from .db import BrainStore, IdempotencyConflict
 
 LOG = logging.getLogger("recall.brainstore")
-MAX_BODY_BYTES = 2 * 1024 * 1024
+MAX_BODY_BYTES = 12 * 1024 * 1024
 COUNTERS = {
     "http_requests": 0,
     "http_errors": 0,

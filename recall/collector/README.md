@@ -20,6 +20,9 @@ python -m collector.cli run \
 `doctor` reports file coverage, parse/dead-letter rate, pending/acked records, committed files,
 and acknowledgement latency p95. `locate --receipt ...` maps a central receipt back to its
 original local file and exact byte window without retaining acknowledged envelope bodies.
+Transport batches are capped at 8 MB under the server's authenticated 12 MB request ceiling.
+An oversized row retains its source coordinates and is losslessly recoverable with `recover` after
+a limit upgrade; it is never counted as acknowledged while dead.
 
 Structured values whose keys name credentials—including `LITELLM_MASTER_KEY`—are replaced before
 spooling. Non-JSONL files and paths outside the configured root are never discovered.

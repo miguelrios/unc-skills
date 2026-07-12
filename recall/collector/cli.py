@@ -24,7 +24,7 @@ def token_from_file(path: str) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Acknowledgement-gated Recall history collector")
-    parser.add_argument("command", choices=("scan", "flush", "run", "watch", "doctor", "locate"))
+    parser.add_argument("command", choices=("scan", "flush", "run", "watch", "doctor", "locate", "recover"))
     parser.add_argument("--harness", choices=("claude", "codex"), required=True)
     parser.add_argument("--root", required=True)
     parser.add_argument("--source-id", required=True)
@@ -52,6 +52,8 @@ def main() -> None:
             print(json.dumps({"scan": collector.scan(), "flush": collector.flush(), "doctor": collector.doctor()}, sort_keys=True))
         elif args.command == "doctor":
             print(json.dumps(collector.doctor(), sort_keys=True))
+        elif args.command == "recover":
+            print(json.dumps(collector.recover_dead_payloads(), sort_keys=True))
         elif args.command == "locate":
             if not args.receipt:
                 parser.error("--receipt is required for locate")

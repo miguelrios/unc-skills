@@ -5,6 +5,7 @@ import hashlib
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -205,6 +206,21 @@ class CollectorTest(unittest.TestCase):
         self.assertEqual(collector.flush()["acked"], 1)
         received = AckServer.received[-1]["events"][0]["content"]["message"]["content"]
         self.assertEqual(received, "before[NUL]after")
+        collector.close()
+
+    def test_oversized_dead_row_recovers_from_exact_source_window(self) -> None:
+        (self.root / "session.jsonl").write_text(claude_line("x" * 1000))
+        collector = self.collector(); collector.scan()
+        with mock.patch("collector.collector.MAX_BATCH_BYTES", 300):
+            first = collector.flush()
+        self.assertEqual(first["acked"], 0)
+        self.assertEqual(collector.doctor()["dead"], 1)
+        with mock.patch("collector.collector.MAX_BATCH_BYTES", 10_000):
+            second = collector.flush()
+        self.assertEqual(second["recovered"], 1)
+        self.assertEqual(second["acked"], 1)
+        self.assertEqual(collector.doctor()["dead"], 0)
+        self.assertFalse(any(x["error_code"] == "PayloadTooLarge" for x in collector.doctor()["dead_letters"]))
         collector.close()
 
 

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 COLLECTOR_VERSION = 1
-MAX_BATCH_BYTES = 1_500_000
+MAX_BATCH_BYTES = 8_000_000
 SENSITIVE_KEY = re.compile(r"(?:litellm.*master.*key|api[_-]?key|password|secret|authorization|bearer|token)", re.I)
 SENSITIVE_LINE = re.compile(r"(?i)(LITELLM_MASTER_KEY|api[_-]?key|password|secret|authorization|bearer|token)\s*[=:]\s*\S+")
 
@@ -287,6 +287,44 @@ class Collector:
     def pending_envelopes(self) -> list[dict]:
         return [json.loads(row["envelope_json"]) for row in self.db.execute("SELECT envelope_json FROM outbox WHERE state='pending' ORDER BY id")]
 
+    def recover_dead_payloads(self) -> dict:
+        result = {"recovered": 0, "unrecoverable": 0}
+        rows = list(self.db.execute("SELECT * FROM outbox WHERE state='dead' ORDER BY id"))
+        for row in rows:
+            try:
+                path = Path(row["path"])
+                with path.open("rb") as source:
+                    source.seek(row["start_offset"])
+                    raw = source.read(row["end_offset"] - row["start_offset"])
+                if not raw.endswith(b"\n"):
+                    raise ValueError("source byte window is no longer a complete record")
+                content = json.loads(raw)
+                if not isinstance(content, dict):
+                    raise ValueError("record is not an object")
+                versioned = self._versioned_record_content(row["native_id"], content, was_active=True)
+                envelope = self._envelope(
+                    path, row["native_id"], "transcript_record", versioned,
+                    normalized_timestamp(content.get("timestamp"), path.stat().st_mtime),
+                    row["start_offset"], row["end_offset"],
+                )
+                self.db.execute(
+                    "UPDATE outbox SET state='pending',content_sha256=?,envelope_json=?,queued_at=?,acked_at=NULL,receipt=NULL WHERE id=?",
+                    (envelope["content_sha256"], canonical_json(envelope).decode(), time.time(), row["id"]),
+                )
+                self.db.execute(
+                    "DELETE FROM dead_letters WHERE path=? AND error_code='PayloadTooLarge'",
+                    (row["path"],),
+                )
+                result["recovered"] += 1
+            except (OSError, ValueError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+                self.db.execute(
+                    "INSERT OR IGNORE INTO dead_letters(path,byte_offset,error_code,error_summary,created_at) VALUES (?,?,?,?,?)",
+                    (row["path"], row["start_offset"], "RecoveryError", str(exc)[:300], time.time()),
+                )
+                result["unrecoverable"] += 1
+        self.db.commit()
+        return result
+
     def _repair_pending_envelope(self, row: sqlite3.Row) -> dict:
         envelope = json.loads(row["envelope_json"])
         clean = sanitize(envelope["content"])
@@ -310,7 +348,8 @@ class Collector:
         return repaired
 
     def flush(self) -> dict:
-        result = {"batches": 0, "acked": 0, "replayed_batches": 0, "errors": 0}
+        recovery = self.recover_dead_payloads()
+        result = {"batches": 0, "acked": 0, "replayed_batches": 0, "errors": 0, **recovery}
         while True:
             candidates = [self._repair_pending_envelope(row) for row in self.db.execute("SELECT * FROM outbox WHERE state='pending' ORDER BY id LIMIT ?", (self.batch_size,))]
             self.db.commit()
@@ -323,7 +362,7 @@ class Collector:
                         self.db.execute("UPDATE outbox SET state='dead',envelope_json='{}' WHERE id=?", (candidate["id"],))
                         self.db.execute(
                             "INSERT OR IGNORE INTO dead_letters(path,byte_offset,error_code,error_summary,created_at) VALUES (?,?,?,?,?)",
-                            (candidate["path"], 0, "PayloadTooLarge", f"sanitized envelope exceeds {MAX_BATCH_BYTES} bytes", time.time()),
+                            (candidate["path"], candidate["start_offset"], "PayloadTooLarge", f"sanitized envelope exceeds {MAX_BATCH_BYTES} bytes", time.time()),
                         )
                     result["errors"] += 1
                     continue
