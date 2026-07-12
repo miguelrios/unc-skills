@@ -64,7 +64,7 @@ def normalized_timestamp(value: Any, fallback_epoch: float) -> str:
 
 class Collector:
     def __init__(self, *, root: Path, harness: str, source_id: str, spool_path: Path,
-                 endpoint: str, token: str, principal_id: str = "owner", batch_size: int = 100):
+                 endpoint: str, token: str, principal_id: str = "owner", batch_size: int = 500):
         if harness not in {"claude", "codex"}:
             raise ValueError("harness must be claude or codex")
         self.root = Path(root).expanduser().resolve()
