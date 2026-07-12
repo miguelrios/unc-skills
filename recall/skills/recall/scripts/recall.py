@@ -88,6 +88,10 @@ def connect(db_path: Path) -> sqlite3.Connection:
     os.chmod(db_path.parent, 0o700)
     conn = sqlite3.connect(db_path)
     os.chmod(db_path, 0o600)
+    # WAL keeps readers live during ingest — a session-start related query
+    # must not starve behind a running delta-index's writer lock.
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=3000")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -97,6 +101,7 @@ def connect_ro(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA query_only=ON")
+    conn.execute("PRAGMA busy_timeout=700")
     return conn
 
 
