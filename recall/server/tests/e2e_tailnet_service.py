@@ -113,7 +113,17 @@ def main() -> None:
     metrics_text = metrics_raw.decode()
     assert metrics_status == 200 and "text/plain" in content_type
     assert marker not in metrics_text and collector_token not in metrics_text and metrics_token not in metrics_text
-    for required in ("recall_http_requests_total", "recall_auth_denied_total", "recall_source_events", "recall_dead_letters", "recall_projection_lag"):
+    for required in (
+        "recall_http_requests_total",
+        "recall_http_errors_total",
+        "recall_http_request_duration_seconds_count",
+        "recall_http_request_duration_seconds_sum",
+        "recall_auth_denied_total",
+        "recall_source_events",
+        "recall_source_freshness_seconds",
+        "recall_dead_letters",
+        "recall_projection_lag",
+    ):
         assert required in metrics_text
 
     # Same-user direct Unix access cannot forge the root tailscaled peer identity.

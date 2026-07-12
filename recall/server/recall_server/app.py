@@ -7,6 +7,7 @@ import socket
 import socketserver
 import struct
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
@@ -14,7 +15,15 @@ from .db import BrainStore, IdempotencyConflict
 
 LOG = logging.getLogger("recall.brainstore")
 MAX_BODY_BYTES = 2 * 1024 * 1024
-COUNTERS = {"http_requests": 0, "auth_denied": 0, "ingest_commits": 0, "ingest_replays": 0}
+COUNTERS = {
+    "http_requests": 0,
+    "http_errors": 0,
+    "http_duration_count": 0,
+    "http_duration_sum": 0.0,
+    "auth_denied": 0,
+    "ingest_commits": 0,
+    "ingest_replays": 0,
+}
 COUNTER_LOCK = threading.Lock()
 
 
@@ -25,6 +34,9 @@ class Handler(BaseHTTPRequestHandler):
         LOG.info("http method=%s path=%s status=%s", self.command, self.path.split("?", 1)[0], args[1] if len(args) > 1 else "unknown")
 
     def send_json(self, status: int, body: object) -> None:
+        if status >= 400:
+            with COUNTER_LOCK:
+                COUNTERS["http_errors"] += 1
         data = json.dumps(body, default=str, sort_keys=True).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -86,6 +98,13 @@ class Handler(BaseHTTPRequestHandler):
             "# HELP recall_http_requests_total HTTP requests handled.",
             "# TYPE recall_http_requests_total counter",
             f"recall_http_requests_total {counters['http_requests']}",
+            "# HELP recall_http_errors_total HTTP responses with status 4xx or 5xx.",
+            "# TYPE recall_http_errors_total counter",
+            f"recall_http_errors_total {counters['http_errors']}",
+            "# HELP recall_http_request_duration_seconds Request handling time without route or content labels.",
+            "# TYPE recall_http_request_duration_seconds summary",
+            f"recall_http_request_duration_seconds_count {counters['http_duration_count']}",
+            f"recall_http_request_duration_seconds_sum {counters['http_duration_sum']:.9f}",
             "# HELP recall_auth_denied_total Requests rejected by authentication.",
             "# TYPE recall_auth_denied_total counter",
             f"recall_auth_denied_total {counters['auth_denied']}",
@@ -98,14 +117,21 @@ class Handler(BaseHTTPRequestHandler):
             f"recall_source_events {db['source_events']}",
             f"recall_dead_letters {db['dead_letters']}",
             f"recall_projection_lag {db['projection_lag']}",
+            f"recall_source_freshness_seconds {db['source_freshness_seconds']}",
             "",
         ]
         return "\n".join(lines).encode()
 
     def handle_one_request(self) -> None:
+        started = time.monotonic()
         with COUNTER_LOCK:
             COUNTERS["http_requests"] += 1
-        super().handle_one_request()
+        try:
+            super().handle_one_request()
+        finally:
+            with COUNTER_LOCK:
+                COUNTERS["http_duration_count"] += 1
+                COUNTERS["http_duration_sum"] += time.monotonic() - started
 
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)

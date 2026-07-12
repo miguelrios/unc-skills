@@ -84,6 +84,9 @@ class BrainStore:
                        COALESCE((SELECT max(id) FROM source_events),0) -
                        COALESCE((SELECT last_event_id FROM projection_watermarks WHERE projector='items'),0)) AS n"""
                 ).fetchone()["n"],
+                "source_freshness_seconds": conn.execute(
+                    "SELECT COALESCE(GREATEST(0, extract(epoch FROM now() - max(created_at)))::bigint, 0) AS n FROM source_events"
+                ).fetchone()["n"],
             }
 
     def record_dead_letter(self, error_code: str, summary: str) -> None:
