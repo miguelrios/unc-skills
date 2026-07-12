@@ -57,7 +57,12 @@ class Handler(BaseHTTPRequestHandler):
             return False
         try:
             pid, uid, _gid = struct.unpack("3i", self.connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
-            trusted = uid == 0
+            trusted_uids = {
+                int(value.strip())
+                for value in os.environ.get("RECALL_TRUSTED_PROXY_UIDS", "0").split(",")
+                if value.strip().isdigit()
+            }
+            trusted = uid in trusted_uids
             LOG.info("tailscale proxy peer trusted=%s uid=%s pid=%s identity_header_present=%s", trusted, uid, pid, bool(self.headers.get("Tailscale-User-Login")))
             return trusted
         except (AttributeError, OSError, struct.error):

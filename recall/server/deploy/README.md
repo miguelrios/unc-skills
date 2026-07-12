@@ -2,8 +2,10 @@
 
 The application listens on a Unix socket, not TCP. Tailscale Serve is the only network proxy.
 On Linux, the server verifies `SO_PEERCRED` and trusts Tailscale identity headers only when the
-Unix-socket peer UID is root (the local `tailscaled` proxy). A same-user process that connects
-directly and forges `Tailscale-User-Login` is rejected.
+Unix-socket peer UID is explicitly allowlisted. Ubuntu's sandboxed `tailscaled` uses UID 65534;
+root is UID 0. Neither identity is assumable by the interactive user, so a same-user process that
+connects directly and forges `Tailscale-User-Login` is rejected. Narrow
+`RECALL_TRUSTED_PROXY_UIDS` to the UIDs observed for the local `tailscaled` service.
 
 Install from an immutable, reviewed checkout at `~/services/recall-brain`. The service unit never
 points at a contributor's active checkout.
