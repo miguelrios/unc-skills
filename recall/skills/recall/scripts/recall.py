@@ -636,26 +636,28 @@ def related(args) -> int:
     where, par = [], []
     if cwd: where.append("s.cwd LIKE ?"); par.append("%"+cwd+"%")
     if branch: where.append("s.git_branch LIKE ?"); par.append("%"+branch+"%")
-    contexts = conn.execute("SELECT id FROM sessions s WHERE " + (" OR ".join(where) if where else "0") + " ORDER BY s.ended_at DESC LIMIT 50", par).fetchall()
+    n_ctx, n_vals = (10, 100) if args.fast else (20, 300)
+    contexts = conn.execute("SELECT id FROM sessions s WHERE " + (" OR ".join(where) if where else "0") + f" ORDER BY s.ended_at DESC LIMIT {n_ctx}", par).fetchall()
     context_ids = [r[0] for r in contexts]
-    values = set()
+    values: list[str] = []
     if context_ids:
         marks = ",".join("?" * len(context_ids))
-        values = {r[0] for r in conn.execute("SELECT DISTINCT e.value FROM entities e JOIN chunks c ON c.id=e.chunk_id WHERE c.session_id IN ("+marks+") AND e.kind='file_path' LIMIT 1000", context_ids)}
-    candidates = conn.execute("SELECT s.id,f.path,s.cwd,s.git_branch,s.ended_at FROM sessions s JOIN files f ON f.id=s.file_id WHERE f.status != 'tombstone' ORDER BY s.ended_at DESC LIMIT 2000").fetchall()
-    candidate_ids = [r["id"] for r in candidates]
-    entity_map: dict[int, set[str]] = {}
-    if values and candidate_ids:
-        for start in range(0, len(candidate_ids), 500):
-            batch = candidate_ids[start:start + 500]
-            marks = ",".join("?" * len(batch))
-            for entity_row in conn.execute("SELECT c.session_id,e.value FROM entities e JOIN chunks c ON c.id=e.chunk_id WHERE c.session_id IN ("+marks+") AND e.kind='file_path'", batch):
-                entity_map.setdefault(entity_row[0], set()).add(entity_row[1])
+        values = [r[0] for r in conn.execute("SELECT DISTINCT e.value FROM entities e JOIN chunks c ON c.id=e.chunk_id WHERE c.session_id IN ("+marks+f") AND e.kind='file_path' LIMIT {n_vals}", context_ids)]
+    # Invert the overlap lookup: one indexed pass over the context's file-path
+    # values finds sharing sessions directly — never a per-candidate scan.
+    overlap_counts: dict[int, int] = {}
+    for start in range(0, len(values), 300):
+        batch = values[start:start + 300]
+        marks = ",".join("?" * len(batch))
+        for sid, n in conn.execute("SELECT c.session_id, count(DISTINCT e.value) FROM entities e JOIN chunks c ON c.id=e.chunk_id WHERE e.kind='file_path' AND e.value IN ("+marks+") GROUP BY c.session_id", batch):
+            overlap_counts[sid] = overlap_counts.get(sid, 0) + n
+    candidates = conn.execute("SELECT s.id,f.path,s.cwd,s.git_branch,s.ended_at FROM sessions s JOIN files f ON f.id=s.file_id WHERE f.status != 'tombstone' ORDER BY s.ended_at DESC LIMIT 500").fetchall()
     ranked = []
     for row in candidates:
+        if args.mains_only and "/subagents/" in row["path"]:
+            continue
         overlap = int(bool(cwd and cwd in (row["cwd"] or ""))) + int(bool(branch and branch == row["git_branch"]))
-        if values:
-            overlap += len(values & entity_map.get(row["id"], set()))
+        overlap += overlap_counts.get(row["id"], 0)
         if overlap:
             recency = 1 / (1 + max(0, time.time()-(row["ended_at"] or 0))/86400/180)
             ranked.append((overlap + recency, row, overlap))
@@ -729,7 +731,7 @@ def main(argv=None) -> int:
     p = sub.add_parser("index"); p.add_argument("--rebuild", action="store_true"); p.set_defaults(func=ingest)
     p = sub.add_parser("search"); p.add_argument("query"); p.add_argument("--since"); p.add_argument("--until"); p.add_argument("--cwd"); p.add_argument("--branch"); p.add_argument("--harness", choices=("claude","codex")); p.add_argument("--limit", type=int, default=10); p.add_argument("--paths", action="store_true"); p.set_defaults(func=search)
     p = sub.add_parser("show"); p.add_argument("target"); p.add_argument("--around"); p.add_argument("--prompts", action="store_true"); p.add_argument("--tail", type=int, default=0, help="print only the last N chunks"); p.set_defaults(func=show)
-    p = sub.add_parser("related"); p.add_argument("--cwd"); p.add_argument("--branch"); p.add_argument("--limit", type=int, default=10); p.set_defaults(func=related)
+    p = sub.add_parser("related"); p.add_argument("--cwd"); p.add_argument("--branch"); p.add_argument("--limit", type=int, default=10); p.add_argument("--mains-only", action="store_true", help="exclude subagent transcripts"); p.add_argument("--fast", action="store_true", help="tight caps for the session-start hook budget"); p.set_defaults(func=related)
     p = sub.add_parser("doctor"); p.set_defaults(func=doctor)
     p = sub.add_parser("eval"); p.add_argument("--split", default="dev", choices=("dev","holdout")); p.add_argument("--out", default="recall-eval.json"); p.set_defaults(func=run_eval)
     args = ap.parse_args(argv)
