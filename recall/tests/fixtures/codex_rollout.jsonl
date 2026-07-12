@@ -1,0 +1,5 @@
+{"timestamp":"2026-02-03T04:05:06Z","type":"session_meta","payload":{"cwd":"/work/codex-project","model":"gpt-test","title":"Codex fixture","first_user_prompt":"Find short uuid 12345678; full 12345678-1234-1234-1234-123456789abc","git_branch":"main"}}
+{"timestamp":"2026-02-03T04:05:07Z","type":"response_item","payload":{"role":"user","content":[{"type":"input_text","text":"Find short uuid 12345678; full 12345678-1234-1234-1234-123456789abc"}]}}
+{"timestamp":"2026-02-03T04:05:08Z","type":"response_item","payload":{"role":"assistant","content":[{"type":"output_text","text":"I found it in app/main.py."}]}}
+{"timestamp":"2026-02-03T04:05:09Z","type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\": \"rg uuid app/main.py\"}"}}
+{"timestamp":"2026-02-03T04:05:10Z","type":"response_item","payload":{"type":"function_call_output","output":"uuid found"}}

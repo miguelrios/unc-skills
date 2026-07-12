@@ -1,0 +1,2 @@
+{"type":"user","timestamp":"2026-01-02T03:04:05Z","cwd":"/work/grep123/project","gitBranch":"feat/recall","message":{"content":"Please inspect src/engine.py for PAR-123 and #6644."}}
+{"type":"assistant","timestamp":"2026-01-02T03:04:06Z","cwd":"/work/grep123/project","gitBranch":"feat/recall","message":{"content":[{"type":"text","text":"Launching skill: recall-search"},{"type":"tool_use","name":"Read","input":{"path":"src/engine.py"}},{"type":"tool_result","content":"worked"}]}}
