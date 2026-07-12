@@ -1,10 +1,12 @@
-name: CI
+name: recall-ci
 
 on:
   push:
     branches: ["main"]
+    paths: ["recall/**"]
   pull_request:
     branches: ["main"]
+    paths: ["recall/**"]
 
 jobs:
   test:
