@@ -29,7 +29,8 @@ def sanitize(value: Any) -> Any:
     if isinstance(value, list):
         return [sanitize(item) for item in value]
     if isinstance(value, str):
-        return "\n".join("[REDACTED]" if SENSITIVE_LINE.search(line) else line for line in value.splitlines())
+        without_nul = value.replace("\x00", "[NUL]")
+        return "\n".join("[REDACTED]" if SENSITIVE_LINE.search(line) else line for line in without_nul.splitlines())
     return value
 
 
@@ -286,11 +287,34 @@ class Collector:
     def pending_envelopes(self) -> list[dict]:
         return [json.loads(row["envelope_json"]) for row in self.db.execute("SELECT envelope_json FROM outbox WHERE state='pending' ORDER BY id")]
 
+    def _repair_pending_envelope(self, row: sqlite3.Row) -> dict:
+        envelope = json.loads(row["envelope_json"])
+        clean = sanitize(envelope["content"])
+        if clean == envelope["content"]:
+            return dict(row)
+        old_sha = envelope["content_sha256"]
+        envelope["content"] = clean
+        envelope["content_sha256"] = hashlib.sha256(canonical_json(clean)).hexdigest()
+        rendered = canonical_json(envelope).decode()
+        self.db.execute(
+            "UPDATE outbox SET content_sha256=?,envelope_json=? WHERE id=?",
+            (envelope["content_sha256"], rendered, row["id"]),
+        )
+        self.db.execute(
+            "UPDATE active_records SET content_sha256=? WHERE path=? AND native_id=? AND content_sha256=?",
+            (envelope["content_sha256"], row["path"], row["native_id"], old_sha),
+        )
+        repaired = dict(row)
+        repaired["content_sha256"] = envelope["content_sha256"]
+        repaired["envelope_json"] = rendered
+        return repaired
+
     def flush(self) -> dict:
         result = {"batches": 0, "acked": 0, "replayed_batches": 0, "errors": 0}
         while True:
-            candidates = list(self.db.execute("SELECT * FROM outbox WHERE state='pending' ORDER BY id LIMIT ?", (self.batch_size,)))
-            rows: list[sqlite3.Row] = []
+            candidates = [self._repair_pending_envelope(row) for row in self.db.execute("SELECT * FROM outbox WHERE state='pending' ORDER BY id LIMIT ?", (self.batch_size,))]
+            self.db.commit()
+            rows: list[dict] = []
             body_size = len(b'{"events":[]}')
             for candidate in candidates:
                 event_size = len(candidate["envelope_json"].encode()) + 1

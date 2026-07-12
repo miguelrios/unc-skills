@@ -195,6 +195,13 @@ def main() -> None:
                 dead = conn.execute("SELECT error_code,error_summary FROM dead_letters ORDER BY id DESC LIMIT 1").fetchone()
                 assert dead and secret not in json.dumps(dead)
 
+            # PostgreSQL JSONB rejects NUL, but the HTTP boundary must not let the driver's
+            # payload excerpt escape through socketserver traceback logging.
+            nul_marker = "nul-private-marker"
+            nul = make_envelope("nul-record", {"text": nul_marker + "\x00tail"}, parent="nul-session")
+            status, rejected = request(base, "POST", "/v1/ingest/batches", {"events": [nul]}, "bad-nul")
+            assert status == 500 and rejected == {"error": "ingest failed"}
+
             # Tombstone removes live projection; rebuild is receipt-equivalent and reapplies it.
             tombstone = make_envelope("session-1:turn-1", {"target_native_id": "session-1:turn-1"}, kind="tombstone")
             status, tomb_ack = request(base, "POST", "/v1/ingest/batches", {"events": [tombstone]}, "batch-tombstone")
@@ -212,6 +219,7 @@ def main() -> None:
 
             log.flush()
             assert secret not in log_path.read_text()
+            assert nul_marker not in log_path.read_text()
             with store.connect() as conn:
                 summary = {
                     "source_events": conn.execute("SELECT count(*) AS n FROM source_events").fetchone()["n"],

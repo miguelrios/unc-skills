@@ -192,6 +192,14 @@ class Handler(BaseHTTPRequestHandler):
         except BrokenPipeError:
             # Commit may already be durable; replaying the idempotency key returns its ack.
             return
+        except Exception as exc:
+            # Never let driver exceptions render payload excerpts through socketserver tracebacks.
+            LOG.error("ingest failed type=%s", type(exc).__name__)
+            try:
+                self.store.record_dead_letter(type(exc).__name__, "database rejected ingest")
+            except Exception:
+                LOG.error("dead-letter write failed after ingest error")
+            self.send_json(500, {"error": "ingest failed"})
 
 
 def serve(dsn: str, host: str = "127.0.0.1", port: int = 8788) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import tempfile
 import threading
 import unittest
@@ -18,6 +19,7 @@ class AckServer(BaseHTTPRequestHandler):
     batches: dict[str, dict] = {}
     drop_after_first_commit = False
     requests = 0
+    received: list[dict] = []
 
     def log_message(self, *_args) -> None:
         pass
@@ -25,6 +27,7 @@ class AckServer(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         length = int(self.headers["Content-Length"])
         body = json.loads(self.rfile.read(length))
+        type(self).received.append(body)
         key = self.headers["Idempotency-Key"]
         type(self).requests += 1
         ack = type(self).batches.get(key)
@@ -60,6 +63,7 @@ class CollectorTest(unittest.TestCase):
         AckServer.batches = {}
         AckServer.requests = 0
         AckServer.drop_after_first_commit = False
+        AckServer.received = []
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), AckServer)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -147,7 +151,7 @@ class CollectorTest(unittest.TestCase):
 
     def test_scope_and_master_key_are_sanitized_and_unrelated_files_ignored(self) -> None:
         (self.root / "session.jsonl").write_text(
-            json.dumps({"type": "user", "timestamp": "2026-07-12T22:00:00Z", "message": {"content": "ok"}, "LITELLM_MASTER_KEY": "forbidden-value"}) + "\n"
+            json.dumps({"type": "user", "timestamp": "2026-07-12T22:00:00Z", "message": {"content": "ok\x00after"}, "LITELLM_MASTER_KEY": "forbidden-value"}) + "\n"
         )
         (self.root / "notes.txt").write_text("must not ingest")
         collector = self.collector(); collector.scan()
@@ -156,6 +160,8 @@ class CollectorTest(unittest.TestCase):
         rendered = json.dumps(payloads)
         self.assertNotIn("forbidden-value", rendered)
         self.assertIn("[REDACTED]", rendered)
+        self.assertNotIn("\x00", payloads[0]["content"]["message"]["content"])
+        self.assertIn("[NUL]", payloads[0]["content"]["message"]["content"])
         self.assertNotIn("notes.txt", rendered)
         self.assertEqual(payloads[0]["source_id"], "claude:linux:test")
         collector.close()
@@ -181,6 +187,25 @@ class CollectorTest(unittest.TestCase):
         self.assertEqual(scan["records_queued"], 1)
         self.assertEqual(len(resumed.pending_envelopes()), 1001)
         resumed.close()
+
+    def test_flush_repairs_nul_in_an_already_durable_spool_row(self) -> None:
+        (self.root / "session.jsonl").write_text(claude_line("before"))
+        collector = self.collector(); collector.scan()
+        row = collector.db.execute("SELECT id,envelope_json FROM outbox").fetchone()
+        envelope = json.loads(row["envelope_json"])
+        envelope["content"]["message"]["content"] = "before\x00after"
+        envelope["content_sha256"] = hashlib.sha256(
+            json.dumps(envelope["content"], sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        collector.db.execute(
+            "UPDATE outbox SET envelope_json=?,content_sha256=? WHERE id=?",
+            (json.dumps(envelope, sort_keys=True, separators=(",", ":")), envelope["content_sha256"], row["id"]),
+        )
+        collector.db.commit()
+        self.assertEqual(collector.flush()["acked"], 1)
+        received = AckServer.received[-1]["events"][0]["content"]["message"]["content"]
+        self.assertEqual(received, "before[NUL]after")
+        collector.close()
 
 
 if __name__ == "__main__":
