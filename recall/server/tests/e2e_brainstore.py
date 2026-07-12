@@ -226,7 +226,9 @@ def main() -> None:
                     "rebuild_equivalence": True,
                     "secret_projection_leaks": 0,
                     "dead_letters": conn.execute("SELECT count(*) AS n FROM dead_letters").fetchone()["n"],
+                    "projection_lag": store.service_metrics()["projection_lag"],
                 }
+            assert summary["projection_lag"] == 0
             result = {"status": "pass", "runtime": {"python": sys.version.split()[0], "postgres": "17-alpine", "psycopg": psycopg.__version__}, "summary": summary}
             rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"
             if os.environ.get("RECALL_E2E_OUT"):

@@ -131,19 +131,27 @@ class BrainStore:
                 receipts: list[str] = []
                 inserted = 0
                 duplicate_events = 0
+                source_principals: dict[str, str] = {}
                 for envelope in events:
                     source_id = envelope["source_id"]
+                    principal_id = envelope["principal_id"]
+                    if source_id in source_principals and source_principals[source_id] != principal_id:
+                        raise ValueError("source principal mismatch within batch")
+                    source_principals[source_id] = principal_id
+                for source_id, principal_id in source_principals.items():
                     conn.execute(
                         "INSERT INTO sources(id,principal_id) VALUES (%s,%s) ON CONFLICT(id) DO NOTHING",
-                        (source_id, envelope["principal_id"]),
+                        (source_id, principal_id),
                     )
                     source = conn.execute("SELECT principal_id FROM sources WHERE id=%s", (source_id,)).fetchone()
-                    if source["principal_id"] != envelope["principal_id"]:
+                    if source["principal_id"] != principal_id:
                         raise ValueError("source principal mismatch")
                     conn.execute(
                         "INSERT INTO source_grants(source_id,principal_id,permission) VALUES (%s,%s,'owner') ON CONFLICT DO NOTHING",
-                        (source_id, envelope["principal_id"]),
+                        (source_id, principal_id),
                     )
+                for envelope in events:
+                    source_id = envelope["source_id"]
                     # Serialize revision allocation for one source-native identity while
                     # allowing unrelated identities to ingest concurrently.
                     conn.execute(
@@ -197,8 +205,12 @@ class BrainStore:
                 "UPDATE items SET deleted_at=now() WHERE source_id=%s AND event_native_id=%s AND deleted_at IS NULL",
                 (envelope["source_id"], target),
             )
+            self._advance_projector(conn, event_id)
             return
         items, metadata = project(envelope, revision)
+        if not items and set(metadata) <= {"projector_version", "harness"}:
+            self._advance_projector(conn, event_id)
+            return
         conn.execute(
             """INSERT INTO sessions(source_id,native_id,principal_id,harness,started_at,ended_at,metadata,projector_version)
                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
@@ -224,6 +236,9 @@ class BrainStore:
                 "INSERT INTO chunks(item_id,ordinal,text_redacted,receipt) VALUES (%s,0,%s,%s)",
                 (row["id"], item["text_redacted"], item["receipt"]),
             )
+        self._advance_projector(conn, event_id)
+
+    def _advance_projector(self, conn, event_id: int) -> None:
         conn.execute(
             """INSERT INTO projection_watermarks(projector,version,last_event_id) VALUES ('items',%s,%s)
                ON CONFLICT(projector) DO UPDATE SET version=excluded.version,
