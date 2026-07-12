@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 import uuid
 from pathlib import Path
 from typing import Any
@@ -25,9 +26,65 @@ class BrainStore:
         return psycopg.connect(self.dsn, row_factory=dict_row)
 
     def migrate(self) -> None:
-        schema = Path(__file__).resolve().parents[1] / "schema/001_brainstore.sql"
+        schema_dir = Path(__file__).resolve().parents[1] / "schema"
         with self.connect() as conn:
-            conn.execute(schema.read_text())
+            for schema in sorted(schema_dir.glob("*.sql")):
+                conn.execute(schema.read_text())
+
+    def create_collector_token(self, name: str, source_id: str | None, scopes: list[str]) -> dict:
+        allowed = {"read", "write", "metrics"}
+        if not name or not scopes or set(scopes) - allowed:
+            raise ValueError("invalid collector credential")
+        plaintext = "rcl_" + secrets.token_urlsafe(32)
+        digest = hashlib.sha256(plaintext.encode()).hexdigest()
+        credential_id = uuid.uuid4()
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO collector_credentials(id,name,token_sha256,source_id,scopes)
+                   VALUES (%s,%s,%s,%s,%s)""",
+                (credential_id, name, digest, source_id, scopes),
+            )
+            conn.execute(
+                "INSERT INTO audit_events(operation,status,metadata) VALUES ('credential.create','success',%s)",
+                (json.dumps({"credential_id": str(credential_id), "name": name, "source_id": source_id, "scopes": scopes}),),
+            )
+        return {"id": str(credential_id), "name": name, "token": plaintext, "source_id": source_id, "scopes": scopes}
+
+    def revoke_collector_token(self, name: str) -> bool:
+        with self.connect() as conn:
+            row = conn.execute(
+                "UPDATE collector_credentials SET revoked_at=now() WHERE name=%s AND revoked_at IS NULL RETURNING id",
+                (name,),
+            ).fetchone()
+            conn.execute(
+                "INSERT INTO audit_events(operation,status,metadata) VALUES ('credential.revoke',%s,%s)",
+                ("success" if row else "not_found", json.dumps({"name": name})),
+            )
+            return bool(row)
+
+    def authenticate_bearer(self, plaintext: str, required_scope: str) -> dict | None:
+        digest = hashlib.sha256(plaintext.encode()).hexdigest()
+        with self.connect() as conn:
+            row = conn.execute(
+                """SELECT id,name,source_id,scopes FROM collector_credentials
+                   WHERE token_sha256=%s AND revoked_at IS NULL""",
+                (digest,),
+            ).fetchone()
+            if not row or required_scope not in row["scopes"]:
+                return None
+            return row
+
+    def service_metrics(self) -> dict:
+        with self.connect() as conn:
+            return {
+                "source_events": conn.execute("SELECT count(*) AS n FROM source_events").fetchone()["n"],
+                "dead_letters": conn.execute("SELECT count(*) AS n FROM dead_letters").fetchone()["n"],
+                "projection_lag": conn.execute(
+                    """SELECT GREATEST(0,
+                       COALESCE((SELECT max(id) FROM source_events),0) -
+                       COALESCE((SELECT last_event_id FROM projection_watermarks WHERE projector='items'),0)) AS n"""
+                ).fetchone()["n"],
+            }
 
     def record_dead_letter(self, error_code: str, summary: str) -> None:
         """Record rejection metadata only; never persist the rejected payload."""

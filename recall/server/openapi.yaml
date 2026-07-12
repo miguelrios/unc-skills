@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Recall BrainStore API
-  version: 0.1.0-c1
+  version: 0.2.0-c2
   license:
     name: MIT
     identifier: MIT
@@ -13,13 +13,33 @@ paths:
     get:
       summary: Check process health
       operationId: getHealth
+      security: []
       responses:
         '200': {description: Healthy}
         '503': {description: Unhealthy}
+  /readyz:
+    get:
+      summary: Check database readiness
+      operationId: getReadiness
+      security: []
+      responses:
+        '200': {description: Ready}
+        '503': {description: Not ready}
+  /metrics:
+    get:
+      summary: Read content-free service metrics
+      operationId: getMetrics
+      security:
+        - bearerAuth: []
+      responses:
+        '200': {description: Prometheus text metrics}
+        '401': {description: Unauthorized}
   /v1/ingest/batches:
     post:
       summary: Commit an idempotent source-event batch
       operationId: ingestBatch
+      security:
+        - bearerAuth: []
       parameters:
         - in: header
           name: Idempotency-Key
@@ -42,10 +62,14 @@ paths:
         '400': {description: Invalid envelope}
         '409': {description: Idempotency conflict}
         '413': {description: Body too large}
+        '401': {description: Unauthorized}
+        '403': {description: Collector source scope mismatch}
   /v1/receipts/resolve:
     get:
       summary: Resolve a sanitized evidence receipt
       operationId: resolveReceipt
+      security:
+        - bearerAuth: []
       parameters:
         - in: query
           name: receipt
@@ -54,7 +78,13 @@ paths:
       responses:
         '200': {description: Sanitized event metadata and projected items}
         '404': {description: Receipt not found}
+        '401': {description: Unauthorized}
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Revocable collector token, or trusted Tailscale Serve identity at the proxy boundary.
   schemas:
     EnvelopeV1:
       type: object

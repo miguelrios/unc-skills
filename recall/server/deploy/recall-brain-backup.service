@@ -1,0 +1,13 @@
+[Unit]
+Description=Recall BrainStore five-minute logical backup
+After=recall-brain.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/recall-brain/service.env
+UMask=0077
+ExecStart=%h/services/recall-brain/recall/server/scripts/backup_restore.sh backup %h/.local/state/recall-brain/backups/latest
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/state/recall-brain

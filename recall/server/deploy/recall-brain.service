@@ -1,0 +1,21 @@
+[Unit]
+Description=Recall central BrainStore
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/services/recall-brain/recall/server
+EnvironmentFile=%h/.config/recall-brain/service.env
+ExecStart=%h/.config/recall-brain/venv/bin/python -m recall_server.cli serve --unix-socket %t/recall-brain.sock
+Restart=on-failure
+RestartSec=2
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%t %h/.config/recall-brain
+
+[Install]
+WantedBy=default.target
