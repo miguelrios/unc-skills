@@ -33,6 +33,8 @@ def main() -> None:
     parser.add_argument("--token-file", default=os.environ.get("RECALL_COLLECTOR_TOKEN_FILE", ""))
     parser.add_argument("--principal-id", default="owner")
     parser.add_argument("--interval", type=float, default=30.0)
+    parser.add_argument("--shard-count", type=int, default=1)
+    parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--receipt")
     args = parser.parse_args()
     if args.command in {"flush", "run", "watch"} and (not args.endpoint or not args.token_file):
@@ -43,6 +45,10 @@ def main() -> None:
         token=token_from_file(args.token_file) if args.token_file else "unused",
         principal_id=args.principal_id,
     )
+    if args.shard_count < 1 or not 0 <= args.shard_index < args.shard_count:
+        parser.error("shard index must be within shard count")
+    collector.shard_count = args.shard_count
+    collector.shard_index = args.shard_index
     try:
         if args.command == "scan":
             print(json.dumps(collector.scan(), sort_keys=True))

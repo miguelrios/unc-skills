@@ -24,5 +24,8 @@ Transport batches are capped at 8 MB under the server's authenticated 12 MB requ
 An oversized row retains its source coordinates and is losslessly recoverable with `recover` after
 a limit upgrade; it is never counted as acknowledged while dead.
 
+Large backfills may run non-overlapping `flush --shard-count N --shard-index I` workers. Sharding
+is the stable SQLite outbox ID modulo `N`; the steady-state watcher remains a single worker.
+
 Structured values whose keys name credentials—including `LITELLM_MASTER_KEY`—are replaced before
 spooling. Non-JSONL files and paths outside the configured root are never discovered.

@@ -75,12 +75,15 @@ class Collector:
         self.token = token
         self.principal_id = principal_id
         self.batch_size = batch_size
+        self.shard_count = 1
+        self.shard_index = 0
         self.spool_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.spool_path.parent, 0o700)
         self.db = sqlite3.connect(self.spool_path)
         self.db.row_factory = sqlite3.Row
         os.chmod(self.spool_path, 0o600)
         self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA busy_timeout=30000")
         self.db.execute("PRAGMA synchronous=FULL")
         self._migrate()
 
@@ -348,10 +351,13 @@ class Collector:
         return repaired
 
     def flush(self) -> dict:
-        recovery = self.recover_dead_payloads()
+        recovery = self.recover_dead_payloads() if self.shard_index == 0 else {"recovered": 0, "unrecoverable": 0}
         result = {"batches": 0, "acked": 0, "replayed_batches": 0, "errors": 0, **recovery}
         while True:
-            candidates = [self._repair_pending_envelope(row) for row in self.db.execute("SELECT * FROM outbox WHERE state='pending' ORDER BY id LIMIT ?", (self.batch_size,))]
+            candidates = [self._repair_pending_envelope(row) for row in self.db.execute(
+                "SELECT * FROM outbox WHERE state='pending' AND (id % ?) = ? ORDER BY id LIMIT ?",
+                (self.shard_count, self.shard_index, self.batch_size),
+            )]
             self.db.commit()
             rows: list[dict] = []
             body_size = len(b'{"events":[]}')
