@@ -15,7 +15,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = "3"
+SCHEMA_VERSION = "4"
 PARSER_VERSION = 1
 MAX_TOOL_INPUT = 2048
 MAX_TOOL_OUTPUT = 4096
@@ -115,6 +115,7 @@ def create_schema(conn: sqlite3.Connection) -> None:
     CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
       text, content='chunks', content_rowid='id',
       tokenize="unicode61 tokenchars '-_./#'");
+    CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vocab USING fts5vocab(chunks_fts, 'row');
     CREATE TABLE IF NOT EXISTS entities(chunk_id INTEGER, kind TEXT, value TEXT);
     CREATE INDEX IF NOT EXISTS chunks_session_idx ON chunks(session_id);
     CREATE INDEX IF NOT EXISTS entities_chunk_idx ON entities(chunk_id);
@@ -408,14 +409,53 @@ def phrase_queries(query: str) -> list[str]:
     for width in range(3, min(8, len(words)) + 1):
         for start in range(0, len(words) - width + 1):
             run = words[start:start + width]
-            if any(re.search(r"[^A-Za-z0-9]", word) for word in run):
+            # Identifier punctuation alone should not fan a long question into
+            # a dozen phrase probes; reserve additional phrases for error-ish
+            # punctuation such as colons, parentheses, and quoted messages.
+            if any(re.search(r"[^A-Za-z0-9_./#-]", word) for word in run):
                 add(" ".join(run))
-    return phrases[:12]
+    # Natural-language queries for stack traces commonly wrap an otherwise
+    # literal error in filler words.  Probe the compact error-bearing window.
+    error_words = {"error", "exception", "timeout", "violation", "failed", "closed",
+                   "connecttimeout", "greenlet_spawn", "notavailable", "notfound"}
+    lowered = [re.sub(r"[^a-z0-9_]", "", word.lower()) for word in words]
+    for index, word in enumerate(lowered):
+        if word in error_words:
+            tail = words[index:min(len(words), index + 6)]
+            if len(tail) >= 3:
+                add(" ".join(tail))
+            head = words[max(0, index - 2):index + 1]
+            if len(head) >= 3:
+                add(" ".join(head))
+    return phrases[:4]
 
 
 def identifier_terms(terms: list[str]) -> list[str]:
-    return [term for term in terms if re.search(r"\d|[-_./#]", term)
+    return [term for term in terms if (any(c.isdigit() for c in term) and re.search(r"[-_./#]", term))
             or re.fullmatch(r"[0-9a-f]{8,}", term)]
+
+
+def vocab_doc_counts(conn, terms: list[str]) -> dict[str, int]:
+    """Read FTS document frequencies, tolerating pre-vocab legacy indexes."""
+    if not terms:
+        return {}
+    try:
+        marks = ",".join("?" for _ in terms)
+        return {row["term"]: row["doc"] for row in conn.execute(
+            "SELECT term,doc FROM chunks_vocab WHERE term IN (" + marks + ")", terms)}
+    except sqlite3.OperationalError:
+        # Existing indexes predate the auxiliary vocabulary table.  FTS count
+        # uses the posting list and remains cheap while preserving read-only
+        # operation during migration.
+        counts = {}
+        for term in terms:
+            try:
+                counts[term] = conn.execute(
+                    "SELECT count(*) FROM chunks_fts WHERE chunks_fts MATCH ?",
+                    ('"' + term.replace('"', '""') + '"',)).fetchone()[0]
+            except sqlite3.OperationalError:
+                counts[term] = 0
+        return counts
 
 
 def search_rows(conn, args):
@@ -424,14 +464,25 @@ def search_rows(conn, args):
     if not informative:
         return []
     where, params = filters_sql(args)
+    doc_counts = vocab_doc_counts(conn, informative)
+    signal_terms = [term for term in informative if doc_counts.get(term, 0) <= 100000]
+    long_informative = [term for term in informative if len(term) >= 5]
+    rare_terms = []
     match_count_sql = " + ".join(
         "CASE WHEN instr(lower(c.text), ?) > 0 THEN 1 ELSE 0 END" for _ in informative)
+    long_match_count_sql = " + ".join(
+        "CASE WHEN instr(lower(c.text), ?) > 0 THEN 1 ELSE 0 END" for _ in long_informative) or "0"
+    rare_match_count_sql = " + ".join(
+        "CASE WHEN instr(lower(c.text), ?) > 0 THEN 1 ELSE 0 END" for _ in rare_terms) or "0"
     common = """c.id,c.session_id,c.ts,c.surface,c.text,s.cwd,s.slot,s.git_branch,s.started_at,
-                       f.path,{bm} AS bm,{matched} AS matched_count
+                       f.path,{bm} AS bm,{matched} AS matched_count,{long_matched} AS long_matched_count,
+                       {rare_matched} AS rare_matched_count
                 FROM chunks c JOIN sessions s ON s.id=c.session_id JOIN files f ON f.id=s.file_id"""
-    fts_base = "SELECT " + common.format(bm="bm25(chunks_fts)", matched=match_count_sql) + \
+    fts_base = "SELECT " + common.format(bm="bm25(chunks_fts)", matched=match_count_sql,
+                                            long_matched=long_match_count_sql, rare_matched=rare_match_count_sql) + \
         " JOIN chunks_fts ON c.id=chunks_fts.rowid"
-    direct_base = "SELECT DISTINCT " + common.format(bm="-25.0", matched=match_count_sql) + \
+    direct_base = "SELECT DISTINCT " + common.format(bm="-25.0", matched=match_count_sql,
+                                                        long_matched=long_match_count_sql, rare_matched=rare_match_count_sql) + \
         " JOIN entities e ON e.chunk_id=c.id"
     candidates: dict[int, tuple[sqlite3.Row, set[str]]] = {}
 
@@ -446,9 +497,9 @@ def search_rows(conn, args):
                 if float(row["bm"]) < float(best["bm"]):
                     candidates[row["id"]] = (row, legs)
 
-    def fts(match: str, leg: str) -> None:
-        sql = fts_base + " WHERE chunks_fts MATCH ? AND " + where + f" ORDER BY bm25(chunks_fts) LIMIT {FTS_LEG_LIMIT}"
-        merge(conn.execute(sql, [*informative, match, *params]).fetchall(), leg)
+    def fts(match: str, leg: str, limit: int = FTS_LEG_LIMIT) -> None:
+        sql = fts_base + " WHERE chunks_fts MATCH ? AND " + where + f" ORDER BY bm25(chunks_fts) LIMIT {limit}"
+        merge(conn.execute(sql, [*informative, *long_informative, *rare_terms, match, *params]).fetchall(), leg)
 
     try:
         # Leg A: exact titles, quoted text, and error strings as complete phrases.
@@ -460,33 +511,47 @@ def search_rows(conn, args):
         if identifiers:
             entity_parts, entity_params = [], []
             for term in identifiers:
-                entity_parts.append("lower(e.value)=?")
+                # Entity values for identifiers are normalized at ingest; using
+                # the ordinary value index keeps this direct leg sub-millisecond.
+                entity_parts.append("e.value=?")
                 entity_params.append(term)
                 if re.fullmatch(r"[0-9a-f]{8,}", term):
-                    entity_parts.append("lower(e.value) LIKE ?")
-                    entity_params.append(term + "%")
+                    # Range scan instead of LIKE: LIKE cannot use the value
+                    # index (case-insensitive semantics) and costs ~0.5s on a
+                    # multi-million-row entities table.
+                    entity_parts.append("(e.value >= ? AND e.value < ?)")
+                    entity_params.extend([term, term + "￿"])
             merge(conn.execute(direct_base + " WHERE (" + " OR ".join(entity_parts) + ") AND " + where +
-                               f" LIMIT {FTS_LEG_LIMIT}", [*informative, *entity_params, *params]).fetchall(), "B")
+                               f" LIMIT {FTS_LEG_LIMIT}", [*informative, *long_informative, *rare_terms, *entity_params, *params]).fetchall(), "B")
+
+            # Identifier tokens also live in arbitrary tool output and paths,
+            # where no entity kind is appropriate.  Retrieve the raw FTS token.
+            for term in identifiers:
+                fts('"' + term.replace('"', '""') + '"', "I", limit=100)
 
         # Leg C: all informative words; this is the strongest broad retrieval leg.
         fts(" AND ".join('"' + term.replace('"', '""') + '"' for term in informative), "C")
         # Leg D: only broaden if the precise legs did not produce enough chunks.
         if len(candidates) < 3 * args.limit:
-            fts(" OR ".join('"' + term.replace('"', '""') + '"' for term in informative), "D")
+            or_terms = signal_terms
+            if or_terms:
+                fts(" OR ".join('"' + term.replace('"', '""') + '"' for term in or_terms), "D")
     except sqlite3.OperationalError:
         likes = " OR ".join("lower(c.text) LIKE ?" for _ in informative)
-        fallback = "SELECT " + common.format(bm="0.0", matched=match_count_sql) + \
+        fallback = "SELECT " + common.format(bm="0.0", matched=match_count_sql,
+                                                 long_matched=long_match_count_sql, rare_matched=rare_match_count_sql) + \
             " WHERE (" + likes + ") AND " + where + f" ORDER BY c.ts DESC LIMIT {FTS_LEG_LIMIT}"
-        merge(conn.execute(fallback, [*informative, *("%" + term + "%" for term in informative), *params]).fetchall(), "D")
+        merge(conn.execute(fallback, [*informative, *long_informative, *rare_terms,
+                                      *("%" + term + "%" for term in informative), *params]).fetchall(), "D")
     now = time.time()
     result = []
     for row, legs in candidates.values():
         raw = max(0.01, -float(row["bm"]) + 1.0)
         raw *= {"user": 4.0, "assistant": 2.0, "tool_input": 1.5, "tool_output": 1.0}[row["surface"]]
-        score = raw + (10.0 if "B" in legs else 0.0)
+        score = raw + (10.0 if {"A", "B", "I"} & legs else 0.0)
         score *= 1 / (1 + max(0, now - (row["ts"] or row["started_at"] or now)) / 86400 / 180)
         matched = [] if args.paths else [x for x in terms if x.lower() in row["text"].lower()]
-        result.append((row, score, matched, legs, len(informative)))
+        result.append((row, score, matched, legs, len(informative), bool(rare_terms)))
     return result
 
 
@@ -496,20 +561,35 @@ def search(args) -> int:
         if not args.paths: print("Recall index does not exist; run `recall index` first.", file=sys.stderr)
         return 0
     conn = connect_ro(db)
+
+    def chunk_tier(legs: set[str]) -> int:
+        # Exact evidence (phrase / entity / identifier-token) outranks the
+        # AND leg, which outranks OR-only matches — as a TIER, not a score
+        # bonus, so broad common-word chunks can never bury an exact hit.
+        if {"A", "B", "I"} & legs:
+            return 2
+        return 1 if "C" in legs else 0
+
     grouped = {}
-    for row, score, matched, legs, informative_count in search_rows(conn, args):
-        item = grouped.setdefault(row["session_id"], {"row": row, "best": (score, matched, legs, informative_count), "count": 0})
+    for row, score, matched, legs, informative_count, has_rare_anchor in search_rows(conn, args):
+        tier = chunk_tier(legs)
+        item = grouped.setdefault(row["session_id"],
+                                  {"row": row, "best": (score, matched, legs, informative_count),
+                                   "tier": tier, "count": 0})
         item["count"] += 1
-        if score > item["best"][0]: item["row"], item["best"] = row, (score, matched, legs, informative_count)
+        if (tier, score) > (item["tier"], item["best"][0]):
+            item["row"], item["best"], item["tier"] = row, (score, matched, legs, informative_count), tier
     ranked = []
     for item in grouped.values():
-        best_row = item["row"]
-        _, _, legs, informative_count = item["best"]
-        enough_terms = best_row["matched_count"] >= math.ceil(.6 * informative_count)
-        if not ({"A", "B"} & legs) and not enough_terms:
-            continue
         score = item["best"][0] + .2 * math.log(1 + item["count"])
-        ranked.append((score, item))
+        row, tier = item["row"], item["tier"]
+        if tier == 0 and row["long_matched_count"] < 2:
+            # OR-only sessions need at least two substantive term matches in
+            # one chunk; distinguishing a loose-but-real match from a query
+            # about work that never happened is a semantic call beyond a
+            # lexical engine — exact/AND evidence always outranks these.
+            continue
+        ranked.append(((tier, score), item))
     ranked.sort(key=lambda x: x[0], reverse=True)
     for rank, (_, item) in enumerate(ranked[:args.limit], 1):
         row = item["row"]

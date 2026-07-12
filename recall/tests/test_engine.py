@@ -126,10 +126,10 @@ class RecallEngineTest(unittest.TestCase):
         self.assertEqual(stored[0], "[redacted-secret-line]")
 
     def test_partial_fts_or_fallback_returns_natural_partial_matches(self):
-        (self.claude / "alpha.jsonl").write_text(json.dumps({"type":"user", "timestamp":"2026-01-01T00:00:00Z", "message":{"content":"alpha beta only"}}) + "\n")
-        (self.claude / "beta.jsonl").write_text(json.dumps({"type":"user", "timestamp":"2026-01-01T00:00:01Z", "message":{"content":"alpha gamma only"}}) + "\n")
+        (self.claude / "alpha.jsonl").write_text(json.dumps({"type":"user", "timestamp":"2026-01-01T00:00:00Z", "message":{"content":"alpha bravo only"}}) + "\n")
+        (self.claude / "beta.jsonl").write_text(json.dumps({"type":"user", "timestamp":"2026-01-01T00:00:01Z", "message":{"content":"alpha charlie only"}}) + "\n")
         self.cli("index")
-        paths = self.cli("search", "alpha beta gamma", "--paths")
+        paths = self.cli("search", "alpha bravo charlie", "--paths")
         self.assertIn("alpha.jsonl", paths)
         self.assertIn("beta.jsonl", paths)
 
@@ -166,6 +166,39 @@ class RecallEngineTest(unittest.TestCase):
             self.assertEqual(Path(self.cli("search", "common " + uuid, "--paths").splitlines()[0]), target)
         finally:
             engine.FTS_LEG_LIMIT = old_limit
+
+    def test_identifier_token_leg_finds_raw_tool_output_without_entity(self):
+        token = "api-prod-6fcdc84dd4-mmjpj"
+        target = self.claude / "identifier-tool.jsonl"
+        target.write_text(json.dumps({"type":"user", "timestamp":"2026-01-01T00:00:00Z",
+                                      "message":{"content":"seed"}}) + "\n")
+        self.cli("index")
+        conn = engine.connect(self.db)
+        session_id = conn.execute("select s.id from sessions s join files f on f.id=s.file_id where f.path like '%identifier-tool.jsonl'").fetchone()[0]
+        chunk_id = conn.execute("insert into chunks(session_id,ts,surface,text) values (?,?,?,?)", (session_id, 1, "tool_output", token)).lastrowid
+        conn.execute("insert into chunks_fts(rowid,text) values (?,?)", (chunk_id, token))
+        conn.commit(); conn.close()
+        self.assertEqual(Path(self.cli("search", "which pod was failing " + token, "--paths").splitlines()[0]), target)
+
+    def test_gate_keeps_fuzzy_best_with_two_long_terms(self):
+        target = self.claude / "fuzzy-best.jsonl"
+        target.write_text(json.dumps({"type":"user", "timestamp":"2026-01-01T00:00:00Z",
+                                      "message":{"content":"aurora beacon remediation"}}) + "\n")
+        self.cli("index")
+        paths = self.cli("search", "aurora unrelated beacon", "--paths")
+        self.assertIn("fuzzy-best.jsonl", paths)
+
+    def test_vocab_pruning_omits_noisy_or_term(self):
+        target = self.claude / "signal.jsonl"
+        target.write_text(json.dumps({"type":"user", "timestamp":"2026-01-01T00:00:00Z",
+                                      "message":{"content":"signalterm anotherterm"}}) + "\n")
+        self.cli("index")
+        original = engine.vocab_doc_counts
+        engine.vocab_doc_counts = lambda conn, terms: {"noisyterm": 100001, "signalterm": 1, "anotherterm": 1}
+        try:
+            self.assertEqual(Path(self.cli("search", "noisyterm signalterm anotherterm", "--paths").splitlines()[0]), target)
+        finally:
+            engine.vocab_doc_counts = original
 
     def test_negative_and_stopword_queries_are_empty(self):
         self.write_claude(); self.copy_codex(); self.cli("index")
