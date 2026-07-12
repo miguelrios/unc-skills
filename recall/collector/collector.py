@@ -97,6 +97,9 @@ class Collector:
         CREATE TABLE IF NOT EXISTS record_generations(
           native_id TEXT PRIMARY KEY, generation INTEGER NOT NULL,
           base_content_sha256 TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS scan_members(
+          path TEXT NOT NULL, native_id TEXT NOT NULL,
+          PRIMARY KEY(path,native_id));
         CREATE TABLE IF NOT EXISTS outbox(
           id INTEGER PRIMARY KEY, path TEXT NOT NULL, native_id TEXT NOT NULL,
           content_sha256 TEXT NOT NULL, start_offset INTEGER NOT NULL, end_offset INTEGER NOT NULL,
@@ -174,6 +177,17 @@ class Collector:
         )
         return cursor.rowcount == 1
 
+    def _save_file_progress(self, path: str, stat, current_fingerprint: str, offset: int,
+                            status: str, scan_id: str) -> None:
+        self.db.execute(
+            """INSERT INTO files(path,size,mtime_ns,fingerprint,scanned_offset,committed_offset,status,last_scan_id)
+               VALUES (?,?,?,?,?,0,?,?)
+               ON CONFLICT(path) DO UPDATE SET size=excluded.size,mtime_ns=excluded.mtime_ns,
+               fingerprint=excluded.fingerprint,scanned_offset=excluded.scanned_offset,
+               status=excluded.status,last_scan_id=excluded.last_scan_id""",
+            (path, stat.st_size, stat.st_mtime_ns, current_fingerprint, offset, status, scan_id),
+        )
+
     def scan(self) -> dict:
         scan_id = hashlib.sha256(f"{time.time_ns()}:{os.getpid()}".encode()).hexdigest()[:16]
         summary = {"files_seen": 0, "records_queued": 0, "tombstones_queued": 0,
@@ -184,14 +198,24 @@ class Collector:
             path_text = str(path)
             row = self.db.execute("SELECT * FROM files WHERE path=?", (path_text,)).fetchone()
             current_fingerprint = fingerprint(path, stat.st_size)
-            if row and row["size"] == stat.st_size and row["mtime_ns"] == stat.st_mtime_ns and row["fingerprint"] == current_fingerprint:
+            if row and not row["status"].startswith("scanning-") and row["size"] == stat.st_size and row["mtime_ns"] == stat.st_mtime_ns and row["fingerprint"] == current_fingerprint:
                 self.db.execute("UPDATE files SET last_scan_id=? WHERE path=?", (scan_id, path_text))
                 continue
-            append = bool(row and stat.st_size > row["size"] and fingerprint(path, row["size"]) == row["fingerprint"])
-            start_offset = int(row["scanned_offset"]) if append else 0
+            resume_mode = row["status"].removeprefix("scanning-") if row and row["status"].startswith("scanning-") else None
+            if resume_mode:
+                mode = resume_mode
+                file_scan_id = row["last_scan_id"]
+            else:
+                mode = "append" if row and stat.st_size > row["size"] and fingerprint(path, row["size"]) == row["fingerprint"] else ("full" if row else "new")
+                file_scan_id = scan_id
+                if mode != "append":
+                    self.db.execute("DELETE FROM scan_members WHERE path=?", (path_text,))
+            append = mode == "append"
+            start_offset = int(row["scanned_offset"]) if append or resume_mode else 0
             old_active = {item["native_id"]: item for item in self.db.execute("SELECT * FROM active_records WHERE path=?", (path_text,))}
-            seen_native: set[str] = set() if not append else set(old_active)
+            seen_native: set[str] = set(old_active) if append else {item["native_id"] for item in self.db.execute("SELECT native_id FROM scan_members WHERE path=?", (path_text,))}
             complete_end = start_offset
+            complete_records = 0
             with path.open("rb") as source:
                 source.seek(start_offset)
                 while True:
@@ -203,6 +227,7 @@ class Collector:
                         summary["partial_files"] += 1
                         break
                     complete_end = source.tell()
+                    complete_records += 1
                     native_id = f"{self._file_key(path)}-{line_start:016x}"
                     try:
                         content = json.loads(line)
@@ -226,6 +251,11 @@ class Collector:
                         (path_text, native_id, envelope["content_sha256"], line_start, complete_end),
                     )
                     seen_native.add(native_id)
+                    if not append:
+                        self.db.execute("INSERT OR IGNORE INTO scan_members(path,native_id) VALUES (?,?)", (path_text, native_id))
+                    if complete_records % 1000 == 0:
+                        self._save_file_progress(path_text, stat, current_fingerprint, complete_end, "scanning-" + mode, file_scan_id)
+                        self.db.commit()
             if not append:
                 for native_id, old in old_active.items():
                     if native_id in seen_native:
@@ -236,16 +266,8 @@ class Collector:
                         summary["tombstones_queued"] += 1
                     self.db.execute("DELETE FROM active_records WHERE path=? AND native_id=?", (path_text, native_id))
             status = "partial" if complete_end < stat.st_size else "ok"
-            if row:
-                self.db.execute(
-                    "UPDATE files SET size=?,mtime_ns=?,fingerprint=?,scanned_offset=?,status=?,last_scan_id=? WHERE path=?",
-                    (stat.st_size, stat.st_mtime_ns, current_fingerprint, complete_end, status, scan_id, path_text),
-                )
-            else:
-                self.db.execute(
-                    "INSERT INTO files(path,size,mtime_ns,fingerprint,scanned_offset,committed_offset,status,last_scan_id) VALUES (?,?,?,?,?,0,?,?)",
-                    (path_text, stat.st_size, stat.st_mtime_ns, current_fingerprint, complete_end, status, scan_id),
-                )
+            self._save_file_progress(path_text, stat, current_fingerprint, complete_end, status, scan_id)
+            self.db.execute("DELETE FROM scan_members WHERE path=?", (path_text,))
             # Bound crash recovery to one source file; acknowledged offsets still move only in flush().
             self.db.commit()
         missing = list(self.db.execute("SELECT path FROM files WHERE last_scan_id != ? AND status != 'tombstone'", (scan_id,)))

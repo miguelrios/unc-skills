@@ -160,6 +160,28 @@ class CollectorTest(unittest.TestCase):
         self.assertEqual(payloads[0]["source_id"], "claude:linux:test")
         collector.close()
 
+    def test_giant_file_resumes_from_durable_scan_checkpoint(self) -> None:
+        transcript = self.root / "giant.jsonl"
+        transcript.write_text("".join(claude_line(f"record-{index}") for index in range(1001)))
+        collector = self.collector()
+        save = collector._save_file_progress
+
+        def crash_after_checkpoint(*args, **kwargs):
+            save(*args, **kwargs)
+            collector.db.commit()
+            raise RuntimeError("simulated process death")
+
+        collector._save_file_progress = crash_after_checkpoint
+        with self.assertRaisesRegex(RuntimeError, "simulated process death"):
+            collector.scan()
+        collector.close()
+
+        resumed = self.collector()
+        scan = resumed.scan()
+        self.assertEqual(scan["records_queued"], 1)
+        self.assertEqual(len(resumed.pending_envelopes()), 1001)
+        resumed.close()
+
 
 if __name__ == "__main__":
     unittest.main()
