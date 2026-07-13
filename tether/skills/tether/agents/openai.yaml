@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tether"
+  short_description: "Keep Slack threads attached to coding agents"
+  default_prompt: "Use $tether to send this update as a resumable Slack thread."

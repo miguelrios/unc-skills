@@ -14,7 +14,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILLS = ("hands-free", "parable", "cascade", "recall")
+SKILLS = ("hands-free", "parable", "cascade", "recall", "tether")
 
 
 def digest(path: Path) -> str:
@@ -149,6 +149,12 @@ def main() -> int:
             output,
         )
         run("smoke-cascade", ["python3", "-m", "unittest", "discover", "-s", "cascade/tests", "-v"], smoke_env, output)
+        run(
+            "smoke-tether",
+            ["python3", "-m", "unittest", "discover", "-s", "tether/tests", "-v"],
+            smoke_env,
+            output,
+        )
 
         (output / "matrix.json").write_text(json.dumps(matrix, indent=2) + "\n")
         (output / "source-hashes.json").write_text(json.dumps(source_hashes, indent=2) + "\n")

@@ -5,7 +5,7 @@
     "url": "https://github.com/miguelrios"
   },
   "metadata": {
-    "description": "Miguel's portable Agent Skills: hands-free, parable, cascade, and recall."
+    "description": "Miguel's portable Agent Skills for Claude Code, Codex, and pi."
   },
   "plugins": [
     {
@@ -31,6 +31,12 @@
       "source": "./recall",
       "version": "0.1.0",
       "description": "Indexed search over Claude Code + Codex session history — find, continue, repeat, or skill-ify prior work"
+    },
+    {
+      "name": "tether",
+      "source": "./tether",
+      "version": "0.1.0",
+      "description": "Keep Slack threads attached to their Codex, Claude Code, Zellij, Hermes, or headless agents without exposing Slack credentials."
     }
   ]
 }

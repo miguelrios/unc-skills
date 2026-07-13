@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+set -eu
+DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+exec python3 "$DATA_HOME/tether/tether_notify.py" "$@"

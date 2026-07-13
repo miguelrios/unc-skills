@@ -1,0 +1,21 @@
+{
+  "name": "tether",
+  "version": "0.1.0",
+  "description": "Keep Slack threads attached to their originating agents through Hermes.",
+  "author": {"name": "Parcha Labs", "url": "https://parcha.com"},
+  "homepage": "https://github.com/miguelrios/unc-skills/tree/main/tether",
+  "repository": "https://github.com/miguelrios/unc-skills/tree/main/tether",
+  "license": "MIT",
+  "keywords": ["codex", "claude-code", "slack", "hermes-agent", "zellij"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Tether",
+    "shortDescription": "Resumable Slack threads for coding agents",
+    "longDescription": "Bind Slack threads to exact Codex, Claude Code, Zellij, Hermes, or headless sessions without exposing Slack credentials.",
+    "developerName": "Parcha Labs",
+    "category": "Developer Tools",
+    "capabilities": ["Read", "Write"],
+    "websiteURL": "https://github.com/miguelrios/unc-skills/tree/main/tether",
+    "defaultPrompt": ["Send this update to Slack as a resumable Hermes thread."]
+  }
+}
