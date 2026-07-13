@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
 import os
 import shutil
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "skills/recall/scripts/recall.py"
@@ -286,6 +289,179 @@ class RecallEngineTest(unittest.TestCase):
         doctor = self.cli("doctor")
         self.assertIn("WARN db exists=False", doctor)
         self.assertFalse(self.db.exists())
+
+
+class RemoteHandler(BaseHTTPRequestHandler):
+    requests: list[dict] = []
+    target_path = "/source/session.jsonl"
+    fail_search = False
+
+    def log_message(self, *_args):
+        pass
+
+    def send_json(self, status: int, body: dict) -> None:
+        rendered = json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(rendered)))
+        self.end_headers()
+        self.wfile.write(rendered)
+
+    def do_GET(self):
+        type(self).requests.append({"method": "GET", "path": self.path, "authorization": self.headers.get("Authorization")})
+        if self.path == "/v1/doctor":
+            self.send_json(200, {"status": "ok", "source_events": 12, "projection_lag": 0})
+        else:
+            self.send_json(404, {"error": "not found"})
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+        type(self).requests.append({"method": "POST", "path": self.path, "body": body, "authorization": self.headers.get("Authorization")})
+        if self.path == "/v1/search":
+            if type(self).fail_search:
+                self.send_json(503, {"error": "unavailable"})
+                return
+            self.send_json(200, {"results": [{
+                "path": type(self).target_path,
+                "occurred_at": "2026-01-01T00:00:00Z",
+                "cwd": "/work/grep123/project",
+                "slot": "grep123",
+                "branch": "feature/remote",
+                "surface": "tool_output",
+                "text": "remote exact deadbeef evidence",
+                "matched_terms": ["deadbeef"],
+                "legs": ["exact"],
+                "tier": 2,
+                "receipt": "recall://claude:linux/session:1?rev=1#item=0"
+            }], "abstention_reason": None})
+        elif self.path == "/v1/show":
+            self.send_json(200, {"chunks": [{
+                "occurred_at": "2026-01-01T00:00:00Z", "surface": "user",
+                "text": "remote prompt", "receipt": "recall://claude:linux/session:1?rev=1#item=0"
+            }]})
+        elif self.path == "/v1/related":
+            self.send_json(200, {"results": [{
+                "path": type(self).target_path, "overlap": 3,
+                "cwd": "/work/grep123/project", "branch": "feature/remote",
+                "receipt": "recall://claude:linux/session:1?rev=1#item=0"
+            }]})
+        else:
+            self.send_json(404, {"error": "not found"})
+
+
+class RemoteTransportTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.claude = self.root / "claude"; self.claude.mkdir()
+        self.codex = self.root / "codex"; self.codex.mkdir()
+        self.db = self.root / "state/index.db"
+        self.shadow = self.root / "shadow.jsonl"
+        self.old_env = {key: os.environ.get(key) for key in (
+            "RECALL_CLAUDE_ROOT", "RECALL_CODEX_ROOT", "RECALL_DB", "RECALL_URL",
+            "RECALL_MODE", "RECALL_TOKEN_FILE", "RECALL_SHADOW_LOG",
+        )}
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), RemoteHandler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True); self.thread.start()
+        RemoteHandler.requests = []; RemoteHandler.fail_search = False
+        RemoteHandler.target_path = str(self.claude / "session.jsonl")
+        os.environ.update(
+            RECALL_CLAUDE_ROOT=str(self.claude), RECALL_CODEX_ROOT=str(self.codex), RECALL_DB=str(self.db),
+            RECALL_URL=f"http://127.0.0.1:{self.server.server_port}", RECALL_SHADOW_LOG=str(self.shadow),
+        )
+
+    def tearDown(self):
+        self.server.shutdown(); self.server.server_close()
+        for key, value in self.old_env.items():
+            if value is None: os.environ.pop(key, None)
+            else: os.environ[key] = value
+        self.tmp.cleanup()
+
+    def call(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = engine.main(list(argv))
+        return code, out.getvalue(), err.getvalue()
+
+    def seed_local(self):
+        (self.claude / "session.jsonl").write_text(json.dumps({
+            "type": "user", "timestamp": "2026-01-01T00:00:00Z",
+            "cwd": "/work/grep123/project", "message": {"content": "local deadbeef evidence"},
+        }) + "\n")
+        old_mode = os.environ.pop("RECALL_MODE", None)
+        old_url = os.environ.pop("RECALL_URL", None)
+        try:
+            self.assertEqual(self.call("index")[0], 0)
+        finally:
+            if old_mode is not None: os.environ["RECALL_MODE"] = old_mode
+            if old_url is not None: os.environ["RECALL_URL"] = old_url
+
+    def test_url_selects_remote_search_and_preserves_filters(self):
+        code, out, err = self.call(
+            "search", "deadbeef evidence", "--since", "2026-01-01", "--until", "2026-02-01",
+            "--cwd", "grep123", "--branch", "feature", "--harness", "claude", "--limit", "7",
+        )
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn(RemoteHandler.target_path, out)
+        self.assertIn("WHY: terms=deadbeef; legs=exact", out)
+        request = RemoteHandler.requests[-1]
+        self.assertEqual(request["path"], "/v1/search")
+        self.assertEqual(request["body"]["filters"], {
+            "since": "2026-01-01", "until": "2026-02-01", "cwd": "grep123",
+            "branch": "feature", "harness": "claude",
+        })
+        self.assertEqual(request["body"]["limit"], 7)
+
+    def test_remote_paths_show_related_and_doctor_keep_cli_surface(self):
+        self.assertEqual(self.call("search", "deadbeef", "--paths")[1].strip(), RemoteHandler.target_path)
+        shown = self.call("show", RemoteHandler.target_path, "--prompts", "--tail", "5")[1]
+        self.assertIn("user: remote prompt", shown)
+        related = self.call("related", "--cwd", "/work/grep123/project", "--branch", "feature/remote")[1]
+        self.assertIn("overlap=3", related)
+        doctor = self.call("doctor")[1]
+        self.assertIn("OK remote", doctor)
+        self.assertIn("projection_lag=0", doctor)
+
+    def test_explicit_local_mode_is_config_only_rollback(self):
+        self.seed_local()
+        before = hashlib.sha256(self.db.read_bytes()).hexdigest()
+        RemoteHandler.requests = []
+        os.environ["RECALL_MODE"] = "local"
+        code, out, _ = self.call("search", "deadbeef", "--paths")
+        self.assertEqual(code, 0)
+        self.assertEqual(Path(out.strip()), self.claude / "session.jsonl")
+        self.assertEqual(RemoteHandler.requests, [])
+        self.assertEqual(hashlib.sha256(self.db.read_bytes()).hexdigest(), before)
+
+    def test_remote_failure_does_not_silently_fallback(self):
+        self.seed_local(); RemoteHandler.fail_search = True
+        code, out, err = self.call("search", "deadbeef", "--paths")
+        self.assertNotEqual(code, 0)
+        self.assertEqual(out, "")
+        self.assertIn("remote recall unavailable", err)
+
+    def test_shadow_returns_local_and_records_receipt_level_comparison(self):
+        self.seed_local(); os.environ["RECALL_MODE"] = "shadow"
+        RemoteHandler.target_path = str(self.claude / "remote-other.jsonl")
+        code, out, err = self.call("search", "deadbeef", "--paths")
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(Path(out.strip()), self.claude / "session.jsonl")
+        entry = json.loads(self.shadow.read_text().splitlines()[-1])
+        self.assertEqual(entry["command"], "search")
+        self.assertEqual(entry["local_paths"], [str(self.claude / "session.jsonl")])
+        self.assertEqual(entry["remote_results"][0]["receipt"], "recall://claude:linux/session:1?rev=1#item=0")
+        self.assertTrue(entry["diverged"])
+
+    def test_token_file_must_be_private_and_is_sent_as_bearer(self):
+        token_file = self.root / "token.json"
+        token_file.write_text(json.dumps({"token": "scoped-test-token"})); token_file.chmod(0o644)
+        os.environ["RECALL_TOKEN_FILE"] = str(token_file)
+        code, _, err = self.call("doctor")
+        self.assertNotEqual(code, 0); self.assertIn("0600", err)
+        token_file.chmod(0o600)
+        code, _, err = self.call("doctor")
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(RemoteHandler.requests[-1]["authorization"], "Bearer scoped-test-token")
 
 
 if __name__ == "__main__":
