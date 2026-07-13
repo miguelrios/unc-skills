@@ -996,7 +996,6 @@ def main(argv=None) -> int:
     p = sub.add_parser("doctor"); p.set_defaults(func=doctor)
     p = sub.add_parser("put"); p.add_argument("text", nargs="?"); p.add_argument("--source-id"); p.add_argument("--principal-id"); p.add_argument("--visibility", choices=("private", "shared")); p.add_argument("--provenance-uri", default="manual://recall_put")
     p = sub.add_parser("delete"); p.add_argument("receipt"); p.add_argument("--source-id"); p.add_argument("--principal-id"); p.add_argument("--visibility", choices=("private", "shared"))
-    p = sub.add_parser("eval"); p.add_argument("--split", default="dev", choices=("dev","holdout")); p.add_argument("--out", default="recall-eval.json"); p.set_defaults(func=run_eval)
     args = ap.parse_args(argv)
     try: return run_transport(args)
     except ValueError as exc: ap.error(str(exc))
