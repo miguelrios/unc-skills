@@ -160,10 +160,46 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 self.send_json(400, {"error": str(exc)}); return
             self.send_json(200 if result else 404, result or {"error": "not found"}); return
+        if parsed.path == "/v1/doctor":
+            principal = self.require("read")
+            if not principal:
+                return
+            self.send_json(200, self.store.doctor(principal.get("source_id"))); return
         self.send_json(404, {"error": "not found"})
 
     def do_POST(self) -> None:
-        if self.path != "/v1/ingest/batches":
+        path = urlsplit(self.path).path
+        if path in {"/v1/search", "/v1/show", "/v1/related"}:
+            principal = self.require("read")
+            if not principal:
+                return
+            authorized_source = principal.get("source_id")
+            length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0 or length > 256 * 1024:
+                self.send_json(413, {"error": "invalid body size"}); return
+            try:
+                body = json.loads(self.rfile.read(length))
+                if path == "/v1/search":
+                    result = self.store.search(body.get("query"), body.get("filters", {}), body.get("limit", 10), authorized_source)
+                elif path == "/v1/show":
+                    result = self.store.show(
+                        body.get("target", ""), around=body.get("around"),
+                        tail=body.get("tail", 0), prompts=bool(body.get("prompts", False)),
+                        authorized_source=authorized_source,
+                    )
+                    if result is None:
+                        self.send_json(404, {"error": "not found"}); return
+                else:
+                    result = self.store.related(
+                        cwd=body.get("cwd"), branch=body.get("branch"), limit=body.get("limit", 10),
+                        mains_only=bool(body.get("mains_only", False)), fast=bool(body.get("fast", False)),
+                        authorized_source=authorized_source,
+                    )
+                self.send_json(200, result)
+            except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                self.send_json(400, {"error": str(exc)})
+            return
+        if path != "/v1/ingest/batches":
             self.send_json(404, {"error": "not found"}); return
         principal = self.require("write")
         if not principal:

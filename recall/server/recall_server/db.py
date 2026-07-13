@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import re
 import secrets
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +14,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from . import PROJECTOR_VERSION
-from .projectors import advisory_lock_key, canonical_json, event_receipt, project, redact_text, validate_envelope
+from .projectors import advisory_lock_key, canonical_json, event_receipt, legacy_engine, project, redact_text, validate_envelope
 
 
 class IdempotencyConflict(Exception):
@@ -285,6 +288,254 @@ class BrainStore:
                 (event["id"],),
             ).fetchall()
             return {"event": {key: value for key, value in event.items() if key != "id"}, "items": items}
+
+    @staticmethod
+    def _read_filters(filters: dict, authorized_source: str | None = None) -> tuple[str, list[Any]]:
+        allowed = {"since", "until", "cwd", "branch", "harness"}
+        if set(filters) - allowed:
+            raise ValueError("unsupported search filter")
+        clauses = ["i.deleted_at IS NULL"]
+        params: list[Any] = []
+        if authorized_source:
+            clauses.append("i.source_id = %s"); params.append(authorized_source)
+        if filters.get("since"):
+            clauses.append("i.occurred_at >= %s::timestamptz"); params.append(filters["since"])
+        if filters.get("until"):
+            clauses.append("i.occurred_at <= %s::timestamptz"); params.append(filters["until"])
+        if filters.get("cwd"):
+            clauses.append("COALESCE(s.metadata->>'cwd','') ILIKE %s"); params.append("%" + str(filters["cwd"]) + "%")
+        if filters.get("branch"):
+            clauses.append("COALESCE(s.metadata->>'branch','') ILIKE %s"); params.append("%" + str(filters["branch"]) + "%")
+        if filters.get("harness"):
+            if filters["harness"] not in {"claude", "codex"}:
+                raise ValueError("unsupported harness filter")
+            clauses.append("s.harness = %s"); params.append(filters["harness"])
+        return " AND ".join(clauses), params
+
+    def _lexical_leg(self, conn, query: str, query_function: str, filters: dict,
+                     leg: str, tier: int, *, exact: str | None = None,
+                     limit: int = 400, authorized_source: str | None = None) -> list[dict]:
+        if query_function not in {"plainto_tsquery", "phraseto_tsquery", "websearch_to_tsquery"}:
+            raise ValueError("unsupported query function")
+        where, params = self._read_filters(filters, authorized_source)
+        exact_sql = ""
+        query_params: list[Any] = [query]
+        if exact is not None:
+            exact_sql = " AND strpos(lower(i.text_redacted), %s) > 0"
+            query_params.append(exact.casefold())
+        sql = f"""
+            SELECT i.id,i.source_id,i.session_native_id,i.event_native_id,i.occurred_at,i.surface,
+                   i.text_redacted,i.receipt,i.projector_version,s.started_at,s.ended_at,s.metadata,
+                   se.envelope #>> '{{provenance,original_path}}' AS path,se.observed_at,
+                   ts_rank_cd(to_tsvector('simple',i.text_redacted),
+                              {query_function}('simple',%s),32) AS lexical_rank
+            FROM items i
+            JOIN sessions s ON s.source_id=i.source_id AND s.native_id=i.session_native_id
+            JOIN source_events se ON se.id=i.event_id
+            WHERE to_tsvector('simple',i.text_redacted) @@ {query_function}('simple',%s)
+              AND {where}{exact_sql}
+            ORDER BY lexical_rank DESC,i.occurred_at DESC NULLS LAST,i.id DESC
+            LIMIT %s
+        """
+        # The same query feeds rank and match; filters remain structurally parameterized.
+        values = [query, query, *params]
+        if exact is not None:
+            values.append(exact.casefold())
+        values.append(limit)
+        rows = conn.execute(sql, values).fetchall()
+        return [{**dict(row), "leg": leg, "tier": tier} for row in rows]
+
+    def search(self, query: str, filters: dict | None = None, limit: int = 10,
+               authorized_source: str | None = None) -> dict:
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError("query is required")
+        if not isinstance(limit, int) or not 1 <= limit <= 20:
+            raise ValueError("limit must be between 1 and 20")
+        filters = filters or {}
+        if not isinstance(filters, dict):
+            raise ValueError("filters must be an object")
+        engine = legacy_engine()
+        informative = engine.informative_terms(query)
+        if not informative:
+            return {"results": [], "abstention_reason": "no informative lexical terms"}
+        candidates: dict[int, dict] = {}
+
+        def merge(rows: list[dict]) -> None:
+            for row in rows:
+                existing = candidates.get(row["id"])
+                if existing is None:
+                    row["legs"] = {row.pop("leg")}
+                    candidates[row["id"]] = row
+                else:
+                    existing["legs"].add(row["leg"])
+                    if (row["tier"], float(row["lexical_rank"])) > (existing["tier"], float(existing["lexical_rank"])):
+                        legs = existing["legs"]
+                        row["legs"] = legs
+                        row.pop("leg")
+                        candidates[row["id"]] = row
+
+        with self.connect() as conn:
+            phrases = engine.phrase_queries(query)
+            if phrases:
+                merge(self._lexical_leg(conn, phrases[0], "phraseto_tsquery", filters, "phrase", 2, authorized_source=authorized_source))
+            for identifier in engine.identifier_terms(informative)[:3]:
+                merge(self._lexical_leg(conn, identifier, "plainto_tsquery", filters, "identifier", 2, exact=identifier, authorized_source=authorized_source))
+            merge(self._lexical_leg(conn, " ".join(informative), "plainto_tsquery", filters, "all", 1, authorized_source=authorized_source))
+            if len(candidates) < 3 * limit:
+                web_query = " OR ".join('"' + term + '"' for term in informative)
+                merge(self._lexical_leg(conn, web_query, "websearch_to_tsquery", filters, "any", 0, authorized_source=authorized_source))
+
+        now = datetime.now(timezone.utc).timestamp()
+        grouped: dict[tuple[str, str], tuple[tuple[int, float], dict]] = {}
+        for row in candidates.values():
+            matched = [term for term in informative if term.casefold() in row["text_redacted"].casefold()]
+            if row["tier"] == 0 and len([term for term in matched if len(term) >= 5]) < 2:
+                continue
+            weight = {"user": 4.0, "assistant": 2.0, "tool_input": 1.5, "tool_output": 1.0}.get(row["surface"], 1.0)
+            occurred = row["occurred_at"] or row["started_at"]
+            epoch = occurred.timestamp() if occurred else now
+            score = max(0.01, float(row["lexical_rank"])) * weight
+            score *= 1 / (1 + max(0, now - epoch) / 86400 / 180)
+            key = (row["source_id"], row["session_native_id"])
+            rank_key = (row["tier"], score)
+            if key not in grouped or rank_key > grouped[key][0]:
+                grouped[key] = (rank_key, {**row, "matched_terms": matched})
+        ranked = sorted(grouped.values(), key=lambda value: value[0], reverse=True)[:limit]
+        results = []
+        for _rank, row in ranked:
+            metadata = row["metadata"] or {}
+            path = row["path"] or metadata.get("original_path") or f"recall://{row['source_id']}/{row['session_native_id']}"
+            cwd = metadata.get("cwd")
+            results.append({
+                "source_id": row["source_id"], "native_id": row["event_native_id"],
+                "session_native_id": row["session_native_id"], "path": path,
+                "occurred_at": row["occurred_at"], "observed_at": row["observed_at"],
+                "cwd": cwd, "slot": metadata.get("slot") or (re.search(r"grep\d+", cwd or "").group(0) if re.search(r"grep\d+", cwd or "") else None),
+                "branch": metadata.get("branch"), "harness": metadata.get("harness"),
+                "surface": row["surface"], "text": row["text_redacted"],
+                "receipt": row["receipt"], "matched_terms": row["matched_terms"],
+                "legs": sorted(row["legs"]), "tier": row["tier"],
+                "projector_version": row["projector_version"],
+            })
+        return {"results": results, "abstention_reason": None if results else "insufficient lexical evidence"}
+
+    def show(self, target: str, *, around: str | None = None, tail: int = 0,
+             prompts: bool = False, authorized_source: str | None = None) -> dict | None:
+        if not target:
+            raise ValueError("target is required")
+        if tail < 0 or tail > 1000:
+            raise ValueError("tail must be between 0 and 1000")
+        with self.connect() as conn:
+            if target.startswith("recall://"):
+                event_part = target.split("#", 1)[0]
+                try:
+                    base, revision = event_part.rsplit("?rev=", 1)
+                    source_id, native_id = base.removeprefix("recall://").split("/", 1)
+                    int(revision)
+                except (ValueError, TypeError):
+                    raise ValueError("invalid receipt")
+                identity = conn.execute(
+                    "SELECT source_id,COALESCE(native_parent_id,native_id) AS session_native_id FROM source_events WHERE source_id=%s AND native_id=%s AND revision=%s AND (%s::text IS NULL OR source_id=%s)",
+                    (source_id, native_id, int(revision), authorized_source, authorized_source),
+                ).fetchone()
+            else:
+                identity = conn.execute(
+                    """SELECT source_id,COALESCE(native_parent_id,native_id) AS session_native_id
+                       FROM source_events WHERE envelope #>> '{provenance,original_path}'=%s
+                         AND (%s::text IS NULL OR source_id=%s)
+                       ORDER BY id DESC LIMIT 1""",
+                    (target, authorized_source, authorized_source),
+                ).fetchone()
+            if not identity:
+                return None
+            where = "source_id=%s AND session_native_id=%s AND deleted_at IS NULL"
+            values: list[Any] = [identity["source_id"], identity["session_native_id"]]
+            if prompts:
+                where += " AND surface='user'"
+            if around:
+                point = datetime.fromisoformat(around.replace("Z", "+00:00"))
+                before = conn.execute(
+                    f"SELECT occurred_at,surface,text_redacted AS text,receipt FROM items WHERE {where} AND occurred_at<=%s ORDER BY occurred_at DESC,id DESC LIMIT 4",
+                    [*values, point],
+                ).fetchall()
+                after = conn.execute(
+                    f"SELECT occurred_at,surface,text_redacted AS text,receipt FROM items WHERE {where} AND occurred_at>%s ORDER BY occurred_at,id LIMIT 3",
+                    [*values, point],
+                ).fetchall()
+                rows = list(reversed(before)) + list(after)
+            elif tail:
+                rows = list(reversed(conn.execute(
+                    f"SELECT occurred_at,surface,text_redacted AS text,receipt FROM items WHERE {where} ORDER BY occurred_at DESC NULLS LAST,id DESC LIMIT %s",
+                    [*values, tail],
+                ).fetchall()))
+            else:
+                rows = conn.execute(
+                    f"SELECT occurred_at,surface,text_redacted AS text,receipt FROM items WHERE {where} ORDER BY occurred_at,id LIMIT 1000",
+                    values,
+                ).fetchall()
+            return {"chunks": [dict(row) for row in rows], "truncated": not around and not tail and len(rows) == 1000}
+
+    def related(self, *, cwd: str | None, branch: str | None, limit: int = 10,
+                mains_only: bool = False, fast: bool = False,
+                authorized_source: str | None = None) -> dict:
+        if not 1 <= limit <= 20:
+            raise ValueError("limit must be between 1 and 20")
+        if not cwd and not branch:
+            return {"results": []}
+        clauses, score_parts, params = [], [], []
+        if cwd:
+            clauses.append("COALESCE(s.metadata->>'cwd','') ILIKE %s"); params.append("%" + cwd + "%")
+            score_parts.append("(COALESCE(s.metadata->>'cwd','') ILIKE %s)::int")
+        if branch:
+            clauses.append("COALESCE(s.metadata->>'branch','') ILIKE %s"); params.append("%" + branch + "%")
+            score_parts.append("(COALESCE(s.metadata->>'branch','') ILIKE %s)::int")
+        score_params = list(params)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""SELECT s.source_id,s.native_id,s.metadata,s.ended_at,path.value AS path,evidence.receipt,
+                           ({' + '.join(score_parts)}) AS overlap
+                    FROM sessions s
+                    JOIN LATERAL (
+                      SELECT envelope #>> '{{provenance,original_path}}' AS value
+                      FROM source_events se
+                      WHERE se.source_id=s.source_id AND COALESCE(se.native_parent_id,se.native_id)=s.native_id
+                        AND envelope #>> '{{provenance,original_path}}' IS NOT NULL
+                      ORDER BY se.id DESC LIMIT 1
+                    ) path ON true
+                    JOIN LATERAL (
+                      SELECT i.receipt FROM items i
+                      WHERE i.source_id=s.source_id AND i.session_native_id=s.native_id AND i.deleted_at IS NULL
+                      ORDER BY i.occurred_at DESC NULLS LAST,i.id DESC LIMIT 1
+                    ) evidence ON true
+                    WHERE ({' OR '.join(clauses)})
+                      AND (%s::text IS NULL OR s.source_id=%s)
+                      {"AND path.value NOT LIKE '%%/subagents/%%'" if mains_only else ''}
+                    ORDER BY overlap DESC,s.ended_at DESC NULLS LAST LIMIT %s""",
+                [*score_params, *params, authorized_source, authorized_source, limit],
+            ).fetchall()
+        return {"results": [{
+            "source_id": row["source_id"], "session_native_id": row["native_id"],
+            "path": row["path"], "cwd": (row["metadata"] or {}).get("cwd"),
+            "branch": (row["metadata"] or {}).get("branch"), "overlap": row["overlap"],
+            "receipt": row["receipt"],
+        } for row in rows]}
+
+    def doctor(self, authorized_source: str | None = None) -> dict:
+        result = self.service_metrics()
+        with self.connect() as conn:
+            if authorized_source:
+                result = {
+                    "source_events": conn.execute("SELECT count(*) AS n FROM source_events WHERE source_id=%s", (authorized_source,)).fetchone()["n"],
+                    "dead_letters": conn.execute("SELECT count(*) AS n FROM dead_letters WHERE source_id=%s", (authorized_source,)).fetchone()["n"],
+                    "projection_lag": result["projection_lag"],
+                    "source_freshness_seconds": conn.execute("SELECT COALESCE(GREATEST(0,extract(epoch FROM now()-max(created_at)))::bigint,0) AS n FROM source_events WHERE source_id=%s", (authorized_source,)).fetchone()["n"],
+                }
+            result.update({
+                "sources": 1 if authorized_source else conn.execute("SELECT count(*) AS n FROM sources").fetchone()["n"],
+                "sessions": conn.execute("SELECT count(*) AS n FROM sessions WHERE (%s::text IS NULL OR source_id=%s)", (authorized_source, authorized_source)).fetchone()["n"],
+                "live_items": conn.execute("SELECT count(*) AS n FROM items WHERE deleted_at IS NULL AND (%s::text IS NULL OR source_id=%s)", (authorized_source, authorized_source)).fetchone()["n"],
+            })
+        return {"status": "ok", **result}
 
     def rebuild(self) -> dict:
         with self.connect() as conn:

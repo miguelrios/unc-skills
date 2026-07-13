@@ -78,6 +78,10 @@ def project(envelope: dict, revision: int) -> tuple[list[dict], dict]:
     content = envelope["content"]
     items: list[dict] = []
     metadata: dict[str, Any] = {"projector_version": PROJECTOR_VERSION}
+    provenance = envelope.get("provenance", {})
+    for key in ("original_path", "cwd", "branch", "slot", "harness"):
+        if provenance.get(key) is not None:
+            metadata[key] = redact_text(str(provenance[key]))
 
     if kind == "tombstone":
         return items, metadata

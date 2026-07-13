@@ -38,7 +38,12 @@ def make_envelope(native_id: str, content, *, source="codex:linux", parent="sess
         "visibility": "private",
         "content_type": "application/json",
         "content": content,
-        "provenance": {"harness": harness},
+        "provenance": {
+            "harness": harness,
+            "original_path": f"/evidence/{source.replace(':', '-')}/{parent}.jsonl",
+            "cwd": "/workspace/recall-e2e",
+            "branch": "test/remote-recall",
+        },
     }
     value["content_sha256"] = hashlib.sha256(canonical_json(content)).hexdigest()
     return value
@@ -99,6 +104,33 @@ def main() -> None:
             first = make_envelope("session-1:turn-1", {"role": "user", "text": "quartz decision"})
             status, ack = request(base, "POST", "/v1/ingest/batches", {"events": [first]}, "batch-first")
             assert status == 201 and ack["inserted"] == 1 and not ack["replay"]
+
+            # Remote retrieval preserves exact provenance, WHY legs, and resolvable receipts.
+            status, searched = request(base, "POST", "/v1/search", {
+                "query": "quartz decision",
+                "filters": {"cwd": "recall-e2e", "branch": "remote-recall", "harness": "codex"},
+                "limit": 5,
+            })
+            assert status == 200 and searched["results"], (status, searched)
+            first_hit = searched["results"][0]
+            assert first_hit["path"] == "/evidence/codex-linux/session-1.jsonl"
+            assert first_hit["receipt"].startswith("recall://codex:linux/session-1:turn-1?rev=1#item=")
+            assert first_hit["tier"] >= 1 and first_hit["legs"]
+            assert request(base, "GET", "/v1/receipts/resolve?" + urllib.parse.urlencode({"receipt": first_hit["receipt"]}))[0] == 200
+
+            status, shown = request(base, "POST", "/v1/show", {
+                "target": first_hit["path"], "tail": 5, "prompts": False, "around": None,
+            })
+            assert status == 200 and any("quartz decision" in chunk["text"] for chunk in shown["chunks"])
+
+            status, related = request(base, "POST", "/v1/related", {
+                "cwd": "/workspace/recall-e2e", "branch": "test/remote-recall", "limit": 5,
+                "mains_only": True, "fast": False,
+            })
+            assert status == 200 and related["results"][0]["path"] == first_hit["path"]
+
+            status, remote_doctor = request(base, "GET", "/v1/doctor")
+            assert status == 200 and remote_doctor["status"] == "ok" and remote_doctor["projection_lag"] == 0
             status, replay = request(base, "POST", "/v1/ingest/batches", {"events": [first]}, "batch-first")
             assert status == 200 and replay["replay"] and replay["batch_id"] == ack["batch_id"]
 
@@ -225,6 +257,10 @@ def main() -> None:
                     "SELECT indexdef FROM pg_indexes WHERE schemaname='public' AND indexname='items_source_event_idx'"
                 ).fetchone()
                 assert tombstone_lookup_index and "(source_id, event_native_id)" in tombstone_lookup_index["indexdef"]
+                lexical_index = conn.execute(
+                    "SELECT indexdef FROM pg_indexes WHERE schemaname='public' AND indexname='items_search_vector_idx'"
+                ).fetchone()
+                assert lexical_index and "to_tsvector" in lexical_index["indexdef"]
                 summary = {
                     "source_events": conn.execute("SELECT count(*) AS n FROM source_events").fetchone()["n"],
                     "live_items": conn.execute("SELECT count(*) AS n FROM items WHERE deleted_at IS NULL").fetchone()["n"],
@@ -240,6 +276,11 @@ def main() -> None:
                     "dead_letters": conn.execute("SELECT count(*) AS n FROM dead_letters").fetchone()["n"],
                     "projection_lag": store.service_metrics()["projection_lag"],
                     "tombstone_lookup_index": True,
+                    "lexical_index": True,
+                    "remote_search_receipt_resolved": True,
+                    "remote_show_window": True,
+                    "remote_related_context": True,
+                    "remote_doctor_content_free": True,
                 }
             assert summary["projection_lag"] == 0
             result = {"status": "pass", "runtime": {"python": sys.version.split()[0], "postgres": "17-alpine", "psycopg": psycopg.__version__}, "summary": summary}
