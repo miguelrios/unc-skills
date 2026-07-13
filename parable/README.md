@@ -147,6 +147,12 @@ that configuration.
 
 ## Install
 
+skills.sh:
+
+```bash
+npx skills add miguelrios/unc-skills --skill parable
+```
+
 ```bash
 # Claude Code plugin marketplace
 claude plugin marketplace add miguelrios/unc-skills

@@ -89,6 +89,16 @@ class PortablePackagingTest(unittest.TestCase):
         self.assertIn("stock pi has no background bash", cascade)
         self.assertIn("pi's own session format is not yet", recall)
 
+    def test_skills_sh_install_docs_cover_every_skill(self):
+        root_readme = (ROOT / "README.md").read_text()
+        self.assertIn("https://skills.sh/miguelrios/unc-skills", root_readme)
+        self.assertIn("npx skills add miguelrios/unc-skills", root_readme)
+
+        for name in SKILLS:
+            package_readme = (ROOT / name / "README.md").read_text()
+            self.assertIn(f"https://skills.sh/miguelrios/unc-skills/{name}", package_readme)
+            self.assertIn(f"npx skills add miguelrios/unc-skills --skill {name}", package_readme)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,6 +2,8 @@
 
 **Your coding agents remember everything. They just can't find it.**
 
+[![skills.sh](https://skills.sh/b/miguelrios/unc-skills)](https://skills.sh/miguelrios/unc-skills/recall)
+
 Claude Code and Codex already keep detailed local transcripts of every session:
 your prompts, their answers, commands, tool results, branches, and working
 directories. Once those transcripts pile up, finding one piece of old work means
@@ -65,6 +67,12 @@ result includes a `WHY` line and the skill tells the agent to inspect the
 evidence before claiming a match.
 
 ## Install
+
+skills.sh:
+
+```bash
+npx skills add miguelrios/unc-skills --skill recall
+```
 
 Claude Code:
 

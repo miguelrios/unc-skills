@@ -33,6 +33,12 @@ the same way it decides to run any other tool.
 
 ## Install
 
+skills.sh:
+
+```bash
+npx skills add miguelrios/unc-skills --skill hands-free
+```
+
 Native collection installs:
 
 ```bash

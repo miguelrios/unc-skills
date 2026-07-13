@@ -2,6 +2,8 @@
 
 Miguel's collection of portable Agent Skills for Claude Code, Codex, and pi.
 
+[![skills.sh](https://skills.sh/b/miguelrios/unc-skills)](https://skills.sh/miguelrios/unc-skills)
+
 | Skill | What it does | Cross-harness note |
 |---|---|---|
 | [`hands-free`](hands-free/) | Calls your phone when the coding agent needs an answer or approval. | Same Python/Vapi contract in all three harnesses. |
@@ -11,6 +13,29 @@ Miguel's collection of portable Agent Skills for Claude Code, Codex, and pi.
 
 The skill payloads are canonical `skills/<name>/SKILL.md` directories. Harness-specific
 manifests package those same files; there are no Claude/Codex/pi forks to drift apart.
+
+## Install with skills.sh
+
+Browse all four skills at [skills.sh/miguelrios/unc-skills](https://skills.sh/miguelrios/unc-skills),
+or install interactively:
+
+```bash
+npx skills add miguelrios/unc-skills
+```
+
+Install one directly with `--skill`:
+
+```bash
+npx skills add miguelrios/unc-skills --skill hands-free
+npx skills add miguelrios/unc-skills --skill parable
+npx skills add miguelrios/unc-skills --skill cascade
+npx skills add miguelrios/unc-skills --skill recall
+```
+
+Add `--global` for a user-level install or `--agent claude-code`, `--agent codex`, or
+`--agent pi` to choose a destination explicitly. The skills.sh CLI discovers the same canonical
+payloads used by the native installs below; npm publication of the individual packages is not
+required.
 
 ## Install for Claude Code
 

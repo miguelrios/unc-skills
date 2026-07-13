@@ -2,6 +2,8 @@
 
 Cascade is an Agent Skill for breaking large coding tasks into a series of smaller, verifiable loops. It works in Claude Code, Codex, and pi.
 
+[![skills.sh](https://skills.sh/b/miguelrios/unc-skills)](https://skills.sh/miguelrios/unc-skills/cascade)
+
 Long agent runs tend to lose context in the middle: the original goal gets diluted, partial work is mistaken for completion, and it becomes difficult to tell what was actually tested. Cascade keeps the plan and progress in the repository. Before changing code, it writes down the sequence. Each loop has a specific goal, a way to prove the goal was met, and a limit on how long the agent can keep trying.
 
 The basic shape is:
@@ -24,6 +26,12 @@ plan the chain
 The useful part is the handoff between loops. The next loop does not start because the agent feels finished. It starts when the current loop can point to its exit evidence.
 
 ## Install
+
+skills.sh:
+
+```bash
+npx skills add miguelrios/unc-skills --skill cascade
+```
 
 Claude Code:
 
