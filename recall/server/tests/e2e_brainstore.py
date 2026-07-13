@@ -106,6 +106,7 @@ def main() -> None:
                 raise AssertionError("server did not become healthy")
 
             first = make_envelope("session-1:turn-1", {"role": "user", "text": "quartz decision"})
+            first["provenance"]["private_internal"] = "synthetic-not-client-visible"
             status, ack = request(base, "POST", "/v1/ingest/batches", {"events": [first]}, "batch-first")
             assert status == 201 and ack["inserted"] == 1 and not ack["replay"]
 
@@ -120,6 +121,11 @@ def main() -> None:
             assert first_hit["path"] == "/evidence/codex-linux/session-1.jsonl"
             assert first_hit["receipt"].startswith("recall://codex:linux/session-1:turn-1?rev=1#item=")
             assert first_hit["tier"] >= 1 and first_hit["legs"]
+            first_resolved = request(
+                base, "GET", "/v1/receipts/resolve?" + urllib.parse.urlencode({"receipt": first_hit["receipt"]})
+            )[1]
+            assert first_resolved["event"]["provenance"]["original_path"] == first_hit["path"]
+            assert "private_internal" not in first_resolved["event"]["provenance"]
             diagnostics = searched["diagnostics"]
             assert diagnostics["deadline_ms"] < 500 and diagnostics["elapsed_ms"] >= 0
 
@@ -159,6 +165,12 @@ def main() -> None:
             assert second_import["acknowledgement"]["replay"] is True
             export_search = export_client.search(export_marker, limit=5)
             assert export_search["results"] and export_search["results"][0]["receipt"].startswith("recall://export:mac:e2e/")
+            export_hit = export_search["results"][0]
+            assert export_hit["path"].startswith("export://")
+            assert export_hit["path"].endswith("/supported-export.jsonl#record=0")
+            export_resolved = export_client.resolve(export_hit["receipt"])
+            assert export_resolved["event"]["provenance"]["member"] == "supported-export.jsonl#record=0"
+            assert export_resolved["event"]["provenance"]["original_path"] == export_hit["path"]
 
             # The exact portable collector core survives an offline scan and only
             # advances its committed cursor after the deployed API acknowledges it.

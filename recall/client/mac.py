@@ -396,6 +396,7 @@ class ExportImporter:
         native_key = f"{file_sha}\x1f{member}\x1f{index}"
         native_id = "export-" + hashlib.sha256(native_key.encode()).hexdigest()
         occurred = iso_mtime(path)
+        uri = "export://" + file_sha
         return _envelope(
             source_id=self.source_id,
             native_id=native_id,
@@ -405,7 +406,12 @@ class ExportImporter:
             principal_id=self.principal_id,
             visibility=self.visibility,
             occurred_at=occurred,
-            provenance={"uri": "export://" + file_sha, "archive": path.name, "member": member},
+            provenance={
+                "uri": uri,
+                "original_path": f"{uri}/{member}",
+                "archive": path.name,
+                "member": member,
+            },
         )
 
     def import_with(self, client: BrainClient, inputs: Iterable[Path]) -> dict:
