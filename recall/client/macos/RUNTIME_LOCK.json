@@ -1,0 +1,24 @@
+{
+  "archive_root": "python",
+  "artifact": {
+    "bytes": 25102827,
+    "sha256": "5a30271f8d345a5b02b0c9e4e31e0f1e1455a8e4a04fba95cd9762472abc3b17",
+    "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260510/cpython-3.12.13%2B20260510-aarch64-apple-darwin-install_only.tar.gz"
+  },
+  "license_paths": [
+    "python/lib/python3.12/LICENSE.txt",
+    "python/lib/python3.12/site-packages/pip-26.1.1.dist-info/licenses/LICENSE.txt"
+  ],
+  "provider": "astral-sh/python-build-standalone",
+  "release": "20260510",
+  "required_paths": [
+    "python/bin/python3",
+    "python/bin/python3.12",
+    "python/lib/python3.12/LICENSE.txt",
+    "python/lib/python3.12/ssl.py",
+    "python/lib/python3.12/sqlite3/__init__.py"
+  ],
+  "schema_version": 1,
+  "target": "aarch64-apple-darwin",
+  "version": "3.12.13"
+}

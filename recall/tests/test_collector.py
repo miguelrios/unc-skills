@@ -119,6 +119,31 @@ class CollectorTest(unittest.TestCase):
         self.assertGreater(located["end_offset"], located["start_offset"])
         collector.close()
 
+    def test_process_death_after_remote_commit_before_local_ack_replays_exactly_once(self) -> None:
+        (self.root / "session.jsonl").write_text(claude_line("committed before local ack"))
+        collector = self.collector()
+        collector.scan()
+
+        def die_after_remote_commit(_acknowledgement) -> None:
+            raise RuntimeError("simulated death after remote commit before local ack")
+
+        collector._after_remote_commit = die_after_remote_commit
+        with self.assertRaisesRegex(RuntimeError, "after remote commit before local ack"):
+            collector.flush()
+        self.assertEqual(collector.doctor()["pending"], 1)
+        self.assertEqual(len(AckServer.batches), 1)
+        collector.close()
+
+        resumed = self.collector()
+        result = resumed.flush()
+        self.assertEqual(result["acked"], 1)
+        self.assertEqual(result["replayed_batches"], 1)
+        self.assertEqual(resumed.doctor()["pending"], 0)
+        self.assertEqual(resumed.doctor()["acked"], 1)
+        self.assertEqual(AckServer.requests, 2)
+        self.assertEqual(len(AckServer.batches), 1)
+        resumed.close()
+
     def test_append_queues_only_new_complete_records(self) -> None:
         transcript = self.root / "session.jsonl"
         transcript.write_text(claude_line("first"))
