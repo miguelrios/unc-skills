@@ -11,15 +11,16 @@
 
 ```mermaid
 flowchart LR
-    You(["You"]) --> F["Fable directs<br/><b>write plan.md · choose the cast</b>"]
-    F --> C["The cast ships<br/>Claude · Codex · Cursor · pi"]
-    C --> V["Verify<br/>tests · independent review"]
-    V --> Done(["Ship"])
-    V -. fix .-> F
+    R["Request"] --> F["Fable<br/>plan.md + routing"]
+    F --> E["Selected executor<br/>Claude · Codex · Cursor · pi"]
+    E --> W["Shared worktree"]
+    W --> V["Tests + independent review"]
+    V -->|pass| C["Commit"]
+    V -->|fail| E
 ```
 
-**Fable directs. The cast ships.** Fable writes the `plan.md`, chooses the harness, and judges
-the evidence. Claude, Codex, Cursor, or pi does the implementation.
+Fable produces the `plan.md` and selects an executor. The executor edits the shared worktree;
+tests and a non-author model gate the result.
 
 It is Tuesday. You are pair-programming with Fable on a small task: extract a helper
 function and add a test. Three hundred lines later, the helper has its own module and two new
