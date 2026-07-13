@@ -101,6 +101,13 @@ class SupportedExportTest(unittest.TestCase):
         members = {record["provenance"]["member"] for record in first["records"]}
         self.assertIn("supported-export.jsonl#record=1", members)
         self.assertIn("conversations/chat.json#record=0", members)
+        for record in first["records"]:
+            provenance = record["provenance"]
+            self.assertEqual(
+                provenance["original_path"],
+                f"{provenance['uri']}/{provenance['member']}",
+            )
+            self.assertNotIn(str(self.root), provenance["original_path"])
         self.assertTrue(all(record["kind"] == "chat_export" for record in first["records"]))
 
     def test_archive_traversal_and_symlink_members_are_rejected(self) -> None:

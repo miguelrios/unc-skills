@@ -296,7 +296,17 @@ class BrainStore:
         with self.connect() as conn:
             event = conn.execute(
                 """SELECT id,source_id,native_id,native_parent_id,kind,occurred_at,observed_at,principal_id,
-                   visibility,content_type,content_sha256,revision,is_tombstone
+                   visibility,content_type,content_sha256,revision,is_tombstone,
+                   jsonb_strip_nulls(jsonb_build_object(
+                     'uri', envelope #>> '{provenance,uri}',
+                     'original_path', envelope #>> '{provenance,original_path}',
+                     'archive', envelope #>> '{provenance,archive}',
+                     'member', envelope #>> '{provenance,member}',
+                     'harness', envelope #>> '{provenance,harness}',
+                     'cwd', envelope #>> '{provenance,cwd}',
+                     'branch', envelope #>> '{provenance,branch}',
+                     'slot', envelope #>> '{provenance,slot}'
+                   )) AS provenance
                    FROM source_events event
                    WHERE source_id=%s AND native_id=%s AND revision=%s
                      AND NOT EXISTS (
