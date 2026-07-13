@@ -7,13 +7,52 @@ Miguel's collection of portable Agent Skills for Claude Code, Codex, and pi.
 | Skill | What it does | Cross-harness note |
 |---|---|---|
 | [`hands-free`](hands-free/) | Calls your phone when the coding agent needs an answer or approval. | Same Python/Vapi contract in all three harnesses. |
-| [`parable`](parable/) | Plans implementation batches, routes work to cheaper executors, verifies, and reviews. | Claude/native subagents are used only when available; stock pi needs a configured CLI-backed executor. |
+| [`parable`](parable/) | Gives Fable a multi-model cast: plan, dispatch, verify, and cross-family review. | Runs Claude subagents plus Codex, Cursor, and pi executors; Cursor unlocks Composer and Grok 4.5. |
 | [`cascade`](cascade/) | Runs large projects as bounded, evidence-gated development loops. | Falls back to a file-backed task graph when the harness has no task or wake primitives. |
 | [`recall`](recall/) | Indexed local search over prior Claude Code and Codex sessions. | Runs from pi, but does not index pi's own transcripts yet. |
 | [`tether`](tether/) | Keeps Slack threads attached to the exact agents that created them. | Codex and Claude Code resume natively; stock pi publishes as a headless run. End-to-end routing also installs an external Hermes plugin/runtime. |
 
 The skill payloads are canonical `skills/<name>/SKILL.md` directories. Harness-specific
 manifests package those same files; there are no Claude/Codex/pi forks to drift apart.
+
+## Fable directs. The cast ships.
+
+[Parable](parable/) keeps Fable in the director's chair: it turns the request into precise
+implementation plans, sends each scene to the best available harness, verifies the shared
+worktree, and gives the final diff to a model that did not author it.
+
+```mermaid
+flowchart LR
+    You(["You"]) --> F["Fable<br/><i>plan · route · judge</i>"]
+    F --> R{"pick the best lane<br/>for this scene"}
+
+    R -->|"native delegation"| A["Claude subagents<br/>Sonnet · Opus"]
+    R -->|"ChatGPT plan"| C["Codex CLI<br/>GPT models"]
+    R -->|"Cursor plan"| X["Cursor CLI<br/>Composer · Grok 4.5"]
+    R -->|"API / local"| P["pi + open models<br/>Kimi · MiniMax · DeepSeek"]
+
+    A & C & X & P --> W["shared worktree<br/><i>code + evidence</i>"]
+    W --> V["typecheck · tests<br/>cross-family review"]
+    V -->|"PASS + receipts"| F
+    V -.->|"FAIL + compact evidence"| E["resume the author<br/><i>same session, warm context</i>"]
+    E --> W
+
+    classDef brain fill:#6d28d9,color:#fff,stroke:#a78bfa,stroke-width:2px;
+    classDef cursor fill:#111827,color:#fff,stroke:#22d3ee,stroke-width:2px;
+    classDef proof fill:#052e16,color:#fff,stroke:#4ade80,stroke-width:2px;
+    class F brain;
+    class X cursor;
+    class V,E proof;
+```
+
+- **Composer through Cursor** for fast, precise implementation bursts.
+- **Grok 4.5 through Cursor** for a genuinely different model family—especially useful for
+  adversarial review when Claude and OpenAI agree a little too quickly.
+- **Codex, Claude subagents, and pi/OpenAI-compatible models** for the rest of the cast, routed
+  by task fit and live subscription headroom rather than a hard-coded model ladder.
+
+See the [Parable README](parable/) for the full story and the
+[three-subscription example cast](parable/examples/parable.cursor.toml) for a working config.
 
 ## Install with skills.sh
 
