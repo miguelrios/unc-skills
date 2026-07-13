@@ -119,6 +119,13 @@ class SupportedExportTest(unittest.TestCase):
         with self.assertRaisesRegex(PrivacyError, "symlink"):
             importer.inventory([symlink])
 
+        source = self.root / "source.json"
+        source.write_text("{}")
+        alias = self.root / "alias.json"
+        alias.symlink_to(source)
+        with self.assertRaisesRegex(PrivacyError, "must not be a symlink"):
+            importer.inventory([alias])
+
 
 class FakeResponse:
     def __init__(self, status: int, body: dict):

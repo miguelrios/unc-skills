@@ -329,7 +329,7 @@ class RemoteHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
-        type(self).requests.append({"method": "POST", "path": self.path, "body": body, "authorization": self.headers.get("Authorization")})
+        type(self).requests.append({"method": "POST", "path": self.path, "body": body, "authorization": self.headers.get("Authorization"), "idempotency_key": self.headers.get("Idempotency-Key")})
         if self.path == "/v1/search":
             if type(self).fail_search:
                 self.send_json(503, {"error": "unavailable"})
@@ -367,6 +367,13 @@ class RemoteHandler(BaseHTTPRequestHandler):
                 "cwd": "/work/grep123/project", "branch": "feature/remote",
                 "receipt": "recall://claude:linux/session:1?rev=1#item=0"
             }]})
+        elif self.path == "/v1/ingest/batches":
+            event = body["events"][0]
+            revision = 2 if event["kind"] == "tombstone" else 1
+            self.send_json(201, {
+                "status": "committed", "inserted": 1, "duplicate_events": 0,
+                "receipts": [f"recall://{event['source_id']}/{event['native_id']}?rev={revision}"],
+            })
         else:
             self.send_json(404, {"error": "not found"})
 
@@ -517,6 +524,31 @@ class RemoteTransportTest(unittest.TestCase):
         code, _, err = self.call("doctor")
         self.assertEqual((code, err), (0, ""))
         self.assertEqual(RemoteHandler.requests[-1]["authorization"], "Bearer scoped-test-token")
+
+    def test_explicit_memory_put_and_delete_are_remote_scoped_and_receipted(self):
+        os.environ["RECALL_WRITE_SOURCE_ID"] = "memory:mac:test"
+        self.addCleanup(os.environ.pop, "RECALL_WRITE_SOURCE_ID", None)
+        code, output, error = self.call(
+            "put", "remember the c5 exact marker", "--visibility", "private",
+            "--provenance-uri", "manual://unit-test",
+        )
+        self.assertEqual((code, error), (0, ""))
+        put = json.loads(output)
+        self.assertEqual(put["kind"], "memory")
+        request = RemoteHandler.requests[-1]
+        event = request["body"]["events"][0]
+        self.assertEqual(event["content"], {"text": "remember the c5 exact marker"})
+        self.assertEqual(event["source_id"], "memory:mac:test")
+        self.assertEqual(event["visibility"], "private")
+        self.assertTrue(request["idempotency_key"].startswith("recall-skill-v1-"))
+
+        code, output, error = self.call("delete", put["receipt"], "--source-id", "memory:mac:test")
+        self.assertEqual((code, error), (0, ""))
+        deleted = json.loads(output)
+        self.assertEqual(deleted["kind"], "tombstone")
+        tombstone = RemoteHandler.requests[-1]["body"]["events"][0]
+        self.assertEqual(tombstone["native_id"], put["native_id"])
+        self.assertEqual(tombstone["content"]["target_native_id"], put["native_id"])
 
 
 if __name__ == "__main__":

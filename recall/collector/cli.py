@@ -32,6 +32,7 @@ def main() -> None:
     parser.add_argument("--endpoint", default=os.environ.get("RECALL_ENDPOINT", ""))
     parser.add_argument("--token-file", default=os.environ.get("RECALL_COLLECTOR_TOKEN_FILE", ""))
     parser.add_argument("--principal-id", default="owner")
+    parser.add_argument("--visibility", choices=("private", "shared"), default="private")
     parser.add_argument("--interval", type=float, default=30.0)
     parser.add_argument("--shard-count", type=int, default=1)
     parser.add_argument("--shard-index", type=int, default=0)
@@ -44,6 +45,7 @@ def main() -> None:
         spool_path=Path(args.spool), endpoint=args.endpoint or "http://127.0.0.1:1",
         token=token_from_file(args.token_file) if args.token_file else "unused",
         principal_id=args.principal_id,
+        visibility=args.visibility,
     )
     if args.shard_count < 1 or not 0 <= args.shard_index < args.shard_count:
         parser.error("shard index must be within shard count")

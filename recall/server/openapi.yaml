@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Recall BrainStore API
-  version: 0.3.0-c4
+  version: 0.4.0-c5
   license:
     name: MIT
     identifier: MIT
@@ -77,7 +77,7 @@ paths:
           schema: {type: string}
       responses:
         '200': {description: Sanitized event metadata and projected items}
-        '404': {description: Receipt not found}
+        '404': {description: Receipt not found or deleted by a later tombstone}
         '401': {description: Unauthorized}
   /v1/search:
     post:

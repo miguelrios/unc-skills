@@ -57,6 +57,8 @@ class MacPackageTest(unittest.TestCase):
             "--endpoint", "https://brain.example.ts.net",
             "--host-id", "test-mac",
             "--keychain-service", "ai.parcha.recall.test",
+            "--visibility", "private",
+            "--sources", "claude,codex",
             "--no-load",
         ]
         subprocess.run([str(package / "install.sh"), *common], check=True, env=env)

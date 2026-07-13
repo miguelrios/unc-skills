@@ -19,8 +19,12 @@ import psycopg
 
 ROOT = Path(__file__).resolve().parents[3]
 SERVER = ROOT / "recall/server"
+RECALL = ROOT / "recall"
 sys.path.insert(0, str(SERVER))
+sys.path.insert(0, str(RECALL))
 
+from client.mac import BrainClient, ExportImporter, MemoryClient
+from collector.collector import Collector
 from recall_server.db import BrainStore, SearchDeadlineExceeded
 from recall_server.projectors import canonical_json, project
 
@@ -118,6 +122,76 @@ def main() -> None:
             assert first_hit["tier"] >= 1 and first_hit["legs"]
             diagnostics = searched["diagnostics"]
             assert diagnostics["deadline_ms"] < 500 and diagnostics["elapsed_ms"] >= 0
+
+            # C5 explicit memory is ordinary canonical evidence: write, rank, resolve,
+            # tombstone, then prove both search and the old receipt are unavailable.
+            memory_marker = "c5-explicit-memory-quartz-7db2e0"
+            memory = MemoryClient(
+                endpoint=base, token="development-only", source_id="memory:mac:e2e",
+                principal_id="owner", visibility="private",
+            )
+            put = memory.put(memory_marker, provenance={"uri": "manual://c5-e2e"})
+            memory_search = memory.search(memory_marker, limit=5)
+            memory_hits = [item for item in memory_search["results"] if item["receipt"].split("#", 1)[0] == put["receipt"]]
+            assert memory_hits and memory_search["results"].index(memory_hits[0]) < 5, memory_search
+            memory_resolved = memory.resolve(put["receipt"])
+            assert memory_resolved["event"]["kind"] == "memory"
+            assert memory_resolved["items"][0]["text_redacted"] == memory_marker
+            deleted = memory.delete(put["receipt"])
+            assert deleted["receipt"].endswith("?rev=2")
+            deleted_search = memory.search(memory_marker, limit=5)
+            assert not any(item["receipt"].split("#", 1)[0] == put["receipt"] for item in deleted_search["results"])
+            assert request(base, "GET", "/v1/receipts/resolve?" + urllib.parse.urlencode({"receipt": put["receipt"]}))[0] == 404
+
+            # Supported user exports retain member provenance and replay the same
+            # request idempotently without inspecting any application-private state.
+            export_marker = "c5-supported-export-ember-91b0"
+            export_path = Path(tmp) / "supported-export.jsonl"
+            export_path.write_text(json.dumps({"text": export_marker}) + "\n")
+            importer = ExportImporter(source_id="export:mac:e2e", principal_id="owner", visibility="private")
+            export_client = BrainClient(
+                endpoint=base, token="development-only", source_id="export:mac:e2e",
+                principal_id="owner", visibility="private",
+            )
+            first_import = importer.import_with(export_client, [export_path])
+            second_import = importer.import_with(export_client, [export_path])
+            assert first_import["acknowledgement"]["inserted"] == 1
+            assert second_import["acknowledgement"]["replay"] is True
+            export_search = export_client.search(export_marker, limit=5)
+            assert export_search["results"] and export_search["results"][0]["receipt"].startswith("recall://export:mac:e2e/")
+
+            # The exact portable collector core survives an offline scan and only
+            # advances its committed cursor after the deployed API acknowledges it.
+            offline_marker = "c5-mac-offline-recovery-sable-42c9"
+            mac_root = Path(tmp) / "mac-claude"
+            mac_root.mkdir()
+            mac_source = mac_root / "session.jsonl"
+            mac_source.write_text(json.dumps({
+                "type": "user", "timestamp": "2026-07-13T00:00:00Z",
+                "message": {"content": offline_marker},
+            }) + "\n")
+            mac_spool = Path(tmp) / "mac-collector.db"
+            offline = Collector(
+                root=mac_root, harness="claude", source_id="claude:mac:e2e",
+                spool_path=mac_spool, endpoint="http://127.0.0.1:1", token="development-only",
+            )
+            offline_scan = offline.scan()
+            assert offline_scan["records_queued"] == 1
+            assert offline.flush()["acked"] == 0
+            assert offline.doctor()["committed_files"] == 0
+            offline.close()
+            recovery_started = time.monotonic()
+            online = Collector(
+                root=mac_root, harness="claude", source_id="claude:mac:e2e",
+                spool_path=mac_spool, endpoint=base, token="development-only",
+            )
+            recovery = online.flush()
+            recovery_seconds = time.monotonic() - recovery_started
+            assert recovery["acked"] == 1 and recovery_seconds < 30
+            recovered_receipt = online.db.execute("SELECT receipt FROM outbox WHERE state='acked'").fetchone()["receipt"]
+            assert offline_marker in json.dumps(memory.resolve(recovered_receipt))
+            assert online.flush()["acked"] == 0
+            online.close()
             assert diagnostics["legs"] and all(set(leg) == {"leg", "elapsed_ms", "n_results", "timed_out"} for leg in diagnostics["legs"])
             assert "quartz" not in json.dumps(diagnostics).lower()
             assert request(base, "GET", "/v1/receipts/resolve?" + urllib.parse.urlencode({"receipt": first_hit["receipt"]}))[0] == 200
@@ -345,7 +419,7 @@ def main() -> None:
             status, tomb_ack = request(base, "POST", "/v1/ingest/batches", {"events": [tombstone]}, "batch-tombstone")
             assert status == 201 and tomb_ack["receipts"][0].endswith("?rev=3")
             status, old_after_delete = request(base, "GET", "/v1/receipts/resolve?" + urllib.parse.urlencode({"receipt": ack["receipts"][0]}))
-            assert status == 200 and old_after_delete["items"] == []
+            assert status == 404 and old_after_delete == {"error": "not found"}
             before = {}
             for receipt, _ in fixture_receipts:
                 before[receipt] = request(base, "GET", "/v1/receipts/resolve?" + urllib.parse.urlencode({"receipt": receipt}))[1]
@@ -405,6 +479,12 @@ def main() -> None:
                     "remote_related_context": True,
                     "remote_doctor_content_free": True,
                     "source_scoped_reads": True,
+                    "explicit_memory_rank_at_most_5": True,
+                    "explicit_memory_receipt_exact": True,
+                    "explicit_memory_delete_hides_search_and_receipt": True,
+                    "supported_export_idempotent_with_provenance": True,
+                    "mac_core_offline_recovery_seconds": round(recovery_seconds, 3),
+                    "mac_core_ack_before_cursor": True,
                 }
             assert summary["projection_lag"] == 0
             result = {"status": "pass", "runtime": {"python": sys.version.split()[0], "postgres": "17-alpine", "psycopg": psycopg.__version__}, "summary": summary}

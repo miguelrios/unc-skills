@@ -297,7 +297,15 @@ class BrainStore:
             event = conn.execute(
                 """SELECT id,source_id,native_id,native_parent_id,kind,occurred_at,observed_at,principal_id,
                    visibility,content_type,content_sha256,revision,is_tombstone
-                   FROM source_events WHERE source_id=%s AND native_id=%s AND revision=%s""",
+                   FROM source_events event
+                   WHERE source_id=%s AND native_id=%s AND revision=%s
+                     AND NOT EXISTS (
+                       SELECT 1 FROM source_events later
+                       WHERE later.source_id=event.source_id
+                         AND later.native_id=event.native_id
+                         AND later.revision>event.revision
+                         AND later.is_tombstone
+                     )""",
                 (source_id, native_id, revision),
             ).fetchone()
             if not event:

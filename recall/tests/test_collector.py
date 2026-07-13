@@ -167,6 +167,21 @@ class CollectorTest(unittest.TestCase):
         self.assertEqual(payloads[0]["source_id"], "claude:linux:test")
         collector.close()
 
+    def test_selected_visibility_reaches_every_envelope(self) -> None:
+        (self.root / "session.jsonl").write_text(claude_line("shared evidence"))
+        collector = Collector(
+            root=self.root,
+            harness="claude",
+            source_id="claude:mac:shared-test",
+            spool_path=self.spool,
+            endpoint=self.endpoint,
+            token="test-token-not-a-secret",
+            visibility="shared",
+        )
+        collector.scan()
+        self.assertEqual({event["visibility"] for event in collector.pending_envelopes()}, {"shared"})
+        collector.close()
+
     def test_giant_file_resumes_from_durable_scan_checkpoint(self) -> None:
         transcript = self.root / "giant.jsonl"
         transcript.write_text("".join(claude_line(f"record-{index}") for index in range(1001)))

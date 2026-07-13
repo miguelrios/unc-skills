@@ -16,6 +16,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,6 +36,7 @@ and or not it its this those these from by at as is are were be been about into 
 one ones our my me you us your their them they he she his her can could would should will just
 than then if else""".split())
 REMOTE_READ_COMMANDS = frozenset({"search", "show", "related", "doctor"})
+REMOTE_WRITE_COMMANDS = frozenset({"put", "delete"})
 
 
 class RemoteRecallError(RuntimeError):
@@ -68,12 +70,16 @@ def remote_headers() -> dict[str, str]:
     return headers
 
 
-def remote_request(method: str, path: str, body: dict | None = None) -> dict:
+def remote_request(method: str, path: str, body: dict | None = None,
+                   idempotency_key: str | None = None) -> dict:
     base = os.environ.get("RECALL_URL", "").rstrip("/")
     if not base:
         raise RemoteRecallError("RECALL_URL is required for remote mode")
     data = None if body is None else json.dumps(body, sort_keys=True).encode()
-    request = urllib.request.Request(base + path, data=data, method=method, headers=remote_headers())
+    headers = remote_headers()
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
+    request = urllib.request.Request(base + path, data=data, method=method, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=float(os.environ.get("RECALL_TIMEOUT", "15"))) as response:
             rendered = json.loads(response.read())
@@ -91,6 +97,62 @@ def remote_request(method: str, path: str, body: dict | None = None) -> dict:
 
 
 def remote_execute(args) -> tuple[str, dict]:
+    if args.command in REMOTE_WRITE_COMMANDS:
+        source_id = args.source_id or os.environ.get("RECALL_WRITE_SOURCE_ID", "")
+        if not re.fullmatch(r"[A-Za-z0-9_.:@-]{3,160}", source_id):
+            raise RemoteRecallError("--source-id or RECALL_WRITE_SOURCE_ID is required")
+        principal_id = args.principal_id or os.environ.get("RECALL_PRINCIPAL_ID", "owner")
+        visibility = args.visibility or os.environ.get("RECALL_VISIBILITY", "private")
+        if visibility not in {"private", "shared"}:
+            raise RemoteRecallError("visibility must be private or shared")
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        if args.command == "put":
+            text = args.text if args.text is not None else sys.stdin.read()
+            if not text.strip():
+                raise RemoteRecallError("memory text must not be empty")
+            native_id = "memory-" + uuid.uuid4().hex
+            kind = "memory"
+            content = {"text": clean_text(text)}
+            provenance = {"uri": clean_text(args.provenance_uri)}
+        else:
+            event_part = args.receipt.split("#", 1)[0]
+            try:
+                base, revision = event_part.rsplit("?rev=", 1)
+                if int(revision) < 1 or not base.startswith("recall://"):
+                    raise ValueError
+                base = base.removeprefix("recall://")
+                receipt_source, native_id = base.split("/", 1)
+                if not native_id:
+                    raise ValueError
+            except (ValueError, TypeError) as exc:
+                raise RemoteRecallError("invalid receipt") from exc
+            if receipt_source != source_id:
+                raise RemoteRecallError("receipt source does not match write source")
+            kind = "tombstone"
+            content = {"target_native_id": native_id, "deleted_receipt": event_part}
+            provenance = {"uri": "manual://recall_delete"}
+        envelope = {
+            "schema_version": 1,
+            "source_id": source_id,
+            "native_id": native_id,
+            "native_parent_id": native_id,
+            "kind": kind,
+            "occurred_at": now,
+            "observed_at": now,
+            "principal_id": principal_id,
+            "visibility": visibility,
+            "content_type": "application/json",
+            "content": content,
+            "provenance": provenance,
+            "content_sha256": hashlib.sha256(json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest(),
+        }
+        key = "recall-skill-v1-" + hashlib.sha256(json.dumps(envelope, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+        response = remote_request("POST", "/v1/ingest/batches", {"events": [envelope]}, key)
+        receipts = response.get("receipts")
+        if not isinstance(receipts, list) or len(receipts) != 1:
+            raise RemoteRecallError("ingest response has no exact receipt")
+        output = {"kind": kind, "native_id": native_id, "receipt": receipts[0], "status": response.get("status")}
+        return json.dumps(output, sort_keys=True) + "\n", {"remote_write": output}
     if args.command == "search":
         filters = {
             key: getattr(args, key)
@@ -173,6 +235,17 @@ def append_private_jsonl(path: Path, entry: dict) -> None:
 
 def run_transport(args) -> int:
     mode = recall_mode()
+    if args.command in REMOTE_WRITE_COMMANDS:
+        if mode == "local":
+            print("remote recall unavailable: explicit memory writes require RECALL_URL", file=sys.stderr)
+            return 2
+        try:
+            output, _metadata = remote_execute(args)
+        except RemoteRecallError as exc:
+            print(f"remote recall unavailable: {exc}", file=sys.stderr)
+            return 2
+        print(output, end="")
+        return 0
     if args.command not in REMOTE_READ_COMMANDS or mode == "local":
         return args.func(args)
     if mode == "remote":
@@ -928,6 +1001,8 @@ def main(argv=None) -> int:
     p = sub.add_parser("show"); p.add_argument("target"); p.add_argument("--around"); p.add_argument("--prompts", action="store_true"); p.add_argument("--tail", type=int, default=0, help="print only the last N chunks"); p.set_defaults(func=show)
     p = sub.add_parser("related"); p.add_argument("--cwd"); p.add_argument("--branch"); p.add_argument("--limit", type=int, default=10); p.add_argument("--mains-only", action="store_true", help="exclude subagent transcripts"); p.add_argument("--fast", action="store_true", help="tight caps for the session-start hook budget"); p.set_defaults(func=related)
     p = sub.add_parser("doctor"); p.set_defaults(func=doctor)
+    p = sub.add_parser("put"); p.add_argument("text", nargs="?"); p.add_argument("--source-id"); p.add_argument("--principal-id"); p.add_argument("--visibility", choices=("private", "shared")); p.add_argument("--provenance-uri", default="manual://recall_put")
+    p = sub.add_parser("delete"); p.add_argument("receipt"); p.add_argument("--source-id"); p.add_argument("--principal-id"); p.add_argument("--visibility", choices=("private", "shared"))
     p = sub.add_parser("eval"); p.add_argument("--split", default="dev", choices=("dev","holdout")); p.add_argument("--out", default="recall-eval.json"); p.set_defaults(func=run_eval)
     args = ap.parse_args(argv)
     try: return run_transport(args)

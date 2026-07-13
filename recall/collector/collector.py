@@ -64,9 +64,12 @@ def normalized_timestamp(value: Any, fallback_epoch: float) -> str:
 
 class Collector:
     def __init__(self, *, root: Path, harness: str, source_id: str, spool_path: Path,
-                 endpoint: str, token: str, principal_id: str = "owner", batch_size: int = 500):
+                 endpoint: str, token: str, principal_id: str = "owner",
+                 visibility: str = "private", batch_size: int = 500):
         if harness not in {"claude", "codex"}:
             raise ValueError("harness must be claude or codex")
+        if visibility not in {"private", "shared"}:
+            raise ValueError("visibility must be private or shared")
         self.root = Path(root).expanduser().resolve()
         self.harness = harness
         self.source_id = source_id
@@ -74,6 +77,7 @@ class Collector:
         self.endpoint = endpoint.rstrip("/")
         self.token = token
         self.principal_id = principal_id
+        self.visibility = visibility
         self.batch_size = batch_size
         self.shard_count = 1
         self.shard_index = 0
@@ -159,7 +163,7 @@ class Collector:
             "occurred_at": occurred_at,
             "observed_at": iso_now(),
             "principal_id": self.principal_id,
-            "visibility": "private",
+            "visibility": self.visibility,
             "content_type": "application/json",
             "content": clean,
             "content_sha256": hashlib.sha256(canonical_json(clean)).hexdigest(),

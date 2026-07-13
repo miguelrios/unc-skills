@@ -1,4 +1,4 @@
-# Linux collectors
+# Portable collectors
 
 The collector discovers only Claude Code `*.jsonl` or Codex `rollout-*.jsonl` files under one
 explicit root. Complete JSONL records enter a mode-0600 SQLite outbox before network I/O. The
@@ -6,7 +6,7 @@ scan offset may move once the spool transaction is durable; the separate committ
 only after BrainStore returns a commit acknowledgement. A lost acknowledgement retries the same
 idempotency key.
 
-One process and source-scoped credential serve each harness:
+One process and source-scoped credential serve each harness on Linux or macOS:
 
 ```bash
 python -m collector.cli run \
@@ -14,7 +14,8 @@ python -m collector.cli run \
   --source-id claude:linux:host \
   --spool ~/.local/state/recall-brain/collector-claude.db \
   --endpoint https://host.example.ts.net:9443 \
-  --token-file ~/.config/recall-brain/collector-claude-token.json
+  --token-file ~/.config/recall-brain/collector-claude-token.json \
+  --visibility private
 ```
 
 `doctor` reports file coverage, parse/dead-letter rate, pending/acked records, committed files,
@@ -30,3 +31,7 @@ worker and cannot deadlock its projection rows; the steady-state watcher remains
 
 Structured values whose keys name credentials—including `LITELLM_MASTER_KEY`—are replaced before
 spooling. Non-JSONL files and paths outside the configured root are never discovered.
+
+The reproducible macOS bundle in `client/` uses this exact collector class and
+spool. Its LaunchAgents resolve source-scoped credentials from Keychain at run
+time; the Linux token-file path remains mode-0600 and is never packaged.

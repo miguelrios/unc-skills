@@ -17,7 +17,7 @@ python3 scripts/recall.py <command>       # relative to this skill directory
 
 With no central configuration, every command behaves exactly as the local engine described below.
 Setting `RECALL_URL` selects the tailnet central service for read commands (`search`, `show`,
-`related`, and `doctor`). The same flags and output shapes remain valid, and every displayed remote
+`related`, and `doctor`) and enables deliberate writes (`put` and `delete`). The same flags and output shapes remain valid, and every displayed remote
 hit includes its resolvable receipt on the `WHY` line.
 
 Use `RECALL_MODE=local|remote|shadow` when the mode must be explicit:
@@ -31,6 +31,25 @@ Interactive tailnet access uses the Tailscale identity boundary. If a scoped bea
 set `RECALL_TOKEN_FILE` to a mode-`0600` JSON file containing `{"token":"..."}`. Never put a token
 in `RECALL_URL`, shell history, a repository, or evidence. `index` remains local in every mode, so
 switching read modes cannot rewrite either the local SQLite index or central canonical events.
+
+## Deliberate memory writes
+
+When the user explicitly asks to remember durable information, write it through
+the central evidence protocol rather than editing an opaque memory file:
+
+```bash
+export RECALL_WRITE_SOURCE_ID="memory:mac:$(hostname -s)"  # credential must be scoped to this exact source
+python3 scripts/recall.py put "the durable fact or work receipt" \
+  --visibility private --provenance-uri "manual://current-task"
+python3 scripts/recall.py delete 'recall://memory:mac:host/memory-…?rev=1'
+```
+
+`put` returns the canonical receipt. Preserve it when reporting the write;
+`delete` requires that receipt and emits a tombstone under the same source and
+native ID. Writes require remote mode and fail closed if `RECALL_URL`, the
+source-scoped credential, or the exact source ID is unavailable. Never infer a
+shared visibility choice: default to `private`, and use `shared` only when the
+user deliberately selects it. Secret-shaped lines are redacted before ingest.
 
 ## First: pick the outcome
 
@@ -112,7 +131,10 @@ and confirm fresh inputs (dates, scope) before re-running.
 **Skill-ify** — search → `show` the working window → separate the durable
 recipe (commands, endpoints, auth patterns) from one-off data (specific IDs,
 dates) → invoke the available skill creator with the recipe and a proposed
-name, or create a standard Agent Skills directory when none is installed.
+   name, or create a standard Agent Skills directory when none is installed.
+5. **Remember / forget** — only on an explicit request, `put` the durable text
+   with a provenance URI and return its receipt; `delete` that exact receipt
+   when asked to forget it.
 
 ## Index health
 
