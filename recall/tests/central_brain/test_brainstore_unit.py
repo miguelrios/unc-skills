@@ -10,7 +10,7 @@ SERVER = Path(__file__).resolve().parents[2] / "server"
 sys.path.insert(0, str(SERVER))
 
 from recall_server.projectors import advisory_lock_key, canonical_json, partial_lexical_probes, preferred_phrase_probe, project, redact_text, validate_envelope
-from recall_server.db import structural_surface_weight
+from recall_server.db import entity_evidence_tier, structural_surface_weight
 
 
 def envelope(**updates):
@@ -97,6 +97,10 @@ class EnvelopeContractTest(unittest.TestCase):
         self.assertEqual(structural_surface_weight("tool_input"), 2.0)
         self.assertEqual(structural_surface_weight("tool_output"), 1.0)
         self.assertEqual(structural_surface_weight("user"), 1.0)
+
+    def test_error_entity_is_supporting_evidence_not_an_exact_identifier(self) -> None:
+        self.assertEqual(entity_evidence_tier(["deadbeef12345678"]), 3)
+        self.assertEqual(entity_evidence_tier([]), 2)
 
 
 if __name__ == "__main__":

@@ -32,6 +32,11 @@ def structural_surface_weight(surface: str) -> float:
     return 2.0 if surface == "tool_input" else 1.0
 
 
+def entity_evidence_tier(identifiers: list[str]) -> int:
+    """Raw identifiers are exact; extracted error names only support a phrase."""
+    return 3 if identifiers else 2
+
+
 class BrainStore:
     def __init__(self, dsn: str, search_deadline_ms: int | None = None):
         self.dsn = dsn
@@ -385,7 +390,7 @@ class BrainStore:
 
     def _entity_leg(self, conn, values: list[str], filters: dict,
                     *, authorized_source: str | None = None, limit: int = 400,
-                    deadline_at: float | None = None) -> list[dict]:
+                    deadline_at: float | None = None, tier: int = 3) -> list[dict]:
         normalized = sorted({value.casefold() for value in values if value})
         if not normalized:
             return []
@@ -408,7 +413,7 @@ class BrainStore:
             [normalized, *params, limit],
             deadline_at,
         ).fetchall()
-        return [{**dict(row), "leg": "entity", "tier": 3} for row in rows]
+        return [{**dict(row), "leg": "entity", "tier": tier} for row in rows]
 
     def search(self, query: str, filters: dict | None = None, limit: int = 10,
                authorized_source: str | None = None) -> dict:
@@ -492,7 +497,7 @@ class BrainStore:
                 if entity_values:
                     merge(run_leg("entity", lambda: self._entity_leg(
                         conn, entity_values, filters, authorized_source=authorized_source,
-                        deadline_at=deadline_at,
+                        deadline_at=deadline_at, tier=entity_evidence_tier(identifiers),
                     )))
                 for identifier in identifiers[:3]:
                     exact_rows = run_leg("identifier", lambda identifier=identifier: self._lexical_leg(
