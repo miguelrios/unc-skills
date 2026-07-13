@@ -10,6 +10,7 @@ SERVER = Path(__file__).resolve().parents[2] / "server"
 sys.path.insert(0, str(SERVER))
 
 from recall_server.projectors import advisory_lock_key, canonical_json, partial_lexical_probes, preferred_phrase_probe, project, redact_text, validate_envelope
+from recall_server.db import structural_surface_weight
 
 
 def envelope(**updates):
@@ -91,6 +92,11 @@ class EnvelopeContractTest(unittest.TestCase):
             ]),
             "504 gateway timeout",
         )
+
+    def test_structural_command_evidence_outranks_echoed_output(self) -> None:
+        self.assertEqual(structural_surface_weight("tool_input"), 2.0)
+        self.assertEqual(structural_surface_weight("tool_output"), 1.0)
+        self.assertEqual(structural_surface_weight("user"), 1.0)
 
 
 if __name__ == "__main__":

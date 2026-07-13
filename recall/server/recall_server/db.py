@@ -27,6 +27,11 @@ class SearchDeadlineExceeded(Exception):
     pass
 
 
+def structural_surface_weight(surface: str) -> float:
+    """Prefer the command that created evidence over output that merely echoes it."""
+    return 2.0 if surface == "tool_input" else 1.0
+
+
 class BrainStore:
     def __init__(self, dsn: str, search_deadline_ms: int | None = None):
         self.dsn = dsn
@@ -521,7 +526,7 @@ class BrainStore:
             if row["tier"] == 0 and len([term for term in matched if len(term) >= 5]) < 2:
                 continue
             structural = bool(row["legs"] & {"phrase", "pair", "anchor", "entity", "identifier"})
-            weight = 1.0 if structural else {"user": 4.0, "assistant": 2.0, "tool_input": 1.5, "tool_output": 1.0}.get(row["surface"], 1.0)
+            weight = structural_surface_weight(row["surface"]) if structural else {"user": 4.0, "assistant": 2.0, "tool_input": 1.5, "tool_output": 1.0}.get(row["surface"], 1.0)
             occurred = row["occurred_at"] or row["started_at"]
             epoch = occurred.timestamp() if occurred else now
             score = max(0.01, float(row["lexical_rank"])) * weight
