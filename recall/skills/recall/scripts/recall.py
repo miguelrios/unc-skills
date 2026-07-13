@@ -188,8 +188,9 @@ def run_transport(args) -> int:
         entry["diverged"] = True
     log = Path(os.environ.get("RECALL_SHADOW_LOG", Path.home() / ".recall/shadow.jsonl")).expanduser()
     log.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(log.parent, 0o700)
-    with log.open("a") as output:
+    descriptor = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    os.fchmod(descriptor, 0o600)
+    with os.fdopen(descriptor, "a") as output:
         output.write(json.dumps(entry, sort_keys=True) + "\n")
     if local_err.getvalue():
         print(local_err.getvalue(), end="", file=sys.stderr)

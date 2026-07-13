@@ -452,6 +452,21 @@ class RemoteTransportTest(unittest.TestCase):
         self.assertEqual(entry["remote_results"][0]["receipt"], "recall://claude:linux/session:1?rev=1#item=0")
         self.assertTrue(entry["diverged"])
 
+    def test_shadow_log_does_not_chmod_an_existing_shared_parent(self):
+        self.seed_local(); os.environ["RECALL_MODE"] = "shadow"
+        shared_parent = Path(tempfile.gettempdir())
+        before_mode = shared_parent.stat().st_mode & 0o7777
+        shared_log = shared_parent / f"recall-shadow-{os.getpid()}.jsonl"
+        shared_log.unlink(missing_ok=True)
+        os.environ["RECALL_SHADOW_LOG"] = str(shared_log)
+        try:
+            code, _, err = self.call("search", "deadbeef", "--paths")
+            self.assertEqual((code, err), (0, ""))
+            self.assertTrue(shared_log.is_file())
+            self.assertEqual(shared_parent.stat().st_mode & 0o7777, before_mode)
+        finally:
+            shared_log.unlink(missing_ok=True)
+
     def test_token_file_must_be_private_and_is_sent_as_bearer(self):
         token_file = self.root / "token.json"
         token_file.write_text(json.dumps({"token": "scoped-test-token"})); token_file.chmod(0o644)
