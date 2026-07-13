@@ -165,7 +165,7 @@ Each loop prompt is self-contained. This is intentional: another session should 
 ## What it writes
 
 ```text
-docs/
+.cascade/
 ├── LOOP_CHAIN_<date>.md
 └── evidence/
     ├── L0-baseline/
@@ -177,7 +177,11 @@ docs/
         └── EXIT.md
 ```
 
-The chain document is the plan and current position. Each `EXIT.md` maps the loop's acceptance criteria to concrete evidence such as a test result, trace, benchmark output, or merged commit. These files make it possible to inspect the work later or hand it to a different agent.
+The chain document is the plan and current position. Each `EXIT.md` maps the loop's acceptance
+criteria to concrete evidence such as a test result, trace, benchmark output, or merged commit.
+Keep `.cascade/` ignored: it may contain transcripts, machine paths, identifiers, or operational
+details. If a project needs a public result, write a separate redacted summary rather than
+committing the raw working evidence.
 
 ## Autonomous and checkpointed modes
 

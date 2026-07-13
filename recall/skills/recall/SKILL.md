@@ -146,5 +146,3 @@ re-enabled — surface that to the user immediately; history is being deleted.
 - [references/query-cookbook.md](references/query-cookbook.md) — worked
   examples per stratum: identifiers, error strings, time windows,
   cross-worktree, cross-harness, paraphrase.
-- [references/eval.md](references/eval.md) — the frozen retrieval eval: how to
-  run it, how to add queries without contaminating the holdout.

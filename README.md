@@ -86,13 +86,10 @@ The repository is one pi package that exposes all six skills. In pi, invoke one 
 with `/skill:hands-free`, `/skill:parable`, `/skill:cascade`, `/skill:recall`, or
 `/skill:tether`, or `/skill:desloppify`.
 
-## Compatibility evidence
+## Compatibility checks
 
 The local gate runs all six skills across the three harnesses for native installation,
-discovery, and credential-free smoke checks. The original four-skill portability campaign is
-archived in its [matrix](docs/evidence/L4-clean-home-matrix/matrix.md),
-[research](docs/evidence/L0-portability-baseline/research.md), and
-[final verdict](docs/evidence/L5-portability-verdict/VERDICT.md).
+discovery, and credential-free smoke checks. Raw test output stays local and is not committed.
 
 Run the local gate with:
 

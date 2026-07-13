@@ -42,7 +42,7 @@ Every loop in the chain doc is specified with exactly these fields:
 |---|---|
 | `goal` | One sentence. The state change the loop exists to produce. |
 | `prompt` | Self-contained instruction block — enough for a fresh session to execute the loop with zero prior context beyond the chain doc and its named inputs. |
-| `accept` | Evidence-based exit criteria. Every criterion names a **checkable artifact**: a test passing on the pinned runtime, a live trace under `docs/evidence/`, a scoreboard JSON with non-null numbers, a merged PR verified at HEAD. |
+| `accept` | Evidence-based exit criteria. Every criterion names a **checkable artifact**: a test passing on the pinned runtime, a local trace, a scoreboard JSON with non-null numbers, a merged PR verified at HEAD. |
 | `bound` | Max inner iterations before honest escalation (default: 2 failed PROVE runs, 3 REVIEW→fix rounds). |
 | `exit →` | The loop this one's completion triggers. |
 
@@ -57,12 +57,12 @@ then order loops so the provably semantics-preserving levers run before the risk
 RE-PLAN   read the chain doc + this loop's prompt + current HEAD; cut a mini-plan for THIS loop only
 BUILD     implement; one concern per PR; targeted git add
 PIN       tests that pin the mechanism AND its fake-success modes explicitly
-PROVE     live run; trace evidence copied to docs/evidence/<loop>/
+PROVE     live run; raw trace saved under ignored .cascade/evidence/<loop>/
 MEASURE   re-run the gate slice (baseline mini-benchmark); record the delta — SKIP when the loop moves no metric (a plain "do X" with no number to track); say so in EXIT.md
 REVIEW    open PR; reviewers auto-fire on open (NO ping); resolve every finding
 MERGE     merge after findings resolved (per standing authority; else wait)
 EXIT      verify each accept criterion against HEAD + the trace — never commit messages;
-          write docs/evidence/<loop>/EXIT.md with criterion → evidence pointers; trigger the next loop
+          write .cascade/evidence/<loop>/EXIT.md with criterion → evidence pointers; trigger the next loop
 ```
 
 When the harness supports background dispatch or monitoring, use it for judges and long runs
@@ -83,8 +83,8 @@ run the work sequentially; never invent a background primitive the harness does 
 
 ## Bookkeeping (set up during PLAN)
 
-- **Chain doc** — `docs/LOOP_CHAIN_<date>.md` (or the project's docs dir): anatomy table, the ribbon, every loop's five fields, invariants. Template: [references/templates.md](references/templates.md).
-- **Evidence tree** — `docs/evidence/<loop-id>-<slug>/` per loop; EXIT.md plus the raw artifacts it points at.
+- **Chain doc** — `.cascade/LOOP_CHAIN_<date>.md`: anatomy table, the ribbon, every loop's five fields, invariants. Template: [references/templates.md](references/templates.md).
+- **Evidence tree** — `.cascade/evidence/<loop-id>-<slug>/` per loop; EXIT.md plus the raw artifacts it points at. Keep `.cascade/` ignored. Publish only a deliberately written, redacted summary when the project needs one; never commit raw transcripts, credentials, absolute home paths, user identifiers, or infrastructure traces.
 - **Task graph** — use the harness's native task graph when one exists. Otherwise keep a checked
   task table in the chain doc with `blocked by` links. The chain doc is always the portable
   source of truth; a harness task UI is a synchronized convenience, never the only record.

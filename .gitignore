@@ -1,5 +1,7 @@
-.parable/runs/
-.parable/*.log
+.parable/
+.cascade/
+docs/evidence/
+docs/LOOP_CHAIN_*.md
 __pycache__/
 *.py[cod]
 .ruff_cache/
