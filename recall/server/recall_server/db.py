@@ -704,6 +704,11 @@ class BrainStore:
             conn.autocommit = True
             conn.execute("SELECT pg_advisory_lock(hashtextextended('recall:entity-backfill',0))")
             try:
+                conn.execute(
+                    """CREATE TEMP TABLE entity_backfill_stage (
+                         item_id bigint,source_id text,kind text,value text,normalized text
+                       ) ON COMMIT DELETE ROWS"""
+                )
                 while max_batches is None or batches < max_batches:
                     with conn.transaction():
                         state = conn.execute(
@@ -719,8 +724,7 @@ class BrainStore:
                         if state["completed_at"] is not None:
                             break
                         rows = conn.execute(
-                            """SELECT i.id,i.ordinal,i.text_redacted,se.envelope,se.revision
-                               FROM items i JOIN source_events se ON se.id=i.event_id
+                            """SELECT i.id,i.source_id,i.text_redacted FROM items i
                                WHERE i.id>%s AND i.id<=%s ORDER BY i.id LIMIT %s""",
                             (state["last_item_id"], state["target_item_id"], batch_size),
                         ).fetchall()
@@ -731,25 +735,26 @@ class BrainStore:
                             break
                         entity_rows = []
                         for row in rows:
-                            projected, _metadata = project(row["envelope"], row["revision"])
-                            projected_item = next(
-                                (item for item in projected if item["ordinal"] == row["ordinal"]), None
-                            )
-                            entities = projected_item.get("entities", []) if projected_item else [
+                            entities = [
                                 {"kind": kind, "value": value, "normalized": value.casefold()}
                                 for kind, value in engine.extract_entities(row["text_redacted"])
                             ]
                             entity_rows.extend(
-                                (row["id"], row["envelope"]["source_id"], entity["kind"], entity["value"], entity["normalized"])
+                                (row["id"], row["source_id"], entity["kind"], entity["value"], entity["normalized"])
                                 for entity in entities
                             )
                         if entity_rows:
                             with conn.cursor() as cursor:
-                                cursor.executemany(
-                                    """INSERT INTO entities(item_id,source_id,kind,value,normalized)
-                                       VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
-                                    entity_rows,
-                                )
+                                with cursor.copy(
+                                    "COPY entity_backfill_stage(item_id,source_id,kind,value,normalized) FROM STDIN"
+                                ) as copy:
+                                    for entity_row in entity_rows:
+                                        copy.write_row(entity_row)
+                            conn.execute(
+                                """INSERT INTO entities(item_id,source_id,kind,value,normalized)
+                                   SELECT item_id,source_id,kind,value,normalized FROM entity_backfill_stage
+                                   ON CONFLICT DO NOTHING"""
+                            )
                         last_item_id = rows[-1]["id"]
                         completed = last_item_id >= state["target_item_id"]
                         conn.execute(
