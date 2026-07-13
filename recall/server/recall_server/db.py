@@ -18,6 +18,8 @@ from psycopg.rows import dict_row
 from . import PROJECTOR_VERSION
 from .projectors import advisory_lock_key, canonical_json, event_receipt, legacy_engine, partial_lexical_probes, phrase_query_spec, preferred_phrase_probes, project, redact_text, validate_envelope
 
+DEFAULT_SEARCH_DEADLINE_MS = 300
+
 
 class IdempotencyConflict(Exception):
     pass
@@ -74,7 +76,7 @@ def evidence_rank_components(*, legs: set[str], surface: str, lexical_rank: floa
 class BrainStore:
     def __init__(self, dsn: str, search_deadline_ms: int | None = None):
         self.dsn = dsn
-        configured = search_deadline_ms if search_deadline_ms is not None else int(os.environ.get("RECALL_SEARCH_DEADLINE_MS", "250"))
+        configured = search_deadline_ms if search_deadline_ms is not None else int(os.environ.get("RECALL_SEARCH_DEADLINE_MS", str(DEFAULT_SEARCH_DEADLINE_MS)))
         if not 10 <= configured <= 2000:
             raise ValueError("search deadline must be between 10 and 2000 milliseconds")
         self.search_deadline_ms = configured

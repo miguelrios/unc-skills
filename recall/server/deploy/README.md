@@ -33,7 +33,7 @@ The pilot uses a five-minute logical-backup timer for a bounded RPO. Before mult
 C10 production cutover, replace it with continuous WAL archival plus daily base backups; the
 same blank-database restore/fingerprint contract remains the gate.
 
-Searches have a 250ms database-work budget by default. Override it only within the validated
+Searches have a 300ms database-work budget by default. Override it only within the validated
 10–2000ms range with `RECALL_SEARCH_DEADLINE_MS`; the response and service log expose only
 content-free per-leg timings, result counts, and the deadline outcome.
 

@@ -10,7 +10,7 @@ SERVER = Path(__file__).resolve().parents[2] / "server"
 sys.path.insert(0, str(SERVER))
 
 from recall_server.projectors import advisory_lock_key, canonical_json, partial_lexical_probes, phrase_query_spec, preferred_phrase_probe, preferred_phrase_probes, project, redact_text, validate_envelope
-from recall_server.db import evidence_rank_components, retrieval_leg_order, should_run_partial
+from recall_server.db import DEFAULT_SEARCH_DEADLINE_MS, evidence_rank_components, retrieval_leg_order, should_run_partial
 
 
 def envelope(**updates):
@@ -34,6 +34,10 @@ def envelope(**updates):
 
 
 class EnvelopeContractTest(unittest.TestCase):
+    def test_default_deadline_fits_below_tailnet_slo_with_client_headroom(self) -> None:
+        self.assertEqual(DEFAULT_SEARCH_DEADLINE_MS, 300)
+        self.assertLess(DEFAULT_SEARCH_DEADLINE_MS, 500)
+
     def test_advisory_lock_key_is_postgres_text_safe_and_boundary_preserving(self) -> None:
         key = advisory_lock_key("ab", "c")
         self.assertNotIn("\x00", key)
