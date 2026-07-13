@@ -9,8 +9,8 @@ from pathlib import Path
 SERVER = Path(__file__).resolve().parents[2] / "server"
 sys.path.insert(0, str(SERVER))
 
-from recall_server.projectors import advisory_lock_key, canonical_json, partial_lexical_probes, preferred_phrase_probe, project, redact_text, validate_envelope
-from recall_server.db import evidence_rank_components, retrieval_leg_order
+from recall_server.projectors import advisory_lock_key, canonical_json, partial_lexical_probes, preferred_phrase_probe, preferred_phrase_probes, project, redact_text, validate_envelope
+from recall_server.db import evidence_rank_components, retrieval_leg_order, should_run_partial
 
 
 def envelope(**updates):
@@ -112,6 +112,15 @@ class EnvelopeContractTest(unittest.TestCase):
             "ConnectTimeout transient dispatch error",
         )
         self.assertEqual(
+            preferred_phrase_probes([
+                "where we handled the httpx ConnectTimeout transient dispatch error",
+                "ConnectTimeout transient dispatch error",
+                "the httpx ConnectTimeout",
+                "transient dispatch error",
+            ]),
+            ["ConnectTimeout transient dispatch error", "transient dispatch error"],
+        )
+        self.assertEqual(
             preferred_phrase_probe([
                 "the foreign-key violation on check_result for agent_instance_id",
                 "violation on check_result for agent_instance_id",
@@ -123,6 +132,10 @@ class EnvelopeContractTest(unittest.TestCase):
     def test_identifier_plan_runs_exact_legs_before_any_phrase(self) -> None:
         self.assertEqual(retrieval_leg_order(["api-prod-6fcdc84dd4-mmjpj"]), ("entity", "identifier"))
         self.assertEqual(retrieval_leg_order([]), ("phrase", "entity", "partial", "all"))
+
+    def test_sparse_phrase_candidates_do_not_suppress_structural_fallback(self) -> None:
+        self.assertTrue(should_run_partial(candidate_count=1, result_limit=10))
+        self.assertFalse(should_run_partial(candidate_count=29, result_limit=10))
 
     def test_rank_components_keep_identifier_phrase_and_error_evidence_distinct(self) -> None:
         identifier = evidence_rank_components(

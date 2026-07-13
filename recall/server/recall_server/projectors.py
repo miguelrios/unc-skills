@@ -103,10 +103,10 @@ def partial_lexical_probes(informative: list[str], *, has_time_filter: bool) -> 
     return probes[:3]
 
 
-def preferred_phrase_probe(phrases: list[str]) -> str | None:
-    """Choose the densest structural phrase, excluding the full-question fallback."""
+def preferred_phrase_probes(phrases: list[str]) -> list[str]:
+    """Choose a structural phrase plus one bounded parser fallback."""
     if not phrases:
-        return None
+        return []
     candidates = phrases[1:] or phrases
 
     def score(value: str) -> tuple[int, int, int]:
@@ -119,7 +119,15 @@ def preferred_phrase_probe(phrases: list[str]) -> str | None:
         )
         return structural, len(words), -len(value)
 
-    return max(candidates, key=score)
+    primary = max(candidates, key=score)
+    fallback = candidates[-1]
+    return [primary] + ([fallback] if fallback != primary else [])
+
+
+def preferred_phrase_probe(phrases: list[str]) -> str | None:
+    """Compatibility helper returning the strongest bounded phrase probe."""
+    probes = preferred_phrase_probes(phrases)
+    return probes[0] if probes else None
 
 
 def project(envelope: dict, revision: int) -> tuple[list[dict], dict]:

@@ -16,7 +16,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from . import PROJECTOR_VERSION
-from .projectors import advisory_lock_key, canonical_json, event_receipt, legacy_engine, partial_lexical_probes, preferred_phrase_probe, project, redact_text, validate_envelope
+from .projectors import advisory_lock_key, canonical_json, event_receipt, legacy_engine, partial_lexical_probes, preferred_phrase_probes, project, redact_text, validate_envelope
 
 
 class IdempotencyConflict(Exception):
@@ -30,6 +30,11 @@ class SearchDeadlineExceeded(Exception):
 def retrieval_leg_order(identifiers: list[str]) -> tuple[str, ...]:
     """Exact identifiers get the deadline before any potentially broad phrase."""
     return ("entity", "identifier") if identifiers else ("phrase", "entity", "partial", "all")
+
+
+def should_run_partial(*, candidate_count: int, result_limit: int) -> bool:
+    """One incidental exact hit must not suppress bounded structural evidence."""
+    return candidate_count < result_limit
 
 
 def evidence_rank_components(*, legs: set[str], surface: str, lexical_rank: float,
@@ -525,12 +530,14 @@ class BrainStore:
                         if exact_rows:
                             break
                 else:
-                    phrase = preferred_phrase_probe(engine.phrase_queries(query))
-                    if phrase:
-                        merge(run_leg("phrase", lambda: self._lexical_leg(
+                    for phrase_index, phrase in enumerate(preferred_phrase_probes(engine.phrase_queries(query))):
+                        diagnostic_leg = "phrase" if phrase_index == 0 else "phrase-fallback"
+                        merge(run_leg(diagnostic_leg, lambda phrase=phrase: self._lexical_leg(
                             conn, phrase, "phraseto_tsquery", filters, "phrase", 3,
-                            authorized_source=authorized_source, deadline_at=deadline_at,
+                            limit=100, authorized_source=authorized_source, deadline_at=deadline_at,
                         )))
+                        if not should_run_partial(candidate_count=len(candidates), result_limit=limit):
+                            break
                     entity_values = [
                         part
                         for term in informative
@@ -542,7 +549,7 @@ class BrainStore:
                             conn, entity_values, filters, authorized_source=authorized_source,
                             deadline_at=deadline_at, tier=2,
                         )))
-                if not identifiers and not any(row["tier"] >= 3 for row in candidates.values()):
+                if not identifiers and should_run_partial(candidate_count=len(candidates), result_limit=limit):
                     for probe, leg, tier in partial_lexical_probes(
                         informative,
                         has_time_filter=bool(filters.get("since") or filters.get("until")),
