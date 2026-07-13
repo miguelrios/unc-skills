@@ -101,6 +101,9 @@ def runtime_payloads(archive_data: bytes, lock: dict[str, Any]) -> dict[str, Pay
                 name = member.name.rstrip("/")
                 if not safe_member_name(name, root):
                     raise ValueError(f"unsafe runtime archive path: {member.name}")
+                path = PurePosixPath(name)
+                if "__pycache__" in path.parts or path.suffix == ".pyc":
+                    continue
                 if name in source_names:
                     raise ValueError(f"duplicate runtime archive path: {name}")
                 source_names.add(name)
