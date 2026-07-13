@@ -16,8 +16,9 @@ Exit codes (the agent's contract — no silent fake-success):
      details on stderr — rephrase and redial once, then proceed with the safest
      assumption and say so
 
-Credentials: <this script's parent dir>/../.env, or $HANDS_FREE_HOME/.env, or plain
-environment variables (VAPI_API_KEY, VAPI_PHONE_NUMBER_ID, HANDS_FREE_PHONE_NUMBER).
+Credentials: ~/.config/hands-free/.env, <this script's parent dir>/../.env,
+$HANDS_FREE_HOME/.env, or plain environment variables (VAPI_API_KEY,
+VAPI_PHONE_NUMBER_ID, HANDS_FREE_PHONE_NUMBER).
 """
 import json
 import os
@@ -40,8 +41,11 @@ def env_home():
 
 def load_env():
     env = {}
-    env_path = env_home() / ".env"
-    if env_path.exists():
+    config_home = pathlib.Path(os.environ.get("XDG_CONFIG_HOME", "~/.config")).expanduser()
+    env_paths = (config_home / "hands-free" / ".env", env_home() / ".env")
+    for env_path in dict.fromkeys(env_paths):
+        if not env_path.exists():
+            continue
         for raw_line in env_path.read_text().splitlines():
             line = raw_line.strip()
             if not line or line.startswith("#") or "=" not in line:

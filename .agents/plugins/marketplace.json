@@ -1,0 +1,56 @@
+{
+  "name": "unc-skills",
+  "interface": {
+    "displayName": "Unc Skills"
+  },
+  "plugins": [
+    {
+      "name": "hands-free",
+      "source": {
+        "source": "local",
+        "path": "./hands-free"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "parable",
+      "source": {
+        "source": "local",
+        "path": "./parable"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    },
+    {
+      "name": "cascade",
+      "source": {
+        "source": "local",
+        "path": "./cascade"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    },
+    {
+      "name": "recall",
+      "source": {
+        "source": "local",
+        "path": "./recall"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

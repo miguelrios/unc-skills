@@ -147,10 +147,57 @@ class CallUserCliTest(unittest.TestCase):
             finally:
                 os.environ.pop("HANDS_FREE_HOME", None)
 
+    def test_portable_config_loads_in_every_harness(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_home = pathlib.Path(tmp) / "config"
+            portable = config_home / "hands-free"
+            portable.mkdir(parents=True)
+            (portable / ".env").write_text("VAPI_VOICE_ID=Portable\n")
+            os.environ["XDG_CONFIG_HOME"] = str(config_home)
+            try:
+                cli = load_call_user(pathlib.Path(tmp) / "missing-harness-home")
+                self.assertEqual(cli.load_env().get("VAPI_VOICE_ID"), "Portable")
+            finally:
+                os.environ.pop("XDG_CONFIG_HOME", None)
+
+    def test_npm_doctor_reads_portable_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            pi_home = root / "pi-agent"
+            (pi_home / "hands-free" / "scripts").mkdir(parents=True)
+            (pi_home / "skills" / "hands-free").mkdir(parents=True)
+            (pi_home / "hands-free" / "scripts" / "call_user.py").write_text("# installed\n")
+            (pi_home / "skills" / "hands-free" / "SKILL.md").write_text("# installed\n")
+            portable = root / "config" / "hands-free"
+            portable.mkdir(parents=True)
+            (portable / ".env").write_text(
+                "VAPI_API_KEY=test\n"
+                "VAPI_PHONE_NUMBER_ID=test\n"
+                "HANDS_FREE_PHONE_NUMBER=+15555550124\n"
+            )
+            result = subprocess.run(
+                ["node", str(ROOT / "bin" / "hands-free.js"), "doctor", "--harness=pi"],
+                env={
+                    **os.environ,
+                    "HOME": str(root),
+                    "PI_CODING_AGENT_DIR": str(pi_home),
+                    "XDG_CONFIG_HOME": str(root / "config"),
+                },
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("ok required Vapi env values configured", result.stdout)
+
 
 class InstallerTest(unittest.TestCase):
     def run_installer(self, harness, home):
-        env_key = "CLAUDE_HOME" if harness == "claude-code" else "CODEX_HOME"
+        env_key = {
+            "claude-code": "CLAUDE_HOME",
+            "codex": "CODEX_HOME",
+            "pi": "PI_CODING_AGENT_DIR",
+        }[harness]
         subprocess.run(
             [str(INSTALL_PATH), f"--harness={harness}"],
             check=True,
@@ -215,6 +262,28 @@ class InstallerTest(unittest.TestCase):
             self.assertTrue((codex_home / "skills" / "hands-free" / "SKILL.md").exists())
             self.assertNotIn("codex_hooks", (codex_home / "config.toml").read_text(), "config.toml untouched")
             self.assertFalse((codex_home / "hooks.json").exists(), "no hooks.json created")
+
+    def test_pi_installer_drops_files_without_hooks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pi_home = pathlib.Path(tmp) / "pi-agent"
+            pi_home.mkdir()
+            self.run_installer("pi", pi_home)
+            self.assertTrue((pi_home / "hands-free" / "scripts" / "call_user.py").exists())
+            self.assertTrue((pi_home / "skills" / "hands-free" / "SKILL.md").exists())
+            self.assertTrue((pi_home / "hands-free" / ".env").exists())
+            self.assertFalse((pi_home / "hooks.json").exists())
+
+    def test_unknown_harness_fails_without_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = subprocess.run(
+                [str(INSTALL_PATH), "--harness=other"],
+                env={**os.environ, "HOME": tmp},
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(list(pathlib.Path(tmp).iterdir()), [])
 
 
 if __name__ == "__main__":

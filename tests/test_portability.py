@@ -1,0 +1,94 @@
+import json
+import re
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SKILLS = ("hands-free", "parable", "cascade", "recall")
+
+
+def load_json(path: Path):
+    return json.loads(path.read_text())
+
+
+class PortablePackagingTest(unittest.TestCase):
+    def test_canonical_skill_inventory_is_complete(self):
+        found = {
+            path.parent.name
+            for path in ROOT.glob("*/skills/*/SKILL.md")
+            if ".pytest_cache" not in path.parts
+        }
+        self.assertEqual(found, set(SKILLS))
+
+    def test_claude_and_codex_marketplaces_list_same_plugins(self):
+        claude = load_json(ROOT / ".claude-plugin" / "marketplace.json")
+        codex = load_json(ROOT / ".agents" / "plugins" / "marketplace.json")
+        claude_names = [entry["name"] for entry in claude["plugins"]]
+        codex_names = [entry["name"] for entry in codex["plugins"]]
+        self.assertEqual(claude_names, list(SKILLS))
+        self.assertEqual(codex_names, list(SKILLS))
+
+        for entry in codex["plugins"]:
+            self.assertEqual(entry["source"]["source"], "local")
+            self.assertEqual(entry["source"]["path"], f"./{entry['name']}")
+
+    def test_every_package_has_native_claude_and_codex_manifests(self):
+        claude_market = {
+            entry["name"]: entry for entry in load_json(ROOT / ".claude-plugin" / "marketplace.json")["plugins"]
+        }
+        for name in SKILLS:
+            claude = load_json(ROOT / name / ".claude-plugin" / "plugin.json")
+            codex = load_json(ROOT / name / ".codex-plugin" / "plugin.json")
+            self.assertEqual(claude["name"], name)
+            self.assertEqual(codex["name"], name)
+            self.assertEqual(claude["version"], claude_market[name]["version"])
+            self.assertEqual(codex["version"], claude_market[name]["version"])
+            self.assertEqual(codex["skills"], "./skills/")
+            package_path = ROOT / name / "package.json"
+            self.assertTrue(package_path.exists(), f"{name} is missing package.json")
+            package = load_json(package_path)
+            self.assertEqual(package["version"], claude_market[name]["version"])
+            self.assertEqual(package["pi"]["skills"], ["./skills"])
+            self.assertIn("pi-package", package["keywords"])
+
+    def test_root_pi_manifest_exposes_every_canonical_skill(self):
+        package = load_json(ROOT / "package.json")
+        self.assertIn("pi-package", package["keywords"])
+        paths = package["pi"]["skills"]
+        self.assertEqual(paths, [f"./{name}/skills" for name in SKILLS])
+        for relative in paths:
+            skill_root = ROOT / relative
+            self.assertTrue(skill_root.is_dir())
+            self.assertTrue(any(skill_root.glob("*/SKILL.md")))
+
+    def test_skill_local_references_exist(self):
+        reference_pattern = re.compile(r"(?<!https:)(?<!http:)(?:scripts|references|assets|agents)/[A-Za-z0-9_./-]+")
+        for skill_file in ROOT.glob("*/skills/*/SKILL.md"):
+            for relative in set(reference_pattern.findall(skill_file.read_text())):
+                self.assertTrue((skill_file.parent / relative).exists(), f"{skill_file}: missing {relative}")
+
+    def test_codex_component_paths_are_relative_and_present(self):
+        for name in SKILLS:
+            manifest = load_json(ROOT / name / ".codex-plugin" / "plugin.json")
+            for field in ("skills", "hooks", "mcpServers", "apps"):
+                value = manifest.get(field)
+                if not isinstance(value, str):
+                    continue
+                self.assertTrue(value.startswith("./"), f"{name}.{field} must start with ./")
+                self.assertTrue((ROOT / name / value).exists(), f"{name}.{field} points to missing {value}")
+
+    def test_playbooks_name_harness_differences_honestly(self):
+        hands_free = (ROOT / "hands-free/skills/hands-free/SKILL.md").read_text()
+        parable = (ROOT / "parable/skills/parable/SKILL.md").read_text()
+        cascade = (ROOT / "cascade/skills/cascade/SKILL.md").read_text()
+        recall = (ROOT / "recall/skills/recall/SKILL.md").read_text()
+
+        self.assertIn("Claude Code, Codex, and pi", hands_free)
+        self.assertIn("If it does not (notably stock pi)", parable)
+        self.assertIn("stock pi has no background bash", cascade)
+        self.assertIn("pi's own session format is not yet", recall)
+
+
+if __name__ == "__main__":
+    unittest.main()

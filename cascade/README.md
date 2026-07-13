@@ -1,6 +1,6 @@
 # Cascade
 
-Cascade is a Claude Code skill for breaking large coding tasks into a series of smaller, verifiable loops.
+Cascade is an Agent Skill for breaking large coding tasks into a series of smaller, verifiable loops. It works in Claude Code, Codex, and pi.
 
 Long agent runs tend to lose context in the middle: the original goal gets diluted, partial work is mistaken for completion, and it becomes difficult to tell what was actually tested. Cascade keeps the plan and progress in the repository. Before changing code, it writes down the sequence. Each loop has a specific goal, a way to prove the goal was met, and a limit on how long the agent can keep trying.
 
@@ -25,9 +25,24 @@ The useful part is the handoff between loops. The next loop does not start becau
 
 ## Install
 
+Claude Code:
+
 ```bash
 claude plugin marketplace add miguelrios/unc-skills
 claude plugin install cascade@unc-skills
+```
+
+Codex:
+
+```bash
+codex plugin marketplace add miguelrios/unc-skills
+codex plugin add cascade@unc-skills
+```
+
+pi (installs the complete unc-skills collection):
+
+```bash
+pi install git:github.com/miguelrios/unc-skills
 ```
 
 ## Use it
@@ -49,6 +64,11 @@ Cascade this in checkpointed mode. Stop for my go/no-go between loops.
 ```
 
 Cascade will inspect the repository, write a chain document, and show you the proposed loops before it starts building. For the migration above, the chain might separate baseline behavior, the storage implementation, worker integration, migration tooling, and a final live test. The exact chain comes from the repository; it is not a fixed checklist.
+
+Invocation syntax differs by harness: `/cascade` in Claude Code, `$cascade` or a direct request
+in Codex, and `/skill:cascade` in pi. Cascade uses a native task list, background runner, or
+recurring wake only when the harness exposes one. The chain document remains the portable source
+of truth, so pi can use a file-backed task graph and tmux/sequential work without losing the loop.
 
 ## Examples
 

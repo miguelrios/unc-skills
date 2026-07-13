@@ -1,81 +1,141 @@
 # recall
 
-It is Thursday. You ask your agent about the staging bug you both fixed last
-month, and it starts grepping five gigabytes of session transcripts like a
-detective who burned his own case files. Six rounds later: "could you tell me
-which week that was?" You were there. It was there. Nobody remembers.
+**Your coding agents remember everything. They just can't find it.**
 
-Your agent already wrote everything down — every session, every command, every
-tool result, in transcripts it never reads again. **recall** is the hippocampus
-bolted onto that pile: a local SQLite index over your Claude Code *and* Codex
-session history, a search CLI tuned for how you actually ask ("the pod that
-kept OOMing", "what did codex do on this branch"), and a session-start hook
-that surfaces prior art before you ask at all.
+Claude Code and Codex already keep detailed local transcripts of every session:
+your prompts, their answers, commands, tool results, branches, and working
+directories. Once those transcripts pile up, finding one piece of old work means
+guessing when it happened and grepping gigabytes of JSONL.
 
-```
-you           ──ask──▶  /recall "the greptile review work from back in May"
-recall        ──1 cmd──▶ ranked sessions + WHY each matched (0.2s warm)
-your agent    ──reads──▶ just the winning window, never the 80MB file
+**recall** turns that history into a local search engine your agent can actually
+use. Ask the way you remember the work:
+
+```text
+"find the session where the staging pod kept OOMing"
+"what did Codex do on this branch?"
+"continue the Greptile review work from back in May"
 ```
 
-## Unscientific stats, one dev box, receipts in-repo
+recall returns ranked sessions, explains **why** each one matched, and lets the
+agent read the relevant turns instead of loading an 80 MB transcript. It also
+works across Claude Code and Codex, so work started in one harness is available
+to the other.
 
-- 5,959 transcripts / 2.5M chunks indexed in 400s; incremental after that.
-- Retrieval eval (57 frozen known-answer queries, labels grep-verified):
-  recall\@5 **0.63** / MRR\@10 **0.55** at **0.16s p95** — vs 0.57/0.53 at
-  2.9s for raw grep + mtime sorting, 0.23/0.21 at 15.7s for the prompt-only
-  predecessor. Same inputs, same scorer.
-- Five real "the agent thrashed for 5-7 rounds" incidents replayed: rank-1
-  hit from ONE command each.
-- The honest number too: no-answer discipline is lexically bounded — queries
-  about work that never happened can still surface adjacent sessions. The WHY
-  line tells you what matched; embeddings are the phase-3 answer.
+```text
+you           -> describe the work you remember
+recall        -> rank the sessions and show why they matched
+your agent    -> read the winning window and get back to work
+```
 
-## What's in the box
+## What it does
 
-- `skills/recall/SKILL.md` — the operator manual your agent reads.
-- `skills/recall/scripts/recall.py` — the engine: stdlib-only Python, one
-  SQLite file, FTS5 + entity index + evidence-tiered ranking. Transcripts stay
-  the source of truth; the index is disposable and rebuildable.
-- `skills/recall/scripts/recall-hook.sh` — SessionStart hook: prior-art block
-  in ≤6 lines, fail-open (a broken index can never break a session), and a
-  throttled background delta-index so freshness needs no daemon and no cron.
-- Secret-shaped lines are redacted at ingest; thinking blocks are never
-  stored; the index directory is 0700.
-- `tests/` — unit tests plus a frozen retrieval eval with a held-out split,
-  so ranking changes are measured, not vibed.
+- **Find and verify:** search old sessions by natural language, exact IDs, error
+  strings, date, worktree, branch, or harness.
+- **Continue:** recover the last actions, open problems, branch, and worktree
+  from an unfinished session.
+- **Repeat:** extract the prompts that drove an earlier task and run it again
+  with fresh inputs.
+- **Find related work:** surface sessions connected to the current repo or
+  branch at session start, before you remember to ask.
+- **Turn work into a skill:** pull the reusable method out of a successful
+  session without dragging along its one-off data.
+
+The transcripts remain the source of truth. The SQLite index is disposable and
+fully rebuildable.
+
+## Receipts
+
+Measured on one development machine against 5,959 real transcripts and 2.5
+million indexed chunks:
+
+| Searcher | Recall@5 | MRR@10 | p95 latency |
+|---|---:|---:|---:|
+| recall | **0.63** | **0.55** | **0.16s** |
+| raw grep + mtime sorting | 0.57 | 0.53 | 2.9s |
+| previous prompt-only search | 0.23 | 0.21 | 15.7s |
+
+The retrieval eval contains 57 frozen, grep-verified known-answer queries and
+uses the same inputs and scorer for every searcher. Five real incidents where
+an agent previously thrashed for five to seven turns were also replayed; recall
+put the right session at rank one from a single search.
+
+The honest limit: no-answer detection is still lexical. A query about work that
+never happened can return a nearby session with similar words. That is why every
+result includes a `WHY` line and the skill tells the agent to inspect the
+evidence before claiming a match.
 
 ## Install
+
+Claude Code:
 
 ```bash
 claude plugin marketplace add miguelrios/unc-skills
 claude plugin install recall@unc-skills
-
-# index your history (one-time backfill; minutes, not hours)
-python3 ~/.claude/skills/recall/scripts/recall.py index
-
-# optional: the session-start prior-art hook
-./install.sh --hook     # prints the settings.json snippet to add
 ```
+
+Codex:
+
+```bash
+codex plugin marketplace add miguelrios/unc-skills
+codex plugin add recall@unc-skills
+```
+
+pi (installs the complete unc-skills collection):
+
+```bash
+pi install git:github.com/miguelrios/unc-skills
+```
+
+Start a new session, invoke Recall using the harness's normal skill syntax, and ask it to
+`index my session history`. The skill runs its engine relative to its installed directory, so
+you do not need to find a plugin-cache path.
+
+For a direct/manual Claude install:
+
+```bash
+git clone https://github.com/miguelrios/unc-skills.git
+cd unc-skills/recall
+./install.sh
+```
+
+Then build the local index directly:
+
+```bash
+python3 ~/.claude/skills/recall/scripts/recall.py index
+python3 ~/.claude/skills/recall/scripts/recall.py doctor
+```
+
+To surface related sessions automatically at the beginning of Claude Code sessions, run
+`./install.sh --hook`. It prints the `settings.json` hook configuration for you to review and
+add. Search works from Codex and pi without the hook. Recall currently indexes Claude Code and
+Codex transcripts; pi can run the search, but pi's own transcript format is not indexed yet.
+
+## How it works
+
+- `skills/recall/scripts/recall.py` is a stdlib-only Python engine backed by one
+  SQLite database, FTS5, an entity index, and evidence-tiered ranking.
+- `skills/recall/SKILL.md` teaches the agent when to search, how to judge a
+  match, and how to find, continue, repeat, or skill-ify prior work.
+- `skills/recall/scripts/recall-hook.sh` is an optional SessionStart hook. It is
+  bounded, fail-open, and keeps the index fresh without a daemon or cron job.
+- `tests/` contains unit tests and the frozen retrieval eval, including a held-
+  out split for measuring ranking changes.
+
+Everything stays on your machine. Secret-shaped lines are redacted during
+indexing, thinking blocks are not indexed, and the index directory is created
+with user-only permissions.
 
 ## Requirements
 
-- Python 3.10+ with SQLite FTS5 (stock on Debian/Ubuntu/macOS).
-- Claude Code and/or Codex CLI session history on disk.
-- Linux/macOS. `recall doctor` checks all of it and tells you what's missing.
+- Python 3.10+ with SQLite FTS5 (included in stock Python on Debian, Ubuntu,
+  and macOS).
+- Claude Code and/or Codex CLI session history on disk. The operating harness may also be pi.
+- Linux or macOS.
 
-## When to use it
-
-- "Did we already fix this?" — before re-fixing it.
-- Continuing yesterday's half-finished branch from a fresh session.
-- Cross-tool archaeology: Claude asking what Codex did, and vice versa.
-- Turning "that thing that worked" into a skill instead of a legend.
-
-*Moral: an agent that reads its own diary stops introducing itself to its own
-work.*
-
-Credits: retrieval architecture informed by [garrytan/gbrain](https://github.com/garrytan/gbrain)
-(deterministic substrate, hybrid ranking, doctor/eval as first-class); the
-session-catalog pattern borrowed from Codex's own `state_5.sqlite`.
+Retrieval architecture was informed by
+[garrytan/gbrain](https://github.com/garrytan/gbrain), especially its
+deterministic substrate, hybrid ranking, and treatment of doctor/eval as
+first-class tools. The session catalog pattern was borrowed from Codex's own
+`state_5.sqlite`.
 
 MIT © Miguel Rios

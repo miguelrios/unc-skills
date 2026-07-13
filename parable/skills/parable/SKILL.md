@@ -1,6 +1,6 @@
 ---
 name: parable
-description: Orchestrator for multi-task implementation batches. The session model plans each task, routes it to the cheapest capable executor (Claude subagents by default; codex- and pi-run models via parable.toml), and verifies and reviews the results. Invoke when the user types /parable, hands over a list of tasks to implement, says "work through my backlog," "knock out these issues," or "use cheap/fast models for this." Not for a single isolated bugfix or a standalone code review.
+description: Orchestrator for multi-task implementation batches. The session model plans each task, routes it to the cheapest capable executor (native subagents when available; configured Codex, pi, or Cursor executors everywhere), and verifies and reviews the results. Invoke when the user names Parable, hands over a list of tasks to implement, says "work through my backlog," "knock out these issues," or "use cheap/fast models for this." Not for a single isolated bugfix or a standalone code review.
 ---
 
 # parable — divide and conquer
@@ -20,9 +20,13 @@ Run `scripts/parable-config.sh` once. It prints the executor cast (credential st
 `use_for`/`avoid_for` stage directions), the routing chains per task class, the configured
 checks, the research provider, and `repo_notes` — repo conventions that belong in every plan.
 That output plus this file covers the common case; the full selection algorithm and escalation
-ladder live in `references/routing.md`. No config file means Tier-0 defaults:
-`sonnet` implements and `opus` reviews as Claude subagents, no keys needed — and with no
-configured checks, `parable-verify.sh` passes vacuously until the user declares some.
+ladder live in `references/routing.md`. First detect whether this harness exposes a native
+subagent/agent-spawn tool. If it does, no config means the Tier-0 defaults (`sonnet` implements,
+`opus` reviews) can run through that tool. If it does not (notably stock pi), the built-in
+subagent cast is **unavailable**: require at least one configured `codex`, `codex-native`, `pi`,
+or `cursor` executor before dispatching. Installation is portable; a missing executor is not
+fake runtime parity. With no configured checks, `parable-verify.sh` passes vacuously until the
+user declares some.
 
 ## Load-balancing across subscriptions (the point of a multi-pool cast)
 
@@ -32,8 +36,8 @@ A cast can span three subscription pools — the Claude plan (subagent executors
 plan (`codex-native` executors), and a Cursor plan (`cursor` executors) — plus metered
 API-key providers (codex/pi) as an overflow valve. Marginal cost on the subscription pools is
 zero until their window/budget is spent, so routing is not about per-token price; it is about
-**keeping every pool's headroom above water and never starving the one that also funds you**
-(your own orchestration tokens draw on the Claude plan).
+**keeping every pool's headroom above water and never starving the pool that funds the current
+session**. Which pool that is depends on the harness running this skill.
 
 `scripts/parable-usage.sh` makes this measurable instead of reactive: it reads each pool's own
 usage endpoint — Claude's 5h/7d window %, ChatGPT's 5h/7d window %, Cursor's dollars left this
@@ -56,8 +60,9 @@ this tool exists to prevent. The per-pool selection detail lives in `references/
 - `scripts/parable-run.sh <executor> <plan.md> [workdir] [--effort <level>]` — dispatch a
   codex-, pi-, or cursor-backed executor headlessly; prints status, session id, turns, tokens
   and cost, last message, and the run dir. Subagent executors (`sonnet`, `opus`, …) dispatch via
-  the Agent tool with the plan as the prompt — use the general-purpose agent type with the
-  executor's model; custom agent-type names are install-specific.
+  the harness's native agent-spawn tool with the plan as the prompt — use a general-purpose
+  agent with the executor's model; custom agent-type names are install-specific. If there is no
+  native agent-spawn tool, that executor is unavailable; choose a CLI-backed executor.
 - `scripts/parable-resume.sh <run-dir> "<message>"` — continue an executor's existing session
   (caching economics: facts below). Sessions do not transfer between executors.
 - `scripts/parable-status.sh <run-dir>` — live run state in ~7 lines for zero model tokens;
@@ -85,8 +90,8 @@ this tool exists to prevent. The per-pool selection detail lives in `references/
   overlap means serialize. Commit verified work promptly — uncommitted diffs in a shared tree
   are unprotected — and verify or commit landed runs before any tree-wide git operation of
   your own (stash, checkout, reset), which can silently drop a sibling run's uncommitted work.
-- Implementing a task yourself is the user's money: ask first with AskUserQuestion, except for
-  fixes smaller than the handoff would cost.
+- Implementing a task yourself is the user's money: ask first through the harness's user-input
+  mechanism, except for fixes smaller than the handoff would cost.
 - Spend and wait mechanics: your harness ships its own spend discipline, written by the model's
   creator and newer than anything here — follow it over any advice in this file. The facts below
   only add what is parable-specific.
@@ -118,8 +123,9 @@ this tool exists to prevent. The per-pool selection detail lives in `references/
 grep.ai is Parcha's hosted research service (a free tier exists); parable defaults
 `[research].provider` to it — set `"claude"` to keep research in-session. With the default,
 route in-depth research and research-backed deliverables (reports, slidedecks, spreadsheets,
-PDFs, apps) through the installed **grep-research-skills** package: invoke its skills by name
-via the Skill tool (`research`, `ultra-research`, `grep-build-slidedeck`, `grep-domain-expert`,
-and friends — each skill's description says when it fits). `npx grep-research-skills` installs
-them; `grep-login` authenticates. Quick lookups are ordinary in-session web searches. These
+PDFs, apps) through the installed **grep-research-skills** package: invoke its skills using the
+current harness's normal skill syntax (`research`, `ultra-research`, `grep-build-slidedeck`,
+`grep-domain-expert`, and friends — each description says when it fits).
+`npx grep-research-skills` installs them; `grep-login` authenticates. Quick lookups are ordinary
+in-session web searches. These
 deliverables have no git diff: close by confirming the artifact with the user.

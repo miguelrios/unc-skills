@@ -7,7 +7,7 @@
 
 [![skills.sh](https://skills.sh/b/miguelrios/unc-skills)](https://skills.sh/miguelrios/unc-skills/parable)
 
-**Multi-model coding orchestration for Claude Code.**
+**Multi-model coding orchestration for Claude Code, Codex, and pi.**
 
 It is Tuesday. You are pair-programming with Fable on a small task: extract a helper
 function and add a test. Three hundred lines later, the helper has its own module and two new
@@ -149,10 +149,17 @@ that configuration.
 
 ```bash
 # Claude Code plugin marketplace
-/plugin marketplace add miguelrios/unc-skills
-/plugin install parable
+claude plugin marketplace add miguelrios/unc-skills
+claude plugin install parable@unc-skills
 
-# npx installer (adds the skill + a starter config; --project for repo-local)
+# Codex plugin marketplace
+codex plugin marketplace add miguelrios/unc-skills
+codex plugin add parable@unc-skills
+
+# pi package (installs the complete unc-skills collection)
+pi install git:github.com/miguelrios/unc-skills
+
+# standalone Claude/manual installer (adds the skill + a starter config)
 npx @parcha/parable install
 npx @parcha/parable doctor
 
@@ -160,8 +167,13 @@ npx @parcha/parable doctor
 git clone https://github.com/miguelrios/unc-skills && cd unc-skills/parable && ./install.sh
 ```
 
-Requirements: Claude Code; Python 3.11+; codex CLI only for codex-backed executors; pi CLI
-(node 22+) only for pi-backed executors.
+Requirements: Claude Code, Codex, or pi as the orchestrating harness; Python 3.11+; codex CLI
+for codex-backed executors; pi CLI (node 22+) for pi-backed executors.
+
+Claude Code and Codex builds with native agent spawning can use Parable's zero-config subagent
+cast. Stock pi has no built-in subagents, so configure at least one Codex, pi, or Cursor executor
+in a harness-neutral `parable.toml` before dispatching. Installation parity does not erase that
+runtime difference.
 
 ## What's in the box
 

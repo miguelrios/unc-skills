@@ -1,11 +1,11 @@
 ---
 name: recall
-description: Find prior AI-coding sessions — Claude Code and Codex — with an indexed local search engine, then continue the work, repeat it with fresh inputs, or distill it into a skill. Use when the user says /recall, "find that conversation where…", "what did we do last time about…", "continue what we did yesterday on X", "what did codex do on this branch", "turn what we did about Y into a skill", or "remember when you…". Not for searching code (use grep on the repo) or for facts already in MEMORY.md.
+description: Find prior Claude Code and Codex sessions with an indexed local search engine, then continue the work, repeat it with fresh inputs, or distill it into a skill. Runs from Claude Code, Codex, or pi; the current index covers Claude Code and Codex transcripts. Use when the user names Recall, says "find that conversation where…", "what did we do last time about…", "continue what we did yesterday on X", "what did codex do on this branch", "turn what we did about Y into a skill", or "remember when you…". Not for searching code (use grep on the repo) or for facts already in MEMORY.md.
 ---
 
 # /recall — session memory engine
 
-Every Claude Code and Codex session on this machine is indexed into a local
+Claude Code and Codex sessions on this machine are indexed into a local
 SQLite engine. You do not grep transcripts; you query the index and read only
 the winning session. All commands go through one CLI:
 
@@ -23,7 +23,8 @@ python3 scripts/recall.py <command>       # relative to this skill directory
 3. **Repeat** — redo the same kind of task with fresh inputs. Needs the
    original driving prompts, verbatim.
 4. **Skill-ify** — turn the recipe into a reusable skill. Needs the steps that
-   worked, minus one-off data. Chain into `skill-creator` at the end.
+   worked, minus one-off data. Chain into the harness's skill creator when one
+   is installed; otherwise write the standard `SKILL.md` package directly.
 
 Ask only if the outcome is genuinely ambiguous.
 
@@ -91,7 +92,8 @@ and confirm fresh inputs (dates, scope) before re-running.
 
 **Skill-ify** — search → `show` the working window → separate the durable
 recipe (commands, endpoints, auth patterns) from one-off data (specific IDs,
-dates) → invoke `skill-creator` with the recipe and a proposed name.
+dates) → invoke the available skill creator with the recipe and a proposed
+name, or create a standard Agent Skills directory when none is installed.
 
 ## Index health
 
@@ -111,6 +113,8 @@ re-enabled — surface that to the user immediately; history is being deleted.
   is not findable.
 - Codex sessions are one file per rollout under a date tree; `show` handles
   both schemas transparently.
+- Running Recall from pi is supported, but pi's own session format is not yet
+  indexed. Do not claim that a cold result proves no pi session exists.
 - A query about work that never happened can still return lexically-adjacent
   sessions. The ranked WHY line tells you what actually matched — read it
   before asserting the session answers the question.

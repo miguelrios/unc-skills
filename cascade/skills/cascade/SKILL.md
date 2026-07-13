@@ -1,6 +1,6 @@
 ---
 name: cascade
-description: Turn a blunt "do X, don't screw it up" task into structured, evidence-gated progress — instead of charging in, plan the work into a cascade of bounded loops, each one development cycle with a self-contained prompt, a checkable evidence-based exit, and a hard bound; a loop's exit triggers the next, and you can run straight through (autonomous) or pause for a go/no-go at every loop boundary (checkpointed). Use when the user says /cascade, "cascading loops", "work in loops", "go ham" on a multi-cycle project, hands a big/risky/"make no mistakes" task worth planning before building, or asks to plan, advance, resume, or take over a loop chain.
+description: Turn a blunt "do X, don't screw it up" task into structured, evidence-gated progress — instead of charging in, plan the work into a cascade of bounded loops, each one development cycle with a self-contained prompt, a checkable evidence-based exit, and a hard bound; a loop's exit triggers the next, and you can run straight through (autonomous) or pause for a go/no-go at every loop boundary (checkpointed). Use when the user names Cascade, says "cascading loops", "work in loops", "go ham" on a multi-cycle project, hands a big/risky/"make no mistakes" task worth planning before building, or asks to plan, advance, resume, or take over a loop chain.
 ---
 
 # Cascade — cascading development loops
@@ -65,8 +65,9 @@ EXIT      verify each accept criterion against HEAD + the trace — never commit
           write docs/evidence/<loop>/EXIT.md with criterion → evidence pointers; trigger the next loop
 ```
 
-Launch background dispatches, judges, and long runs rather than waiting on them — interleave a
-parallel-track task whenever the chain loop is blocked on review or a live run.
+When the harness supports background dispatch or monitoring, use it for judges and long runs
+and interleave independent work. When it does not (stock pi has no background bash), use tmux or
+run the work sequentially; never invent a background primitive the harness does not expose.
 
 ## Chain invariants (no exceptions)
 
@@ -84,15 +85,21 @@ parallel-track task whenever the chain loop is blocked on review or a live run.
 
 - **Chain doc** — `docs/LOOP_CHAIN_<date>.md` (or the project's docs dir): anatomy table, the ribbon, every loop's five fields, invariants. Template: [references/templates.md](references/templates.md).
 - **Evidence tree** — `docs/evidence/<loop-id>-<slug>/` per loop; EXIT.md plus the raw artifacts it points at.
-- **Task graph** — one TaskCreate per loop, chained with `blockedBy` so the task list mirrors the cascade; parallel tracks as unblocked siblings. Position is always recoverable from TaskList + the chain doc.
+- **Task graph** — use the harness's native task graph when one exists. Otherwise keep a checked
+  task table in the chain doc with `blocked by` links. The chain doc is always the portable
+  source of truth; a harness task UI is a synchronized convenience, never the only record.
 - **Final loop = re-plan gate** — the last loop reads the accumulated evidence, writes a verdict with numbers, drafts the next chain from the losing cells, and ends on a human gate.
 
 ## Running autonomously
 
 When the user says go ham / keep going, keep the chain moving without them driving each step:
 
-- Arm a heartbeat (the `/loop` skill, a Stop hook, or ScheduleWakeup) whose prompt is: read TaskList + the chain doc for exact position; if a loop is mid-flight, advance its next ribbon step; if bots reviewed an open PR, resolve and merge per etiquette; honor all bounds (AT_BOUND ⇒ report and stop that loop); human gates always wait; if everything is blocked on external work, say so in one line and stop.
-- Use Monitor/background Bash on long PROVE runs so exits fire on evidence, not on polling.
+- If the harness supports recurring wakes or lifecycle hooks, arm one with this prompt: read the
+  chain doc plus any native task list for exact position; advance the next ribbon step; honor
+  bounds and human gates. Without recurring wakes, continue in the current session and rely on
+  TAKEOVER from the file-backed chain after a session boundary.
+- Use native monitoring/background execution when available. Otherwise use tmux for a genuinely
+  long process or poll briefly between useful foreground tasks.
 - Report at loop EXITs, not ribbon steps: position, what closed, the delta, what's now running. When asked to report externally, post at exits (e.g. Slack mention in the named channel) — one message per loop exit, not per step.
 
 ## Templates

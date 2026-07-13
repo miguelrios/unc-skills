@@ -1,0 +1,24 @@
+{
+  "name": "@parcha/unc-skills",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Portable Agent Skills for Claude Code, Codex, and pi",
+  "scripts": {
+    "test": "python3 -m unittest discover -s tests -v"
+  },
+  "keywords": [
+    "agent-skills",
+    "claude-code",
+    "codex",
+    "pi-package"
+  ],
+  "pi": {
+    "skills": [
+      "./hands-free/skills",
+      "./parable/skills",
+      "./cascade/skills",
+      "./recall/skills"
+    ]
+  },
+  "license": "MIT"
+}

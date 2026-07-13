@@ -1,0 +1,34 @@
+{
+  "name": "recall",
+  "version": "0.1.0",
+  "description": "Indexed local search over Claude Code and Codex session history.",
+  "author": {
+    "name": "Miguel Rios",
+    "url": "https://github.com/miguelrios"
+  },
+  "homepage": "https://github.com/miguelrios/unc-skills/tree/main/recall",
+  "repository": "https://github.com/miguelrios/unc-skills/tree/main/recall",
+  "license": "MIT",
+  "keywords": [
+    "session-history",
+    "search",
+    "memory",
+    "recall"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Recall",
+    "shortDescription": "Find and continue prior coding-agent work",
+    "longDescription": "Index local Claude Code and Codex transcripts, rank matching sessions, and read only the relevant turns.",
+    "developerName": "Miguel Rios",
+    "category": "Productivity",
+    "capabilities": [
+      "Read"
+    ],
+    "websiteURL": "https://github.com/miguelrios/unc-skills/tree/main/recall",
+    "defaultPrompt": [
+      "Find the prior session where we worked on this.",
+      "Show me related work from this branch."
+    ]
+  }
+}

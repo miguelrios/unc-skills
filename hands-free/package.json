@@ -1,26 +1,25 @@
 {
   "name": "@parcha/hands-free",
   "version": "0.3.0",
-  "description": "Hands-free for coding agents: the agent phones you (as Unc) when it needs an answer. Pure skill + one script \u2014 no hooks. Claude Code and Codex.",
+  "description": "Hands-free for coding agents: the agent phones you (as Unc) when it needs an answer. Pure skill + one script \u2014 no hooks. Claude Code, Codex, and pi.",
   "license": "MIT",
   "type": "commonjs",
   "bin": {
     "hands-free": "bin/hands-free.js"
   },
   "scripts": {
-    "test": "python3 -m unittest discover -s tests -v && python3 -m py_compile scripts/hands_free_hook.py skills/hands-free/scripts/hands_free_hook.py && python3 -m json.tool .codex-plugin/plugin.json >/dev/null && python3 -m json.tool hooks/hooks.json >/dev/null && python3 -m json.tool examples/hooks.json >/dev/null && python3 -m json.tool examples/claude-settings.json >/dev/null && python3 -m json.tool .agents/plugins/marketplace.json >/dev/null",
+    "test": "python3 -m unittest discover -s tests -v && python3 -m py_compile scripts/call_user.py skills/hands-free/scripts/call_user.py && python3 -m json.tool .claude-plugin/plugin.json >/dev/null && python3 -m json.tool .codex-plugin/plugin.json >/dev/null && python3 -m json.tool .agents/plugins/marketplace.json >/dev/null",
     "pack:check": "npm pack --dry-run"
   },
   "files": [
     ".agents/plugins/*.json",
+    ".claude-plugin/*.json",
     ".codex-plugin/*.json",
     "bin/*.js",
-    "examples/*.toml",
-    "examples/*.json",
-    "hooks/*.json",
     "scripts/*.py",
     "skills/hands-free/SKILL.md",
     "skills/hands-free/agents/*.yaml",
+    "skills/hands-free/references/*.md",
     "skills/hands-free/scripts/*.py",
     ".env.example",
     "install.sh",
@@ -37,8 +36,14 @@
     "hooks",
     "vapi",
     "phone",
-    "voice"
+    "voice",
+    "pi-package"
   ],
+  "pi": {
+    "skills": [
+      "./skills"
+    ]
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/miguelrios/unc-skills.git",

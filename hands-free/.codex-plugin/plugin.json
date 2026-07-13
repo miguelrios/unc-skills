@@ -1,7 +1,7 @@
 {
   "name": "hands-free",
-  "version": "0.1.0",
-  "description": "Route Codex approval and input prompts to a phone call.",
+  "version": "0.3.0",
+  "description": "Route coding-agent questions and approvals to a phone call.",
   "author": {
     "name": "Parcha AI",
     "url": "https://github.com/miguelrios"

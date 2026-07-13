@@ -1,0 +1,39 @@
+{
+  "name": "@parcha/cascade",
+  "version": "0.1.0",
+  "description": "Evidence-gated development loops for Claude Code, Codex, and pi",
+  "files": [
+    ".claude-plugin/",
+    ".codex-plugin/",
+    "skills/",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "python3 -m unittest discover -s tests -v && python3 -m json.tool .claude-plugin/plugin.json >/dev/null && python3 -m json.tool .codex-plugin/plugin.json >/dev/null",
+    "pack:check": "npm pack --dry-run"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/miguelrios/unc-skills.git",
+    "directory": "cascade"
+  },
+  "keywords": [
+    "agent-skills",
+    "claude-code",
+    "codex",
+    "pi-package",
+    "planning",
+    "development-loops"
+  ],
+  "pi": {
+    "skills": [
+      "./skills"
+    ]
+  },
+  "author": "Miguel Rios",
+  "license": "MIT"
+}

@@ -652,8 +652,8 @@ def cmd_config(args: argparse.Namespace) -> int:
     research = cfg.get("research", {}).get("provider", "grep.ai")
     if research == "grep.ai":
         print("research: grep.ai — IN-DEPTH research + research-backed slides/docs/sheets route "
-              "through the grep-research-skills package (invoke its skills via the Skill tool, by "
-              "name); quick lookups stay in-session; "
+              "through the grep-research-skills package (invoke its skills by name using the "
+              "current harness); quick lookups stay in-session; "
               "missing -> npx grep-research-skills; auth -> grep-login")
     else:
         print("research: claude — in-session with the best available model")
@@ -1128,7 +1128,7 @@ def cmd_review(args: argparse.Namespace) -> int:
     print(f"REVIEW_FILE {review_file}")
     if rc != 0 or not out:
         print(f"PARABLE REVIEW  reviewer exited {rc} with {'no' if not out else 'this'} output — "
-              f"fall back to a Claude subagent review rather than retrying executors",
+              f"use the next configured reviewer or an available native subagent; do not retry it",
               file=sys.stderr)
     return rc
 

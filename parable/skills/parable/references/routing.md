@@ -46,9 +46,10 @@ failure costs one run; over-provisioning costs every run.
 - **Silent reviewer (no output within its budget):** infrastructure failure — fall through
   to the next `routing.review` entry immediately rather than polling or re-dispatching the
   same one.
-- **Fallback floor:** Claude subagents need no external key or runtime and complete
-  in-session — when an executor crashes at launch or a tier is exhausted, an implementer
-  subagent finishes the work and a frontier subagent reviews it.
+- **Fallback floor:** when the orchestrating harness exposes native agent spawning, native
+  subagents need no external key and can complete in-session. Without that capability, the
+  floor is the last eligible configured CLI-backed executor. If neither exists, stop and ask
+  for a cast configuration; do not silently implement the batch in the brain session.
 
 ## Effort per role
 

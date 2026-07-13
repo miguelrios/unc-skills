@@ -6,14 +6,18 @@
     "recall-plugin": "./bin/recall.js"
   },
   "files": [
+    ".claude-plugin/",
+    ".codex-plugin/",
     "bin/",
     "skills/",
+    "!skills/**/__pycache__/**",
+    "!skills/**/*.pyc",
     "install.sh",
     "LICENSE",
     "README.md"
   ],
   "scripts": {
-    "test": "python3 -m unittest discover -s tests -v && python3 -m py_compile skills/recall/scripts/recall.py && python3 -m json.tool .claude-plugin/plugin.json >/dev/null && node --check bin/recall.js",
+    "test": "python3 -m unittest discover -s tests -v && python3 -m py_compile skills/recall/scripts/recall.py && python3 -m json.tool .claude-plugin/plugin.json >/dev/null && python3 -m json.tool .codex-plugin/plugin.json >/dev/null && node --check bin/recall.js",
     "pack:check": "npm pack --dry-run"
   },
   "engines": {
@@ -29,8 +33,14 @@
     "codex",
     "session-history",
     "search",
-    "memory"
+    "memory",
+    "pi-package"
   ],
+  "pi": {
+    "skills": [
+      "./skills"
+    ]
+  },
   "author": "Parcha Labs (https://parcha.com)",
   "license": "MIT"
 }

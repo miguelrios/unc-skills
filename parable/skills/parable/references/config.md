@@ -6,15 +6,18 @@ Files load lowest-precedence first; later files win:
 
 1. `~/.config/parable/parable.toml` — personal cast, shared across repos
 2. `<git-root>/parable.toml`
-3. `<git-root>/.claude/parable.toml` — recommended repo location
+3. `<git-root>/.claude/parable.toml` — Claude-specific compatibility location; prefer the
+   harness-neutral `<git-root>/parable.toml` for cross-harness repositories
 4. `$PARABLE_CONFIG` — explicit path, wins over everything
 
 `[executors.*]`, `[providers.*]`, `[checks.*]` merge **per id, per field** (a repo file can
 override just `effort` on your personal `kimi`). `[parable]` and `[routing]` merge per key,
 whole-value (a repo redefining `routing.feature` replaces that chain, not the whole table).
 
-Built-in Tier-0 defaults (providers.claude + executors sonnet/opus + all-Claude routing) sit
-below everything. Executors that need API keys are never defaulted — anything with an
+Built-in Tier-0 defaults (providers.claude + executors sonnet/opus + all-subagent routing) sit
+below everything. They are runnable only when the orchestrating harness exposes a native agent-
+spawn tool; stock pi needs a configured CLI-backed executor. Executors that need API keys are
+never defaulted — anything with an
 `env_key` must be declared by a config file you wrote. `parable-config.sh` always prints
 which files loaded.
 

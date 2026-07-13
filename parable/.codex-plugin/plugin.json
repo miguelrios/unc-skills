@@ -1,0 +1,35 @@
+{
+  "name": "parable",
+  "version": "0.1.8",
+  "description": "Multi-model coding orchestration: plan, route, verify, and review implementation batches.",
+  "author": {
+    "name": "Parcha Labs",
+    "url": "https://parcha.com"
+  },
+  "homepage": "https://github.com/miguelrios/unc-skills/tree/main/parable",
+  "repository": "https://github.com/miguelrios/unc-skills/tree/main/parable",
+  "license": "MIT",
+  "keywords": [
+    "orchestration",
+    "multi-model",
+    "codex",
+    "coding-agent"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Parable",
+    "shortDescription": "Plan, route, verify, and review implementation batches",
+    "longDescription": "Use the session model as the brain while cheaper executors implement bounded tasks and independent reviewers inspect the result.",
+    "developerName": "Parcha Labs",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/miguelrios/unc-skills/tree/main/parable",
+    "defaultPrompt": [
+      "Use Parable to work through this implementation backlog.",
+      "Route these tasks across the configured executor cast."
+    ]
+  }
+}

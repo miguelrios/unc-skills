@@ -5,19 +5,19 @@
     "url": "https://github.com/miguelrios"
   },
   "metadata": {
-    "description": "Miguel's personal Claude Code skills: hands-free, parable, cascade."
+    "description": "Miguel's portable Agent Skills: hands-free, parable, cascade, and recall."
   },
   "plugins": [
     {
       "name": "hands-free",
       "source": "./hands-free",
-      "version": "0.2.0",
-      "description": "Route AI coding-assistant approval and input prompts to a phone call through Vapi. Works with Claude Code and Codex."
+      "version": "0.3.0",
+      "description": "Route AI coding-assistant questions and approvals to a phone call through Vapi. Works with Claude Code, Codex, and pi."
     },
     {
       "name": "parable",
       "source": "./parable",
-      "version": "0.1.7",
+      "version": "0.1.8",
       "description": "Multi-model coding orchestration: plan, route to the cheapest capable executor model, verify with code, review with fresh eyes."
     },
     {

@@ -1,19 +1,22 @@
 {
   "name": "@parcha/parable",
-  "version": "0.1.7",
-  "description": "Multi-model coding orchestration skill for Claude Code \u2014 the brain tells the story, the cast performs it.",
+  "version": "0.1.8",
+  "description": "Multi-model coding orchestration skill for Claude Code, Codex, and pi.",
   "bin": {
     "parable": "bin/parable.js"
   },
   "scripts": {
-    "test": "python3 -m unittest discover -s tests -v && python3 -m py_compile skills/parable/scripts/parable.py skills/parable/scripts/parable_usage.py && python3 -m json.tool .claude-plugin/plugin.json >/dev/null && python3 -m json.tool .claude-plugin/marketplace.json >/dev/null && node --check bin/parable.js",
+    "test": "python3 -m unittest discover -s tests -v && python3 -m py_compile skills/parable/scripts/parable.py skills/parable/scripts/parable_usage.py && python3 -m json.tool .claude-plugin/plugin.json >/dev/null && python3 -m json.tool .claude-plugin/marketplace.json >/dev/null && python3 -m json.tool .codex-plugin/plugin.json >/dev/null && node --check bin/parable.js",
     "pack:check": "npm pack --dry-run"
   },
   "files": [
     ".claude-plugin/*.json",
+    ".codex-plugin/*.json",
     "bin/parable.js",
     "skills/parable/SKILL.md",
     "skills/parable/scripts/*",
+    "!skills/parable/scripts/__pycache__/**",
+    "!skills/parable/scripts/*.pyc",
     "skills/parable/references/*",
     "examples/*.toml",
     "install.sh",
@@ -33,8 +36,14 @@
     "skill",
     "orchestration",
     "multi-model",
-    "codex"
+    "codex",
+    "pi-package"
   ],
+  "pi": {
+    "skills": [
+      "./skills"
+    ]
+  },
   "author": "Parcha Labs (https://parcha.com)",
   "license": "MIT"
 }

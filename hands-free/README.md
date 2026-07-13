@@ -3,7 +3,7 @@
 **Your phone is the terminal.** Step away from the keyboard and let the agent keep cooking —
 when it needs you, **Unc calls**: *"Yo, it's Unc. Your agent's cooking and wants your blessing:
 deploy snapshot v6 to prod. Say approve or deny — or hit 1 to bless it, 2 to shut it down."*
-Works with **Claude Code** and **OpenAI Codex**, powered by Vapi.
+Works with **Claude Code**, **OpenAI Codex**, and **pi**, powered by Vapi.
 
 [![skills.sh](https://skills.sh/b/miguelrios/unc-skills)](https://skills.sh/miguelrios/unc-skills/hands-free)
 
@@ -27,17 +27,39 @@ the same way it decides to run any other tool.
 
 ## Requirements
 
-- Claude Code, or Codex
+- Claude Code, Codex, or pi
 - Node.js 18+ and Python 3.9+
 - A Vapi private API key, phone number id, and a destination number in E.164 format (e.g. `+15555550123`)
 
 ## Install
 
+Native collection installs:
+
 ```bash
-npx @parcha/hands-free install            # auto-detects Claude Code vs Codex
+# Claude Code
+claude plugin marketplace add miguelrios/unc-skills
+claude plugin install hands-free@unc-skills
+
+# Codex
+codex plugin marketplace add miguelrios/unc-skills
+codex plugin add hands-free@unc-skills
+
+# pi (installs all unc-skills)
+pi install git:github.com/miguelrios/unc-skills
+```
+
+For pi package installs, put credentials in `~/.config/hands-free/.env`; the bundled skill
+script reads that portable location directly.
+
+The standalone npm installer supports these commands starting with `@parcha/hands-free@0.3.0`.
+Until that version is published, use one of the native collection installs above.
+
+```bash
+npx @parcha/hands-free@0.3.0 install      # auto-detects a harness
 # or pick one explicitly:
-npx @parcha/hands-free install --harness=claude-code
-npx @parcha/hands-free install --harness=codex
+npx @parcha/hands-free@0.3.0 install --harness=claude-code
+npx @parcha/hands-free@0.3.0 install --harness=codex
+npx @parcha/hands-free@0.3.0 install --harness=pi
 ```
 
 Then fill in the env file the installer dropped:
@@ -47,12 +69,16 @@ Then fill in the env file the installer dropped:
 $EDITOR ~/.claude/hands-free/.env
 # Codex:
 $EDITOR ~/.codex/hands-free/.env
+# pi:
+$EDITOR ~/.pi/agent/hands-free/.env
+# portable alternative for every harness:
+$EDITOR ~/.config/hands-free/.env
 ```
 
 Verify with:
 
 ```bash
-npx @parcha/hands-free doctor
+npx @parcha/hands-free@0.3.0 doctor
 ```
 
 Use it: tell your agent **`activate hands free`** and walk away. Say
@@ -70,7 +96,7 @@ silence, ambiguity) — so the agent can never mistake a dead call for a decisio
 ## File Layout After Install
 
 ```
-<harness home>/                # ~/.claude or ~/.codex
+<harness home>/                # ~/.claude, ~/.codex, or ~/.pi/agent
 ├── hands-free/
 │   ├── .env                   # your Vapi credentials (chmod 600)
 │   └── scripts/call_user.py   # the one moving part

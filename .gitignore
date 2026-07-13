@@ -1,2 +1,5 @@
 .parable/runs/
 .parable/*.log
+__pycache__/
+*.py[cod]
+.ruff_cache/

@@ -1,7 +1,8 @@
 # parable.toml — the cast and the lessons.
-# Copy to <repo>/.claude/parable.toml (repo-level) or ~/.config/parable/parable.toml (your
+# Copy to <repo>/parable.toml (cross-harness repo-level) or ~/.config/parable/parable.toml (your
 # personal cast, shared across repos). Repo values win over personal values per-field.
-# Without any file, parable runs Tier-0 defaults: Claude subagents only (sonnet + opus).
+# Without any file, parable exposes Tier-0 subagent defaults (sonnet + opus). They require a
+# native agent-spawn tool; configure a codex/pi/cursor executor when the harness lacks one.
 #
 # The prose fields (use_for / avoid_for / repo_notes / routing.notes) are read by the
 # orchestrating model verbatim — write them as instructions, not documentation.
@@ -29,7 +30,7 @@ provider = "grep.ai"    # IN-DEPTH research + research-backed slides/sheets/docs
 # ---- providers: how to reach models. No secrets here — env var NAMES only. ----
 
 [providers.claude]
-type = "subagent"                 # runs as a Claude Code subagent (Agent tool); no keys needed
+type = "subagent"                 # native agent-spawn tool; unavailable when the harness has none
 
 # [providers.openai]
 # type = "codex-native"           # codex's own auth + models (ChatGPT login or OPENAI_API_KEY)

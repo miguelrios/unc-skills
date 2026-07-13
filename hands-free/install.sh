@@ -22,12 +22,14 @@ for arg in "$@"; do
   esac
 done
 
-# Auto-detect: prefer Claude Code if ~/.claude exists, else codex, else claude default.
+# Auto-detect: prefer Claude Code, then Codex, then pi.
 if [[ "$HARNESS" == "auto" ]]; then
   if [[ -d "$HOME/.claude" ]]; then
     HARNESS="claude-code"
   elif [[ -d "$HOME/.codex" ]]; then
     HARNESS="codex"
+  elif [[ -d "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}" ]]; then
+    HARNESS="pi"
   else
     HARNESS="claude-code"
   fi
@@ -42,8 +44,12 @@ case "$HARNESS" in
     HARNESS_HOME="${CODEX_HOME:-$HOME/.codex}"
     SETTINGS_FILE="$HARNESS_HOME/hooks.json"
     ;;
+  pi)
+    HARNESS_HOME="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+    SETTINGS_FILE=""
+    ;;
   *)
-    echo "Unknown harness: $HARNESS (expected claude-code or codex)" >&2
+    echo "Unknown harness: $HARNESS (expected claude-code, codex, or pi)" >&2
     exit 1
     ;;
 esac
@@ -66,7 +72,7 @@ fi
 # Retire artifacts from hands-free <= 0.2.x: hook wiring, the hook script, mode state.
 rm -f "$HANDS_FREE_HOME/scripts/hands_free_hook.py" "$SKILL_HOME/scripts/hands_free_hook.py" "$HANDS_FREE_HOME/state.json"
 
-if [[ -f "$SETTINGS_FILE" ]]; then
+if [[ -n "$SETTINGS_FILE" && -f "$SETTINGS_FILE" ]]; then
 "$PYTHON_BIN" - "$SETTINGS_FILE" <<'PY'
 import json
 import pathlib

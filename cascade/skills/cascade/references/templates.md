@@ -66,8 +66,9 @@ risk-ranked levers: mechanical → prompt → model>
 <the eight invariants from SKILL.md>
 ```
 
-Then mirror the chain as tasks: `TaskCreate` one task per loop, each `blockedBy` its
-predecessor; parallel tracks as unblocked siblings.
+Then mirror the chain in the harness's native task UI when one exists: one task per loop,
+each blocked by its predecessor, with parallel tracks as unblocked siblings. When no task UI
+exists, add a checked task table with the same dependency links to the chain doc itself.
 
 ## EXIT.md template
 
@@ -107,13 +108,13 @@ they don't burn the bound but must be documented.>
 
 ## Heartbeat prompt template
 
-For `/loop`, a cron, or ScheduleWakeup when running the chain autonomously:
+For a recurring-wake feature, lifecycle hook, or external scheduler when the harness has one:
 
 ```
-HEARTBEAT — continue the <project> loop chain autonomously. Read the task list (TaskList)
-and the chain doc (<path>) for exact position. Rules: (1) if a chain loop is mid-flight,
-advance its next ribbon step (RE-PLAN→BUILD→PIN→PROVE→MEASURE→REVIEW→MERGE→EXIT) — launch
-background dispatches/judges rather than waiting; (2) if bots have reviewed an open PR,
+HEARTBEAT — continue the <project> loop chain autonomously. Read the chain doc (<path>) and
+the harness task list, if present, for exact position. Rules: (1) if a chain loop is mid-flight,
+advance its next ribbon step (RE-PLAN→BUILD→PIN→PROVE→MEASURE→REVIEW→MERGE→EXIT) — use
+background dispatches/judges only when the harness exposes them; (2) if bots reviewed an open PR,
 resolve findings and merge per the etiquette; (3) honor all bounds — AT_BOUND means write
 the report and STOP that loop (page the user in the reply), never silently continue;
 (4) human gates always wait for the user; (5) if genuinely nothing is actionable, say so

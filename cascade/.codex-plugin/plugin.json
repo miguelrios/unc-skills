@@ -1,0 +1,34 @@
+{
+  "name": "cascade",
+  "version": "0.1.0",
+  "description": "Plan and execute a chain of bounded, evidence-gated development loops.",
+  "author": {
+    "name": "Miguel Rios",
+    "url": "https://github.com/miguelrios"
+  },
+  "homepage": "https://github.com/miguelrios/unc-skills/tree/main/cascade",
+  "repository": "https://github.com/miguelrios/unc-skills/tree/main/cascade",
+  "license": "MIT",
+  "keywords": [
+    "planning",
+    "loops",
+    "evidence",
+    "coding-agent"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Cascade",
+    "shortDescription": "Evidence-gated development loops",
+    "longDescription": "Break a large task into bounded loops whose acceptance criteria must map to checkable evidence before the next loop begins.",
+    "developerName": "Miguel Rios",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/miguelrios/unc-skills/tree/main/cascade",
+    "defaultPrompt": [
+      "Cascade this task into bounded, evidence-gated loops."
+    ]
+  }
+}

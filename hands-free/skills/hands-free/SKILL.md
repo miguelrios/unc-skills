@@ -1,6 +1,6 @@
 ---
 name: hands-free
-description: Phone-call bridge for coding agents — when the user is away from the keyboard, the agent calls them (as Unc). Use when the user says "activate hands free" / "deactivate hands free" (also hands-free, handsfree), asks to route questions or approvals to a phone call, or says they're stepping away but want the work to keep moving. Works on Claude Code and Codex.
+description: Phone-call bridge for coding agents — when the user is away from the keyboard, the agent calls them (as Unc). Use when the user says "activate hands free" / "deactivate hands free" (also hands-free, handsfree), asks to route questions or approvals to a phone call, or says they're stepping away but want the work to keep moving. Works on Claude Code, Codex, and pi.
 ---
 
 # Hands Free
@@ -20,10 +20,10 @@ messages or your tools to guess for you.
 
 You own two judgment calls, and both go through the same script:
 
-1. **You need an answer** (a question, a blocker, a choice):
-   run `python3 <harness home>/hands-free/scripts/call_user.py ask "<one short,
-   phone-friendly question>"` — stdout is the user's reply, verbatim; treat it as if they
-   typed it.
+1. **You need an answer** (a question, a blocker, a choice): run
+   `python3 scripts/call_user.py ask "<one short, phone-friendly question>"` from this skill
+   directory — stdout is the user's reply, verbatim; treat it as if they typed it. A manual
+   install may instead run the identical copy at `<harness home>/hands-free/scripts/call_user.py`.
 2. **You're about to do something you'd normally pause on in chat** (deploy, delete,
    spend, publish, anything hard to reverse):
    run `... call_user.py approve "<one-line summary of the action>"` — stdout is
@@ -38,7 +38,9 @@ fix, retry. **Never redial in a loop; two rings per need is the ceiling.**
 question in chat — every question was either answered through a call or is noted in your
 report with the assumption you took.
 
-`<harness home>` is `~/.claude` on Claude Code, `~/.codex` on Codex.
+`<harness home>` is `~/.claude` on Claude Code, `~/.codex` on Codex, and
+`${PI_CODING_AGENT_DIR:-~/.pi/agent}` on pi. Credentials may also live in the harness-neutral
+`~/.config/hands-free/.env`; environment variables win over either file.
 
 ## Voice discipline
 
@@ -52,5 +54,6 @@ Speech-to-text is lossy, so the call earns its own etiquette:
 ## Setup
 
 If the script or credentials are missing (exit 2, or the file isn't there), follow
-[references/setup.md](references/setup.md) — install is `npx @parcha/hands-free install`,
-then the user fills `<harness home>/hands-free/.env`.
+[references/setup.md](references/setup.md). The user may install through the harness's native
+package flow or `npx @parcha/hands-free install --harness=<claude-code|codex|pi>`, then fill
+either `<harness home>/hands-free/.env` or `~/.config/hands-free/.env`.

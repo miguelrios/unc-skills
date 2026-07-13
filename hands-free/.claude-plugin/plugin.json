@@ -1,7 +1,7 @@
 {
   "name": "hands-free",
-  "version": "0.2.0",
-  "description": "Route AI coding-assistant approval and input prompts to a phone call through Vapi. Works with Claude Code and Codex.",
+  "version": "0.3.0",
+  "description": "Route AI coding-assistant questions and approvals to a phone call through Vapi. Works with Claude Code, Codex, and pi.",
   "author": {
     "name": "Miguel Rios",
     "url": "https://github.com/miguelrios"

@@ -152,9 +152,10 @@ third model family for adversarial review), plus mirrors of the Claude/GPT catal
 type = "subagent"
 ```
 
-Executors on this provider are dispatched with the Agent tool inside the orchestrating
-session — no API keys, no codex. `parable.py run` refuses them by design; the brain owns
-subagent dispatch directly.
+Executors on this provider are dispatched with the orchestrating harness's native agent-spawn
+tool — no API keys and no CLI subprocess. `parable.py run` refuses them by design; the brain
+owns subagent dispatch directly. If the current harness has no native agent-spawn tool, this
+provider is unavailable.
 
 ## Reading subscription headroom (parable-usage.sh)
 
