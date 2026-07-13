@@ -122,6 +122,60 @@ def main() -> None:
             assert "quartz" not in json.dumps(diagnostics).lower()
             assert request(base, "GET", "/v1/receipts/resolve?" + urllib.parse.urlencode({"receipt": first_hit["receipt"]}))[0] == 200
 
+            # Exact identifiers receive the deadline before generic natural-language
+            # phrases, and every hit exposes a content-free evidence vector.
+            exact_marker = "cafebabe"
+            exact_origin = make_envelope(
+                "session-exact:turn-1",
+                {"surface": "tool_output", "text": f"sandbox sweep deleted sample {exact_marker}"},
+                parent="session-exact",
+            )
+            generic_decoys = [
+                make_envelope(
+                    f"session-generic-{index}:turn-1",
+                    {"surface": "user", "text": "where did the generic sandbox sweep happen"},
+                    parent=f"session-generic-{index}",
+                )
+                for index in range(20)
+            ]
+            for rank_fixture in [exact_origin, *generic_decoys]:
+                rank_fixture["provenance"]["cwd"] = "/workspace/rank-evidence"
+                rank_fixture["provenance"]["branch"] = "test/rank-evidence"
+            assert request(base, "POST", "/v1/ingest/batches", {"events": [exact_origin, *generic_decoys]}, "batch-rank-exact")[0] == 201
+            exact_search = store.search(f"where did the sandbox sweep delete sample {exact_marker}", {}, 5)
+            assert exact_search["results"][0]["session_native_id"] == "session-exact", exact_search
+            assert exact_search["results"][0]["evidence"]["evidence_class"] == "identifier"
+            assert "phrase" not in [leg["leg"] for leg in exact_search["diagnostics"]["legs"]]
+
+            # A compound phrase in its originating command outranks both denser echoed
+            # output and a broad extracted error entity.
+            phrase_origin = make_envelope(
+                "session-phrase-origin:turn-1",
+                {"surface": "tool_input", "text": "patch httpx ConnectTimeout transient dispatch error handling"},
+                parent="session-phrase-origin",
+                occurred="2026-01-01T00:00:00Z",
+            )
+            phrase_echo = make_envelope(
+                "session-phrase-echo:turn-1",
+                {"surface": "tool_output", "text": " ".join(["ConnectTimeout transient dispatch error"] * 12)},
+                parent="session-phrase-echo",
+            )
+            error_entity_decoy = make_envelope(
+                "session-error-entity:turn-1",
+                {"surface": "tool_input", "text": "ConnectTimeout"},
+                parent="session-error-entity",
+            )
+            for rank_fixture in [phrase_origin, phrase_echo, error_entity_decoy]:
+                rank_fixture["provenance"]["cwd"] = "/workspace/rank-evidence"
+                rank_fixture["provenance"]["branch"] = "test/rank-evidence"
+            assert request(base, "POST", "/v1/ingest/batches", {
+                "events": [phrase_origin, phrase_echo, error_entity_decoy],
+            }, "batch-rank-phrase")[0] == 201
+            phrase_search = store.search("where we handled the httpx ConnectTimeout transient dispatch error", {}, 5)
+            assert phrase_search["results"][0]["session_native_id"] == "session-phrase-origin", phrase_search
+            assert phrase_search["results"][0]["evidence"]["evidence_class"] == "phrase"
+            assert phrase_search["results"][0]["evidence"]["origin_priority"] == 1
+
             bounded_started = time.monotonic()
             with store.connect() as deadline_conn:
                 try:
@@ -343,6 +397,9 @@ def main() -> None:
                     "entity_rebuild_equivalence": True,
                     "bounded_adversarial_query": True,
                     "content_free_search_diagnostics": True,
+                    "observable_evidence_composition": True,
+                    "identifier_deadline_priority": True,
+                    "compound_error_decoy_ranking": True,
                     "remote_search_receipt_resolved": True,
                     "remote_show_window": True,
                     "remote_related_context": True,

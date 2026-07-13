@@ -10,7 +10,7 @@ SERVER = Path(__file__).resolve().parents[2] / "server"
 sys.path.insert(0, str(SERVER))
 
 from recall_server.projectors import advisory_lock_key, canonical_json, partial_lexical_probes, preferred_phrase_probe, project, redact_text, validate_envelope
-from recall_server.db import entity_evidence_tier, structural_surface_weight
+from recall_server.db import evidence_rank_components, retrieval_leg_order
 
 
 def envelope(**updates):
@@ -93,14 +93,62 @@ class EnvelopeContractTest(unittest.TestCase):
             "504 gateway timeout",
         )
 
-    def test_structural_command_evidence_outranks_echoed_output(self) -> None:
-        self.assertEqual(structural_surface_weight("tool_input"), 2.0)
-        self.assertEqual(structural_surface_weight("tool_output"), 1.0)
-        self.assertEqual(structural_surface_weight("user"), 1.0)
+        self.assertEqual(
+            preferred_phrase_probe([
+                "the sqlalchemy async greenlet_spawn has not been called error",
+                "greenlet_spawn has not been called",
+                "sqlalchemy async greenlet_spawn",
+                "async greenlet_spawn has",
+            ]),
+            "greenlet_spawn has not been called",
+        )
+        self.assertEqual(
+            preferred_phrase_probe([
+                "where we handled the httpx ConnectTimeout transient dispatch error",
+                "ConnectTimeout transient dispatch error",
+                "the httpx ConnectTimeout",
+                "transient dispatch error",
+            ]),
+            "ConnectTimeout transient dispatch error",
+        )
+        self.assertEqual(
+            preferred_phrase_probe([
+                "the foreign-key violation on check_result for agent_instance_id",
+                "violation on check_result for agent_instance_id",
+                "the foreign-key violation",
+            ]),
+            "violation on check_result for agent_instance_id",
+        )
 
-    def test_error_entity_is_supporting_evidence_not_an_exact_identifier(self) -> None:
-        self.assertEqual(entity_evidence_tier(["deadbeef12345678"]), 3)
-        self.assertEqual(entity_evidence_tier([]), 2)
+    def test_identifier_plan_runs_exact_legs_before_any_phrase(self) -> None:
+        self.assertEqual(retrieval_leg_order(["api-prod-6fcdc84dd4-mmjpj"]), ("entity", "identifier"))
+        self.assertEqual(retrieval_leg_order([]), ("phrase", "entity", "partial", "all"))
+
+    def test_rank_components_keep_identifier_phrase_and_error_evidence_distinct(self) -> None:
+        identifier = evidence_rank_components(
+            legs={"entity"}, surface="tool_output", lexical_rank=1.0,
+            matched_count=1, informative_count=8, has_identifier=True,
+            recency_factor=0.5,
+        )
+        phrase_command = evidence_rank_components(
+            legs={"phrase"}, surface="tool_input", lexical_rank=0.2,
+            matched_count=4, informative_count=6, has_identifier=False,
+            recency_factor=0.5,
+        )
+        phrase_echo = evidence_rank_components(
+            legs={"phrase"}, surface="tool_output", lexical_rank=0.8,
+            matched_count=4, informative_count=6, has_identifier=False,
+            recency_factor=0.5,
+        )
+        error_entity = evidence_rank_components(
+            legs={"entity"}, surface="tool_input", lexical_rank=1.0,
+            matched_count=1, informative_count=6, has_identifier=False,
+            recency_factor=1.0,
+        )
+        self.assertEqual(identifier["evidence_class"], "identifier")
+        self.assertGreater(tuple(identifier["rank_key"]), tuple(phrase_command["rank_key"]))
+        self.assertGreater(tuple(phrase_command["rank_key"]), tuple(phrase_echo["rank_key"]))
+        self.assertGreater(tuple(phrase_echo["rank_key"]), tuple(error_entity["rank_key"]))
 
 
 if __name__ == "__main__":

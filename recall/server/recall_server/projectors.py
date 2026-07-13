@@ -104,8 +104,22 @@ def partial_lexical_probes(informative: list[str], *, has_time_filter: bool) -> 
 
 
 def preferred_phrase_probe(phrases: list[str]) -> str | None:
-    """Prefer the parser's compact error/quoted window over a filler-heavy question."""
-    return phrases[-1] if phrases else None
+    """Choose the densest structural phrase, excluding the full-question fallback."""
+    if not phrases:
+        return None
+    candidates = phrases[1:] or phrases
+
+    def score(value: str) -> tuple[int, int, int]:
+        words = re.findall(r"[A-Za-z0-9_./#-]+", value)
+        structural = sum(
+            1
+            for word in words
+            if re.search(r"[0-9_./#-]", word)
+            or re.search(r"(?:error|exception|timeout|violation|failed)$", word, re.I)
+        )
+        return structural, len(words), -len(value)
+
+    return max(candidates, key=score)
 
 
 def project(envelope: dict, revision: int) -> tuple[list[dict], dict]:

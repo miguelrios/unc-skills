@@ -345,6 +345,12 @@ class RemoteHandler(BaseHTTPRequestHandler):
                 "matched_terms": ["deadbeef"],
                 "legs": ["exact"],
                 "tier": 2,
+                "evidence": {
+                    "evidence_class": "identifier", "class_priority": 4,
+                    "origin_priority": 0, "matched_count": 1,
+                    "informative_count": 1, "coverage": 1.0,
+                    "lexical_score": 1.0, "rank_key": [4, 0, 1.0, 1.0],
+                },
                 "receipt": "recall://claude:linux/session:1?rev=1#item=0"
             }], "abstention_reason": None, "diagnostics": {
                 "deadline_ms": 300, "elapsed_ms": 12.5, "deadline_exceeded": False,
@@ -437,6 +443,12 @@ class RemoteTransportTest(unittest.TestCase):
             "path": RemoteHandler.target_path,
             "receipt": "recall://claude:linux/session:1?rev=1#item=0",
             "legs": ["exact"],
+            "evidence": {
+                "evidence_class": "identifier", "class_priority": 4,
+                "origin_priority": 0, "matched_count": 1,
+                "informative_count": 1, "coverage": 1.0,
+                "lexical_score": 1.0, "rank_key": [4, 0, 1.0, 1.0],
+            },
         }])
         self.assertNotIn("deadbeef", json.dumps(trace))
         self.assertEqual(remote_trace.stat().st_mode & 0o777, 0o600)

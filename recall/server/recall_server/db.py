@@ -27,14 +27,43 @@ class SearchDeadlineExceeded(Exception):
     pass
 
 
-def structural_surface_weight(surface: str) -> float:
-    """Prefer the command that created evidence over output that merely echoes it."""
-    return 2.0 if surface == "tool_input" else 1.0
+def retrieval_leg_order(identifiers: list[str]) -> tuple[str, ...]:
+    """Exact identifiers get the deadline before any potentially broad phrase."""
+    return ("entity", "identifier") if identifiers else ("phrase", "entity", "partial", "all")
 
 
-def entity_evidence_tier(identifiers: list[str]) -> int:
-    """Raw identifiers are exact; extracted error names only support a phrase."""
-    return 3 if identifiers else 2
+def evidence_rank_components(*, legs: set[str], surface: str, lexical_rank: float,
+                             matched_count: int, informative_count: int,
+                             has_identifier: bool, recency_factor: float) -> dict:
+    """Return an observable, content-free evidence vector and its ordering key."""
+    if "identifier" in legs or ("entity" in legs and has_identifier):
+        evidence_class, class_priority = "identifier", 4
+    elif "phrase" in legs:
+        evidence_class, class_priority = "phrase", 3
+    elif "entity" in legs:
+        evidence_class, class_priority = "error-entity", 2
+    elif legs & {"pair", "anchor"}:
+        evidence_class, class_priority = "structural", 1
+    else:
+        evidence_class, class_priority = "broad", 0
+    origin_priority = 1 if evidence_class == "phrase" and surface == "tool_input" else 0
+    surface_weight = (
+        {"user": 4.0, "assistant": 2.0, "tool_input": 1.5, "tool_output": 1.0}.get(surface, 1.0)
+        if evidence_class in {"structural", "broad"}
+        else 1.0
+    )
+    lexical_score = max(0.01, float(lexical_rank)) * surface_weight * recency_factor
+    coverage = matched_count / max(1, informative_count)
+    return {
+        "evidence_class": evidence_class,
+        "class_priority": class_priority,
+        "origin_priority": origin_priority,
+        "matched_count": matched_count,
+        "informative_count": informative_count,
+        "coverage": round(coverage, 6),
+        "lexical_score": round(lexical_score, 9),
+        "rank_key": [class_priority, origin_priority, lexical_score, coverage],
+    }
 
 
 class BrainStore:
@@ -472,41 +501,47 @@ class BrainStore:
                 })
                 raise
 
+        identifiers = sorted(
+            engine.identifier_terms(informative),
+            key=lambda value: (
+                bool(re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", value)),
+                bool(re.fullmatch(r"[0-9a-f]{8,}", value)), len(value),
+            ),
+            reverse=True,
+        )
         try:
             with self.connect() as conn:
-                phrase = preferred_phrase_probe(engine.phrase_queries(query))
-                if phrase:
-                    merge(run_leg("phrase", lambda: self._lexical_leg(
-                        conn, phrase, "phraseto_tsquery", filters, "phrase", 3,
-                        authorized_source=authorized_source, deadline_at=deadline_at,
-                    )))
-                identifiers = sorted(
-                engine.identifier_terms(informative),
-                key=lambda value: (
-                    bool(re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", value)),
-                    bool(re.fullmatch(r"[0-9a-f]{8,}", value)), len(value),
-                ),
-                reverse=True,
-            )
-                entity_values = list(identifiers)
-                for term in informative:
-                    entity_values.extend(
-                        part for part in re.split(r"[./_-]+", term)
-                        if re.search(r"(?:error|exception|timeout)$", part, re.I)
-                    )
-                if entity_values:
+                if identifiers:
                     merge(run_leg("entity", lambda: self._entity_leg(
-                        conn, entity_values, filters, authorized_source=authorized_source,
-                        deadline_at=deadline_at, tier=entity_evidence_tier(identifiers),
+                        conn, identifiers, filters, authorized_source=authorized_source,
+                        deadline_at=deadline_at, tier=3,
                     )))
-                for identifier in identifiers[:3]:
-                    exact_rows = run_leg("identifier", lambda identifier=identifier: self._lexical_leg(
-                        conn, identifier, "plainto_tsquery", filters, "identifier", 3,
-                        exact=identifier, limit=100, authorized_source=authorized_source, deadline_at=deadline_at,
-                    ))
-                    merge(exact_rows)
-                    if exact_rows:
-                        break
+                    for identifier in identifiers[:3]:
+                        exact_rows = run_leg("identifier", lambda identifier=identifier: self._lexical_leg(
+                            conn, identifier, "plainto_tsquery", filters, "identifier", 3,
+                            exact=identifier, limit=100, authorized_source=authorized_source, deadline_at=deadline_at,
+                        ))
+                        merge(exact_rows)
+                        if exact_rows:
+                            break
+                else:
+                    phrase = preferred_phrase_probe(engine.phrase_queries(query))
+                    if phrase:
+                        merge(run_leg("phrase", lambda: self._lexical_leg(
+                            conn, phrase, "phraseto_tsquery", filters, "phrase", 3,
+                            authorized_source=authorized_source, deadline_at=deadline_at,
+                        )))
+                    entity_values = [
+                        part
+                        for term in informative
+                        for part in re.split(r"[./_-]+", term)
+                        if re.search(r"(?:error|exception|timeout)$", part, re.I)
+                    ]
+                    if entity_values:
+                        merge(run_leg("entity", lambda: self._entity_leg(
+                            conn, entity_values, filters, authorized_source=authorized_source,
+                            deadline_at=deadline_at, tier=2,
+                        )))
                 if not identifiers and not any(row["tier"] >= 3 for row in candidates.values()):
                     for probe, leg, tier in partial_lexical_probes(
                         informative,
@@ -525,21 +560,23 @@ class BrainStore:
             pass
 
         now = datetime.now(timezone.utc).timestamp()
-        grouped: dict[tuple[str, str], tuple[tuple[int, float], dict]] = {}
+        grouped: dict[tuple[str, str], tuple[tuple[float, ...], dict]] = {}
         for row in candidates.values():
             matched = [term for term in informative if term.casefold() in row["text_redacted"].casefold()]
             if row["tier"] == 0 and len([term for term in matched if len(term) >= 5]) < 2:
                 continue
-            structural = bool(row["legs"] & {"phrase", "pair", "anchor", "entity", "identifier"})
-            weight = structural_surface_weight(row["surface"]) if structural else {"user": 4.0, "assistant": 2.0, "tool_input": 1.5, "tool_output": 1.0}.get(row["surface"], 1.0)
             occurred = row["occurred_at"] or row["started_at"]
             epoch = occurred.timestamp() if occurred else now
-            score = max(0.01, float(row["lexical_rank"])) * weight
-            score *= 1 / (1 + max(0, now - epoch) / 86400 / 180)
+            recency_factor = 1 / (1 + max(0, now - epoch) / 86400 / 180)
+            evidence = evidence_rank_components(
+                legs=row["legs"], surface=row["surface"], lexical_rank=float(row["lexical_rank"]),
+                matched_count=len(matched), informative_count=len(informative),
+                has_identifier=bool(identifiers), recency_factor=recency_factor,
+            )
             key = (row["source_id"], row["session_native_id"])
-            rank_key = (row["tier"], score)
+            rank_key = tuple(evidence["rank_key"])
             if key not in grouped or rank_key > grouped[key][0]:
-                grouped[key] = (rank_key, {**row, "matched_terms": matched})
+                grouped[key] = (rank_key, {**row, "matched_terms": matched, "evidence": evidence})
         ranked = sorted(grouped.values(), key=lambda value: value[0], reverse=True)[:limit]
         results = []
         for _rank, row in ranked:
@@ -554,7 +591,8 @@ class BrainStore:
                 "branch": metadata.get("branch"), "harness": metadata.get("harness"),
                 "surface": row["surface"], "text": row["text_redacted"],
                 "receipt": row["receipt"], "matched_terms": row["matched_terms"],
-                "legs": sorted(row["legs"]), "tier": row["tier"],
+                "legs": sorted(row["legs"]), "tier": row["evidence"]["class_priority"],
+                "evidence": row["evidence"],
                 "projector_version": row["projector_version"],
             })
         diagnostics = {

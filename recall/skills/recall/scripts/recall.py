@@ -118,10 +118,12 @@ def remote_execute(args) -> tuple[str, dict]:
                 f"   [{result.get('surface') or '-'}] {snippet}\n"
                 f"   WHY: terms={terms}; legs={legs}; receipt={result.get('receipt') or '-'}"
             )
-        receipt_results = [
-            {key: result.get(key) for key in ("path", "receipt", "legs")}
-            for result in results
-        ]
+        receipt_results = []
+        for result in results:
+            receipt_result = {key: result.get(key) for key in ("path", "receipt", "legs")}
+            if isinstance(result.get("evidence"), dict):
+                receipt_result["evidence"] = result["evidence"]
+            receipt_results.append(receipt_result)
         return (
             "\n".join(lines) + ("\n" if lines else ""),
             {"remote_results": receipt_results, "remote_diagnostics": response.get("diagnostics")},
