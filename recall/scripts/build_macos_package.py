@@ -145,7 +145,7 @@ def runtime_payloads(archive_data: bytes, lock: dict[str, Any]) -> dict[str, Pay
     return payloads
 
 
-def application_payloads(source_root: Path) -> dict[str, Payload]:
+def application_payloads(source_root: Path, runtime_lock_data: bytes) -> dict[str, Payload]:
     selected: dict[str, Payload] = {}
     mappings = {
         source_root / "client" / "mac.py": "lib/client/mac.py",
@@ -156,13 +156,13 @@ def application_payloads(source_root: Path) -> dict[str, Payload]:
         source_root / "client" / "macos" / "recall-brain": "bin/recall-brain",
         source_root / "client" / "macos" / "install.sh": "install.sh",
         source_root / "client" / "macos" / "uninstall.sh": "uninstall.sh",
-        source_root / "client" / "macos" / "RUNTIME_LOCK.json": "RUNTIME_LOCK.json",
     }
     for source, destination in mappings.items():
         selected[destination] = Payload(
             data=source.read_bytes(),
             executable=destination in {"bin/recall-brain", "install.sh", "uninstall.sh"},
         )
+    selected["RUNTIME_LOCK.json"] = Payload(data=runtime_lock_data)
     return selected
 
 
@@ -230,7 +230,7 @@ def build(source_root: Path, output: Path, runtime_archive: Path, runtime_lock: 
     lock = read_lock(runtime_lock)
     archive_data = runtime_archive.read_bytes()
     verify_artifact(archive_data, lock)
-    payloads = application_payloads(source_root)
+    payloads = application_payloads(source_root, runtime_lock.read_bytes())
     payloads.update(runtime_payloads(archive_data, lock))
     payloads["MANIFEST.json"] = Payload(data=manifest(payloads, lock))
     package = render_package(payloads)
