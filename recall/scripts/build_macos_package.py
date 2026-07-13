@@ -20,6 +20,15 @@ EPOCH = 0
 EXPECTED_TARGET = "aarch64-apple-darwin"
 MACHO_64_LITTLE_ENDIAN = b"\xcf\xfa\xed\xfe"
 CPU_TYPE_ARM64_LITTLE_ENDIAN = b"\x0c\x00\x00\x01"
+EXPECTED_CAPABILITIES = {
+    "implementation": "CPython",
+    "language": {"zip_strict": True},
+    "machine": "arm64",
+    "stdlib_imports": ["ctypes", "ssl", "sqlite3"],
+    "system": "Darwin",
+    "sqlite": {"fts5": True},
+    "tls": {"default_ca_certificates": "nonempty", "default_verify_path": "existing"},
+}
 
 
 @dataclass(frozen=True)
@@ -54,6 +63,8 @@ def read_lock(path: Path) -> dict[str, Any]:
         raise ValueError("runtime artifact SHA-256 must be lowercase hexadecimal")
     if lock.get("archive_root") != "python":
         raise ValueError("runtime archive_root must be python")
+    if lock.get("capabilities") != EXPECTED_CAPABILITIES:
+        raise ValueError("runtime capability contract is missing or unsupported")
     if not lock.get("license_paths") or not lock.get("required_paths"):
         raise ValueError("runtime lock must name license and required paths")
     return lock

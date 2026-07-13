@@ -51,6 +51,18 @@ class MacPackageTest(unittest.TestCase):
             "version": "3.12.13",
             "target": "aarch64-apple-darwin",
             "archive_root": "python",
+            "capabilities": {
+                "implementation": "CPython",
+                "language": {"zip_strict": True},
+                "machine": "arm64",
+                "stdlib_imports": ["ctypes", "ssl", "sqlite3"],
+                "system": "Darwin",
+                "sqlite": {"fts5": True},
+                "tls": {
+                    "default_ca_certificates": "nonempty",
+                    "default_verify_path": "existing",
+                },
+            },
             "artifact": {
                 "url": "https://example.invalid/runtime.tar.gz",
                 "bytes": self.runtime.stat().st_size,

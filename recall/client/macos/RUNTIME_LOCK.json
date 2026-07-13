@@ -1,5 +1,25 @@
 {
   "archive_root": "python",
+  "capabilities": {
+    "implementation": "CPython",
+    "language": {
+      "zip_strict": true
+    },
+    "machine": "arm64",
+    "sqlite": {
+      "fts5": true
+    },
+    "stdlib_imports": [
+      "ctypes",
+      "ssl",
+      "sqlite3"
+    ],
+    "system": "Darwin",
+    "tls": {
+      "default_ca_certificates": "nonempty",
+      "default_verify_path": "existing"
+    }
+  },
   "artifact": {
     "bytes": 25102827,
     "sha256": "5a30271f8d345a5b02b0c9e4e31e0f1e1455a8e4a04fba95cd9762472abc3b17",

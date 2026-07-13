@@ -48,26 +48,37 @@ cp -R "$SOURCE/lib/client" "$PREFIX/lib/client"
 cp -R "$SOURCE/lib/collector" "$PREFIX/lib/collector"
 cp -R "$SOURCE/runtime" "$PREFIX/runtime"
 cp "$SOURCE/bin/recall-brain" "$PREFIX/bin/recall-brain"
+cp "$SOURCE/RUNTIME_LOCK.json" "$PREFIX/RUNTIME_LOCK.json"
 chmod 755 "$PREFIX/bin/recall-brain"
 chmod 700 "$PREFIX/state"
 RUNTIME="$PREFIX/runtime/bin/python3"
 [ -x "$RUNTIME" ] || { echo "bundled runtime is not executable" >&2; exit 1; }
-"$RUNTIME" - <<'PY'
+"$RUNTIME" - "$PREFIX/RUNTIME_LOCK.json" <<'PY'
 import ctypes
+import json
+import os
 import platform
 import sqlite3
 import ssl
 import sys
 
-assert sys.version.split()[0] == "3.12.13", sys.version
-assert platform.system() == "Darwin", platform.system()
-assert platform.machine() == "arm64", platform.machine()
-assert list(zip([1], [2], strict=True)) == [(1, 2)]
+with open(sys.argv[1], encoding="utf-8") as source:
+    lock = json.load(source)
+capabilities = lock["capabilities"]
+assert sys.version.split()[0] == lock["version"], sys.version
+assert platform.python_implementation() == capabilities["implementation"]
+assert platform.system() == capabilities["system"], platform.system()
+assert platform.machine() == capabilities["machine"], platform.machine()
+if capabilities["language"]["zip_strict"]:
+    assert list(zip([1], [2], strict=True)) == [(1, 2)]
 ctypes.CDLL(None)
-ssl.create_default_context()
+verify_paths = ssl.get_default_verify_paths()
+assert any(path and os.path.exists(path) for path in (verify_paths.cafile, verify_paths.capath))
+assert ssl.create_default_context().get_ca_certs()
 connection = sqlite3.connect(":memory:")
 try:
-    connection.execute("CREATE VIRTUAL TABLE exact_runtime_fts USING fts5(body)")
+    if capabilities["sqlite"]["fts5"]:
+        connection.execute("CREATE VIRTUAL TABLE exact_runtime_fts USING fts5(body)")
 finally:
     connection.close()
 PY
