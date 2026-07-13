@@ -25,7 +25,10 @@ spec.loader.exec_module(engine)
 class RecallEngineTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
+        # macOS exposes /var through the /private/var filesystem alias. The
+        # engine intentionally stores canonical paths, so expected paths must
+        # use that same cross-platform contract.
+        self.root = Path(self.tmp.name).resolve()
         self.claude = self.root / "claude"
         self.codex = self.root / "codex"
         self.claude.mkdir(); self.codex.mkdir()
@@ -381,7 +384,7 @@ class RemoteHandler(BaseHTTPRequestHandler):
 class RemoteTransportTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         self.claude = self.root / "claude"; self.claude.mkdir()
         self.codex = self.root / "codex"; self.codex.mkdir()
         self.db = self.root / "state/index.db"
