@@ -201,8 +201,8 @@ class CredentialBoundaryTest(unittest.TestCase):
             "HOME": str(self.home),
             "PATH": os.environ.get("PATH", ""),
         }, clear=False), mock.patch.object(self.runtime, "load_config", return_value=config), mock.patch.object(
-            self.runtime.subprocess, "Popen", Process
-        ):
+            self.runtime, "_resolve_executable", return_value="/usr/bin/codex"
+        ), mock.patch.object(self.runtime.subprocess, "Popen", Process):
             output = self.runtime.continue_native(self.bridge, "private operator prompt")
 
         self.assertEqual(output, "native answer")
