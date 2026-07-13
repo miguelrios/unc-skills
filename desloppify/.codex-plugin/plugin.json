@@ -1,0 +1,21 @@
+{
+  "name": "desloppify",
+  "version": "0.1.0",
+  "description": "Turn whole-codebase slop into evidence-backed cleanup with the official Desloppify engine.",
+  "author": {"name": "Parcha Labs", "url": "https://parcha.com"},
+  "homepage": "https://github.com/miguelrios/unc-skills/tree/main/desloppify",
+  "repository": "https://github.com/miguelrios/unc-skills/tree/main/desloppify",
+  "license": "MIT",
+  "keywords": ["codex", "claude-code", "code-quality", "technical-debt", "agent-skills"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Desloppify",
+    "shortDescription": "Evidence-backed whole-codebase cleanup",
+    "longDescription": "Use Peter O'Malley's official Desloppify engine through one portable workflow that protects behavior, reviews structure blind, fixes root causes, and resists score gaming.",
+    "developerName": "Parcha Labs",
+    "category": "Developer Tools",
+    "capabilities": ["Read", "Write"],
+    "websiteURL": "https://github.com/miguelrios/unc-skills/tree/main/desloppify",
+    "defaultPrompt": ["Use Desloppify to diagnose and systematically improve this codebase without gaming the score."]
+  }
+}

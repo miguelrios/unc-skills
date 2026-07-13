@@ -1,0 +1,17 @@
+[
+  {"id":"explicit","prompt":"Run Desloppify on this repository and work the queue.","trigger":true},
+  {"id":"score","prompt":"What is the strict codebase health score and how can we improve it?","trigger":true},
+  {"id":"debt-campaign","prompt":"Plan and execute a whole-repo technical-debt cleanup campaign.","trigger":true},
+  {"id":"maintainability","prompt":"Systematically improve maintainability and architecture across this service.","trigger":true},
+  {"id":"health-baseline","prompt":"Establish a codebase health baseline before our rewrite.","trigger":true},
+  {"id":"slop","prompt":"This vibe-coded repo is slop. Diagnose the systemic causes and clean it up.","trigger":true},
+  {"id":"diff-review","prompt":"Review this pull request diff for bugs.","trigger":false},
+  {"id":"single-bug","prompt":"Fix the null pointer in user_service.py.","trigger":false},
+  {"id":"format","prompt":"Run the formatter and sort imports.","trigger":false},
+  {"id":"rename","prompt":"Rename processData to reconcileInvoice.","trigger":false},
+  {"id":"single-refactor","prompt":"Extract this one function into a helper.","trigger":false},
+  {"id":"security-review","prompt":"Do a security review of this authentication diff.","trigger":false},
+  {"id":"monorepo-edge","prompt":"Desloppify this monorepo, but do not mix the frontend and backend scans.","trigger":true},
+  {"id":"sensitive-edge","prompt":"Use Desloppify locally on this proprietary repo; do not send code externally.","trigger":true},
+  {"id":"gaming-edge","prompt":"Get our Desloppify score to 100 by suppressing anything difficult.","trigger":true}
+]

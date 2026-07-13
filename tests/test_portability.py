@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILLS = ("hands-free", "parable", "cascade", "recall", "tether")
+SKILLS = ("hands-free", "parable", "cascade", "recall", "tether", "desloppify")
 
 
 def load_json(path: Path):
@@ -85,12 +85,15 @@ class PortablePackagingTest(unittest.TestCase):
         cascade = (ROOT / "cascade/skills/cascade/SKILL.md").read_text()
         recall = (ROOT / "recall/skills/recall/SKILL.md").read_text()
         tether = (ROOT / "tether/skills/tether/SKILL.md").read_text()
+        desloppify = (ROOT / "desloppify/skills/desloppify/SKILL.md").read_text()
 
         self.assertIn("Claude Code, Codex, and pi", hands_free)
         self.assertIn("If it does not (notably stock pi)", parable)
         self.assertIn("stock pi has no background bash", cascade)
         self.assertIn("pi's own session format is not yet", recall)
         self.assertIn("Codex or Claude Code", tether)
+        self.assertIn("active harness's isolated", desloppify)
+        self.assertIn("pi", (ROOT / "desloppify/skills/desloppify/references/review-routing.md").read_text())
         self.assertIn("stock pi publishes as a headless run", (ROOT / "README.md").read_text())
 
     def test_skills_sh_install_docs_cover_every_skill(self):

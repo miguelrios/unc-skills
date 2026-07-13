@@ -14,7 +14,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILLS = ("hands-free", "parable", "cascade", "recall", "tether")
+SKILLS = ("hands-free", "parable", "cascade", "recall", "tether", "desloppify")
 
 
 def digest(path: Path) -> str:
@@ -101,7 +101,7 @@ def main() -> int:
                 raise RuntimeError(f"Codex discovery/payload mismatch for {name}")
             matrix[name]["codex"] = {"install": "PASS", "discovery": "PASS", "smoke": "PASS"}
 
-        # pi: the repository is one native Git/local package exposing four explicit skill roots.
+        # pi: the repository is one native Git/local package exposing every explicit skill root.
         pi_home = sandbox / "pi-user"
         pi_home.mkdir()
         # This machine's `pi` command is a shell wrapper that resolves its Node 22 binary from
@@ -152,6 +152,12 @@ def main() -> int:
         run(
             "smoke-tether",
             ["python3", "-m", "unittest", "discover", "-s", "tether/tests", "-v"],
+            smoke_env,
+            output,
+        )
+        run(
+            "smoke-desloppify",
+            ["python3", "-m", "unittest", "discover", "-s", "desloppify/tests", "-v"],
             smoke_env,
             output,
         )

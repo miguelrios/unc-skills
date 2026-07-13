@@ -37,6 +37,12 @@
       "source": "./tether",
       "version": "0.1.0",
       "description": "Keep Slack threads attached to their Codex, Claude Code, Zellij, Hermes, or headless agents without exposing Slack credentials."
+    },
+    {
+      "name": "desloppify",
+      "source": "./desloppify",
+      "version": "0.1.0",
+      "description": "Portable evidence-backed codebase cleanup with Peter O'Malley's official Desloppify engine."
     }
   ]
 }

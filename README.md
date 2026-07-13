@@ -11,6 +11,7 @@ Miguel's collection of portable Agent Skills for Claude Code, Codex, and pi.
 | [`cascade`](cascade/) | Runs large projects as bounded, evidence-gated development loops. | Falls back to a file-backed task graph when the harness has no task or wake primitives. |
 | [`recall`](recall/) | Indexed local search over prior Claude Code and Codex sessions. | Runs from pi, but does not index pi's own transcripts yet. |
 | [`tether`](tether/) | Keeps Slack threads attached to the exact agents that created them. | Codex and Claude Code resume natively; stock pi publishes as a headless run. End-to-end routing also installs an external Hermes plugin/runtime. |
+| [`desloppify`](desloppify/) | Turns whole-codebase slop into evidence-backed cleanup with Peter O'Malley's official engine. | One canonical workflow selects honest native or prepared-packet review routes per harness. |
 
 The skill payloads are canonical `skills/<name>/SKILL.md` directories. Harness-specific
 manifests package those same files; there are no Claude/Codex/pi forks to drift apart.
@@ -56,7 +57,7 @@ See the [Parable README](parable/) for the full story and the
 
 ## Install with skills.sh
 
-Browse all five skills at [skills.sh/miguelrios/unc-skills](https://skills.sh/miguelrios/unc-skills),
+Browse all six skills at [skills.sh/miguelrios/unc-skills](https://skills.sh/miguelrios/unc-skills),
 or install interactively:
 
 ```bash
@@ -71,6 +72,7 @@ npx skills add miguelrios/unc-skills --skill parable
 npx skills add miguelrios/unc-skills --skill cascade
 npx skills add miguelrios/unc-skills --skill recall
 npx skills add miguelrios/unc-skills --skill tether
+npx skills add miguelrios/unc-skills --skill desloppify
 ```
 
 Add `--global` for a user-level install or `--agent claude-code`, `--agent codex`, or
@@ -93,6 +95,7 @@ claude plugin install parable@unc-skills
 claude plugin install cascade@unc-skills
 claude plugin install recall@unc-skills
 claude plugin install tether@unc-skills
+claude plugin install desloppify@unc-skills
 ```
 
 Install only the skills you want. Start a new session after installation.
@@ -106,6 +109,7 @@ codex plugin add parable@unc-skills
 codex plugin add cascade@unc-skills
 codex plugin add recall@unc-skills
 codex plugin add tether@unc-skills
+codex plugin add desloppify@unc-skills
 ```
 
 Codex uses the native `.agents/plugins/marketplace.json` and package
@@ -117,13 +121,13 @@ Codex uses the native `.agents/plugins/marketplace.json` and package
 pi install git:github.com/miguelrios/unc-skills
 ```
 
-The repository is one pi package that exposes all five skills. In pi, invoke one explicitly
+The repository is one pi package that exposes all six skills. In pi, invoke one explicitly
 with `/skill:hands-free`, `/skill:parable`, `/skill:cascade`, `/skill:recall`, or
-`/skill:tether`.
+`/skill:tether`, or `/skill:desloppify`.
 
 ## Compatibility evidence
 
-The local gate runs all five skills across the three harnesses for native installation,
+The local gate runs all six skills across the three harnesses for native installation,
 discovery, and credential-free smoke checks. The original four-skill portability campaign is
 archived in its [matrix](docs/evidence/L4-clean-home-matrix/matrix.md),
 [research](docs/evidence/L0-portability-baseline/research.md), and
@@ -133,6 +137,6 @@ Run the local gate with:
 
 ```bash
 npm test
-for package in hands-free parable cascade recall tether; do (cd "$package" && npm test); done
+for package in hands-free parable cascade recall tether desloppify; do (cd "$package" && npm test); done
 python3 scripts/prove_portability.py --output /tmp/unc-skills-portability
 ```

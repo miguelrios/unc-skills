@@ -21,7 +21,8 @@
       "./parable/skills",
       "./cascade/skills",
       "./recall/skills",
-      "./tether/skills"
+      "./tether/skills",
+      "./desloppify/skills"
     ]
   },
   "license": "MIT"
