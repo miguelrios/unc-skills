@@ -381,9 +381,6 @@ class BrainStore:
             for identifier in engine.identifier_terms(informative)[:3]:
                 merge(self._lexical_leg(conn, identifier, "plainto_tsquery", filters, "identifier", 2, exact=identifier, authorized_source=authorized_source))
             merge(self._lexical_leg(conn, " ".join(informative), "plainto_tsquery", filters, "all", 1, authorized_source=authorized_source))
-            if len(candidates) < 3 * limit:
-                web_query = " OR ".join('"' + term + '"' for term in informative)
-                merge(self._lexical_leg(conn, web_query, "websearch_to_tsquery", filters, "any", 0, authorized_source=authorized_source))
 
         now = datetime.now(timezone.utc).timestamp()
         grouped: dict[tuple[str, str], tuple[tuple[int, float], dict]] = {}

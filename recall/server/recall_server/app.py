@@ -41,8 +41,13 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.end_headers()
+            self.wfile.write(data)
+        except BrokenPipeError:
+            # The database work may have completed after a bounded client left.
+            # Never turn that ordinary transport event into a content-bearing traceback.
+            return
 
     def authenticate(self, scope: str) -> dict | None:
         if os.environ.get("RECALL_AUTH_REQUIRED", "0") != "1":
