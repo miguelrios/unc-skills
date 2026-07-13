@@ -85,6 +85,18 @@ class MacPackageTest(unittest.TestCase):
         self.assertEqual(lock["artifact"]["bytes"], 25102827)
         self.assertEqual(lock["artifact"]["sha256"], "5a30271f8d345a5b02b0c9e4e31e0f1e1455a8e4a04fba95cd9762472abc3b17")
         self.assertTrue(lock["artifact"]["url"].startswith("https://github.com/astral-sh/python-build-standalone/releases/download/20260510/"))
+        self.assertEqual(lock["capabilities"], {
+            "implementation": "CPython",
+            "language": {"zip_strict": True},
+            "machine": "arm64",
+            "stdlib_imports": ["ctypes", "ssl", "sqlite3"],
+            "system": "Darwin",
+            "sqlite": {"fts5": True},
+            "tls": {
+                "default_ca_certificates": "nonempty",
+                "default_verify_path": "existing",
+            },
+        })
 
     def test_tampered_runtime_is_rejected_before_package_write(self) -> None:
         self.runtime.write_bytes(self.runtime.read_bytes() + b"tampered")
@@ -132,6 +144,9 @@ class MacPackageTest(unittest.TestCase):
         installer = (package / "install.sh").read_text()
         self.assertIn('$PREFIX/runtime/bin/python3', installer)
         self.assertNotRegex(installer, r"(?m)(?:^|[ ;])python3(?:[ ;]|$)")
+        self.assertIn('RUNTIME_LOCK.json', installer)
+        self.assertIn('ssl.get_default_verify_paths()', installer)
+        self.assertIn('get_ca_certs()', installer)
 
         home = self.root / "home"
         home.mkdir()
