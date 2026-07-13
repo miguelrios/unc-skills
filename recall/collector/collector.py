@@ -305,6 +305,9 @@ class Collector:
     def pending_envelopes(self) -> list[dict]:
         return [json.loads(row["envelope_json"]) for row in self.db.execute("SELECT envelope_json FROM outbox WHERE state='pending' ORDER BY id")]
 
+    def _after_remote_commit(self, acknowledgement: dict[str, Any]) -> None:
+        """Fault-injection boundary after a durable remote commit and before local ACK."""
+
     def recover_dead_payloads(self) -> dict:
         result = {"recovered": 0, "unrecoverable": 0}
         rows = list(self.db.execute("SELECT * FROM outbox WHERE state='dead' ORDER BY id"))
@@ -451,6 +454,7 @@ class Collector:
             if len(receipts) != len(rows):
                 result["errors"] += 1
                 break
+            self._after_remote_commit(acknowledgement)
             acked_at = time.time()
             with self.db:
                 acknowledgements = list(zip(rows, receipts, strict=True))

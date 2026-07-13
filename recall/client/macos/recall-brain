@@ -2,4 +2,4 @@
 set -eu
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 export PYTHONPATH="$HERE/lib${PYTHONPATH:+:$PYTHONPATH}"
-exec python3 -m client.cli "$@"
+exec "$HERE/runtime/bin/python3" -m client.cli "$@"

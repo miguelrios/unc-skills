@@ -43,12 +43,34 @@ done
 
 SOURCE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 mkdir -p "$PREFIX" "$PREFIX/bin" "$PREFIX/lib" "$PREFIX/state" "$LAUNCH_AGENTS"
-rm -rf "$PREFIX/lib/client" "$PREFIX/lib/collector"
+rm -rf "$PREFIX/lib/client" "$PREFIX/lib/collector" "$PREFIX/runtime"
 cp -R "$SOURCE/lib/client" "$PREFIX/lib/client"
 cp -R "$SOURCE/lib/collector" "$PREFIX/lib/collector"
+cp -R "$SOURCE/runtime" "$PREFIX/runtime"
 cp "$SOURCE/bin/recall-brain" "$PREFIX/bin/recall-brain"
 chmod 755 "$PREFIX/bin/recall-brain"
 chmod 700 "$PREFIX/state"
+RUNTIME="$PREFIX/runtime/bin/python3"
+[ -x "$RUNTIME" ] || { echo "bundled runtime is not executable" >&2; exit 1; }
+"$RUNTIME" - <<'PY'
+import ctypes
+import platform
+import sqlite3
+import ssl
+import sys
+
+assert sys.version.split()[0] == "3.12.13", sys.version
+assert platform.system() == "Darwin", platform.system()
+assert platform.machine() == "arm64", platform.machine()
+assert list(zip([1], [2], strict=True)) == [(1, 2)]
+ctypes.CDLL(None)
+ssl.create_default_context()
+connection = sqlite3.connect(":memory:")
+try:
+    connection.execute("CREATE VIRTUAL TABLE exact_runtime_fts USING fts5(body)")
+finally:
+    connection.close()
+PY
 
 write_plist() {
   HARNESS=$1
@@ -59,21 +81,24 @@ write_plist() {
   if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
     launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
   fi
-  python3 - "$PLIST" "$LABEL" "$PREFIX/bin/recall-brain" "$ENDPOINT" "$SOURCE_ID" "$HARNESS" "$ROOT" "$PREFIX/state/$HARNESS.db" "$KEYCHAIN_SERVICE" "$VISIBILITY" <<'PY'
+  "$RUNTIME" - "$PLIST" "$LABEL" "$RUNTIME" "$PREFIX/lib" "$ENDPOINT" "$SOURCE_ID" "$HARNESS" "$ROOT" "$PREFIX/state/$HARNESS.db" "$KEYCHAIN_SERVICE" "$VISIBILITY" <<'PY'
 import plistlib
 import sys
 
-path, label, program, endpoint, source_id, harness, root, spool, service, visibility = sys.argv[1:]
+path, label, program, pythonpath, endpoint, source_id, harness, root, spool, service, visibility = sys.argv[1:]
 value = {
     "Label": label,
     "ProgramArguments": [
-        program, "collect", "--endpoint", endpoint,
+        program, "-m", "client.cli", "collect", "--endpoint", endpoint,
         "--source-id", source_id, "--principal-id", "owner",
         "--visibility", visibility, "--harness", harness,
         "--root", root, "--spool", spool,
         "--keychain-service", service, "--keychain-account", source_id,
     ],
-    "EnvironmentVariables": {"RECALL_KEYCHAIN_REFERENCE": "Keychain service/account only"},
+    "EnvironmentVariables": {
+        "PYTHONPATH": pythonpath,
+        "RECALL_KEYCHAIN_REFERENCE": "Keychain service/account only",
+    },
     "RunAtLoad": True,
     "StartInterval": 30,
     "ProcessType": "Background",
