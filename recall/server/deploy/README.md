@@ -33,6 +33,21 @@ The pilot uses a five-minute logical-backup timer for a bounded RPO. Before mult
 C10 production cutover, replace it with continuous WAL archival plus daily base backups; the
 same blank-database restore/fingerprint contract remains the gate.
 
+Searches have a 300ms database-work budget by default. Override it only within the validated
+10–2000ms range with `RECALL_SEARCH_DEADLINE_MS`; the response and service log expose only
+content-free per-leg timings, result counts, and the deadline outcome.
+
+After applying schema 005 to an existing brain, backfill the rebuildable entity projection
+online. The command commits bounded batches, holds a dedicated advisory lock, resumes from its
+watermark after interruption, and does not rewrite canonical events or items:
+
+```bash
+RECALL_DATABASE_URL=... python -m recall_server.cli backfill-entities --batch-size 5000
+```
+
+Do not substitute the full `rebuild` command for this live migration; rebuild intentionally
+truncates all derived projections inside one transaction and is reserved for offline recovery.
+
 Linux history collectors use `recall-collector@.service` with separate `claude` and `codex`
 environment/token files. Issue one source-scoped credential per unit, install the two example
 environment files with mode 0600 after replacing every value, then enable the instances:

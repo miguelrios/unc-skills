@@ -13,6 +13,25 @@ the winning session. All commands go through one CLI:
 python3 scripts/recall.py <command>       # relative to this skill directory
 ```
 
+## Local, central, and shadow modes
+
+With no central configuration, every command behaves exactly as the local engine described below.
+Setting `RECALL_URL` selects the tailnet central service for read commands (`search`, `show`,
+`related`, and `doctor`). The same flags and output shapes remain valid, and every displayed remote
+hit includes its resolvable receipt on the `WHY` line.
+
+Use `RECALL_MODE=local|remote|shadow` when the mode must be explicit:
+
+- `local` is the config-only rollback switch and never calls the central service.
+- `remote` fails closed on transport/auth errors; it never silently returns stale local results.
+- `shadow` returns the local result while recording a receipt-level local/central comparison under
+  `~/.recall/shadow.jsonl` (override with `RECALL_SHADOW_LOG`).
+
+Interactive tailnet access uses the Tailscale identity boundary. If a scoped bearer is required,
+set `RECALL_TOKEN_FILE` to a mode-`0600` JSON file containing `{"token":"..."}`. Never put a token
+in `RECALL_URL`, shell history, a repository, or evidence. `index` remains local in every mode, so
+switching read modes cannot rewrite either the local SQLite index or central canonical events.
+
 ## First: pick the outcome
 
 1. **Find / verify** — answer "did we…", "which session…", "how did we…".
