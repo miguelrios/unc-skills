@@ -13,6 +13,7 @@ from client.mac import (
     dry_run_manifest,
     load_file_token,
     load_keychain_token,
+    store_keychain_token,
 )
 from collector.collector import Collector
 
@@ -45,6 +46,10 @@ def parser() -> argparse.ArgumentParser:
     dry.add_argument("--visibility", choices=("private", "shared"), required=True)
     dry.add_argument("--claude-root")
     dry.add_argument("--codex-root")
+
+    keychain = commands.add_parser("keychain-store")
+    keychain.add_argument("--service", required=True)
+    keychain.add_argument("--account", required=True)
 
     collect = commands.add_parser("collect")
     _connection(collect)
@@ -89,6 +94,10 @@ def main() -> None:
         if args.codex_root:
             selections.append({"harness": "codex", "root": args.codex_root})
         print(json.dumps(dry_run_manifest(selections=selections, visibility=args.visibility), sort_keys=True))
+        return
+    if args.command == "keychain-store":
+        store_keychain_token(args.service, args.account, sys.stdin.read().rstrip("\r\n"))
+        print(json.dumps({"status": "stored", "service": args.service, "account": args.account}, sort_keys=True))
         return
 
     if args.keychain_service and not args.keychain_account:

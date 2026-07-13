@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import platform
 import re
 import ssl
 import stat
@@ -157,6 +158,50 @@ def load_keychain_token(service: str, account: str) -> str:
     if not value:
         raise ValueError("Keychain item is empty")
     return value
+
+
+def store_keychain_token(service: str, account: str, token: str) -> None:
+    """Add or update a generic password without placing secret bytes in argv."""
+    if platform.system() != "Darwin":
+        raise RuntimeError("Keychain storage is available only on macOS")
+    if not service or not account or not token:
+        raise ValueError("Keychain service, account, and stdin token are required")
+    import ctypes
+    import ctypes.util
+
+    framework = ctypes.util.find_library("Security")
+    if not framework:
+        raise RuntimeError("macOS Security framework is unavailable")
+    security = ctypes.CDLL(framework)
+    security.SecKeychainFindGenericPassword.restype = ctypes.c_int32
+    security.SecKeychainItemModifyAttributesAndData.restype = ctypes.c_int32
+    security.SecKeychainAddGenericPassword.restype = ctypes.c_int32
+    service_bytes = service.encode()
+    account_bytes = account.encode()
+    token_bytes = token.encode()
+    item = ctypes.c_void_p()
+    status = security.SecKeychainFindGenericPassword(
+        None,
+        len(service_bytes), ctypes.c_char_p(service_bytes),
+        len(account_bytes), ctypes.c_char_p(account_bytes),
+        None, None, ctypes.byref(item),
+    )
+    if status == 0:
+        status = security.SecKeychainItemModifyAttributesAndData(
+            item, None, len(token_bytes), ctypes.c_char_p(token_bytes)
+        )
+        core = ctypes.CDLL(ctypes.util.find_library("CoreFoundation"))
+        core.CFRelease(item)
+    elif status == -25300:  # errSecItemNotFound
+        status = security.SecKeychainAddGenericPassword(
+            None,
+            len(service_bytes), ctypes.c_char_p(service_bytes),
+            len(account_bytes), ctypes.c_char_p(account_bytes),
+            len(token_bytes), ctypes.c_char_p(token_bytes),
+            None,
+        )
+    if status != 0:
+        raise RuntimeError(f"Keychain write failed with OSStatus {status}")
 
 
 def _envelope(*, source_id: str, native_id: str, kind: str, content: Any,

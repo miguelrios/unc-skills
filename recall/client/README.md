@@ -32,10 +32,10 @@ at runtime and never appears in the plist, process arguments, logs, manifest, or
 spool:
 
 ```bash
-security add-generic-password -U -s ai.parcha.recall \
-  -a claude:mac:my-mac -w '<scoped token>'
-security add-generic-password -U -s ai.parcha.recall \
-  -a codex:mac:my-mac -w '<scoped token>'
+printf '%s' "$SCOPED_CLAUDE_TOKEN" | recall-brain keychain-store \
+  --service ai.parcha.recall --account claude:mac:my-mac
+printf '%s' "$SCOPED_CODEX_TOKEN" | recall-brain keychain-store \
+  --service ai.parcha.recall --account codex:mac:my-mac
 
 ./install.sh \
   --endpoint https://brain.example.ts.net \
