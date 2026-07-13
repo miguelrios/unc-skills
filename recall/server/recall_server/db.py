@@ -378,8 +378,22 @@ class BrainStore:
             phrases = engine.phrase_queries(query)
             if phrases:
                 merge(self._lexical_leg(conn, phrases[0], "phraseto_tsquery", filters, "phrase", 2, authorized_source=authorized_source))
-            for identifier in engine.identifier_terms(informative)[:3]:
-                merge(self._lexical_leg(conn, identifier, "plainto_tsquery", filters, "identifier", 2, exact=identifier, authorized_source=authorized_source))
+            identifiers = sorted(
+                engine.identifier_terms(informative),
+                key=lambda value: (
+                    bool(re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", value)),
+                    bool(re.fullmatch(r"[0-9a-f]{8,}", value)), len(value),
+                ),
+                reverse=True,
+            )
+            for identifier in identifiers[:3]:
+                exact_rows = self._lexical_leg(
+                    conn, identifier, "plainto_tsquery", filters, "identifier", 2,
+                    exact=identifier, authorized_source=authorized_source,
+                )
+                merge(exact_rows)
+                if exact_rows:
+                    break
             merge(self._lexical_leg(conn, " ".join(informative), "plainto_tsquery", filters, "all", 1, authorized_source=authorized_source))
 
         now = datetime.now(timezone.utc).timestamp()
