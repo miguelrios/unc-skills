@@ -21,16 +21,18 @@ case "$MODE" in
   backup)
     [ -n "$BACKUP_DIR" ] && [ -n "${RECALL_DATABASE_URL:-}" ] || usage
     mkdir -p "$BACKUP_DIR"
+    stage=$(mktemp -d "$BACKUP_DIR/.backup.XXXXXX")
+    trap 'rm -rf "$stage"' EXIT
     started=$(date -u +%s)
     started_ms=$(date -u +%s%3N)
-    docker run --rm --network host -v "$BACKUP_DIR:/backup" "$TOOLS_IMAGE" \
+    docker run --rm --network host -v "$stage:/backup" "$TOOLS_IMAGE" \
       pg_dump "$RECALL_DATABASE_URL" --format=custom --no-owner --file=/backup/brain.dump
-    dump_sha=$(sha256sum "$BACKUP_DIR/brain.dump" | awk '{print $1}')
+    dump_sha=$(sha256sum "$stage/brain.dump" | awk '{print $1}')
     source_fingerprint=$(fingerprint "$RECALL_DATABASE_URL")
     newest_epoch=$(psql "$RECALL_DATABASE_URL" -At -c "SELECT COALESCE(extract(epoch FROM max(created_at))::bigint,0) FROM source_events")
     completed=$(date -u +%s)
     completed_ms=$(date -u +%s%3N)
-    BACKUP_DIR="$BACKUP_DIR" STARTED="$started" COMPLETED="$completed" STARTED_MS="$started_ms" COMPLETED_MS="$completed_ms" DUMP_SHA="$dump_sha" \
+    BACKUP_DIR="$stage" STARTED="$started" COMPLETED="$completed" STARTED_MS="$started_ms" COMPLETED_MS="$completed_ms" DUMP_SHA="$dump_sha" \
       SOURCE_FINGERPRINT="$source_fingerprint" NEWEST_EPOCH="$newest_epoch" TOOLS_IMAGE="$TOOLS_IMAGE" \
       python3 - <<'PY'
 import json, os
@@ -50,17 +52,25 @@ manifest = {
 Path(os.environ["BACKUP_DIR"], "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 print(json.dumps(manifest, sort_keys=True))
 PY
+    mv -f "$stage/brain.dump" "$BACKUP_DIR/brain.dump"
+    mv -f "$stage/manifest.json" "$BACKUP_DIR/manifest.json"
+    rmdir "$stage"
+    trap - EXIT
     ;;
   restore-test)
     [ -n "$BACKUP_DIR" ] && [ -n "${RECALL_RESTORE_DATABASE_URL:-}" ] || usage
     [ -f "$BACKUP_DIR/brain.dump" ] && [ -f "$BACKUP_DIR/manifest.json" ] || usage
-    expected_sha=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["dump_sha256"])' "$BACKUP_DIR/manifest.json")
-    actual_sha=$(sha256sum "$BACKUP_DIR/brain.dump" | awk '{print $1}')
+    snapshot=$(mktemp -d "$BACKUP_DIR/.restore.XXXXXX")
+    trap 'rm -rf "$snapshot"' EXIT
+    ln "$BACKUP_DIR/brain.dump" "$snapshot/brain.dump"
+    cp "$BACKUP_DIR/manifest.json" "$snapshot/manifest.json"
+    expected_sha=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["dump_sha256"])' "$snapshot/manifest.json")
+    actual_sha=$(sha256sum "$snapshot/brain.dump" | awk '{print $1}')
     [ "$expected_sha" = "$actual_sha" ] || { echo "dump hash mismatch" >&2; exit 1; }
-    expected_fingerprint=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_fingerprint"])' "$BACKUP_DIR/manifest.json")
+    expected_fingerprint=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_fingerprint"])' "$snapshot/manifest.json")
     started=$(date -u +%s)
     started_ms=$(date -u +%s%3N)
-    docker run --rm --network host -v "$BACKUP_DIR:/backup:ro" "$TOOLS_IMAGE" \
+    docker run --rm --network host -v "$snapshot:/backup:ro" "$TOOLS_IMAGE" \
       pg_restore --dbname="$RECALL_RESTORE_DATABASE_URL" --clean --if-exists --no-owner /backup/brain.dump
     actual_fingerprint=$(fingerprint "$RECALL_RESTORE_DATABASE_URL")
     completed=$(date -u +%s)
@@ -76,6 +86,8 @@ print(json.dumps({
     "rto_ms": int(os.environ["COMPLETED_MS"]) - int(os.environ["STARTED_MS"]),
 }, sort_keys=True))
 PY
+    rm -rf "$snapshot"
+    trap - EXIT
     ;;
   *) usage ;;
 esac
