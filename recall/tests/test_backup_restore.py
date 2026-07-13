@@ -35,6 +35,7 @@ for argument in "$@"; do
   case "$argument" in *:/backup) mount=${argument%:/backup};; esac
 done
 test -n "$mount"
+case "$*" in *--snapshot=00000001-00000001-1*) :;; *) exit 3;; esac
 printf partial > "$mount/brain.dump"
 touch "$BACKUP_CONTROL_DIR/partial"
 while test ! -e "$BACKUP_CONTROL_DIR/continue"; do sleep 0.02; done
@@ -45,7 +46,18 @@ printf complete-new-dump > "$mount/brain.dump"
             psql = binaries / "psql"
             psql.write_text(
                 """#!/bin/sh
-case "$*" in *'max(created_at)'*) echo 0;; *) echo '1:synthetic-fingerprint';; esac
+set -eu
+input=$(cat)
+case "$input" in
+  *pg_export_snapshot*)
+    echo '00000001-00000001-1'
+    fifo=$(printf '%s\n' "$input" | sed -n 's/.*< "\(.*\)"/\\1/p')
+    read ignored < "$fifo"
+    ;;
+  *'SET TRANSACTION SNAPSHOT'*'max(created_at)'*) echo 0;;
+  *'SET TRANSACTION SNAPSHOT'*) echo '1:synthetic-fingerprint';;
+  *) exit 4;;
+esac
 """
             )
             psql.chmod(0o755)
@@ -70,6 +82,7 @@ case "$*" in *'max(created_at)'*) echo 0;; *) echo '1:synthetic-fingerprint';; e
                 self.assertEqual((backup / "brain.dump").read_bytes(), b"complete-new-dump")
                 manifest = json.loads((backup / "manifest.json").read_text())
                 self.assertTrue(manifest["dump_sha256"])
+                self.assertEqual(manifest["database_snapshot"], "00000001-00000001-1")
                 self.assertIn('"schema_version": 1', stdout)
             finally:
                 (control / "continue").touch()
