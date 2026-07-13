@@ -118,9 +118,13 @@ def remote_execute(args) -> tuple[str, dict]:
                 f"   [{result.get('surface') or '-'}] {snippet}\n"
                 f"   WHY: terms={terms}; legs={legs}; receipt={result.get('receipt') or '-'}"
             )
+        receipt_results = [
+            {key: result.get(key) for key in ("path", "receipt", "legs")}
+            for result in results
+        ]
         return (
             "\n".join(lines) + ("\n" if lines else ""),
-            {"remote_results": results, "remote_diagnostics": response.get("diagnostics")},
+            {"remote_results": receipt_results, "remote_diagnostics": response.get("diagnostics")},
         )
     if args.command == "show":
         response = remote_request("POST", "/v1/show", {
@@ -156,16 +160,30 @@ def remote_execute(args) -> tuple[str, dict]:
     raise RemoteRecallError("command has no remote transport")
 
 
+def append_private_jsonl(path: Path, entry: dict) -> None:
+    path = path.expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    os.fchmod(descriptor, 0o600)
+    with os.fdopen(descriptor, "a") as output:
+        output.write(json.dumps(entry, sort_keys=True) + "\n")
+
+
 def run_transport(args) -> int:
     mode = recall_mode()
     if args.command not in REMOTE_READ_COMMANDS or mode == "local":
         return args.func(args)
     if mode == "remote":
         try:
-            output, _metadata = remote_execute(args)
+            output, metadata = remote_execute(args)
         except RemoteRecallError as exc:
             print(f"remote recall unavailable: {exc}", file=sys.stderr)
             return 2
+        if args.command == "search" and os.environ.get("RECALL_REMOTE_TRACE"):
+            append_private_jsonl(Path(os.environ["RECALL_REMOTE_TRACE"]), {
+                "schema_version": 1, "observed_at": datetime.now(timezone.utc).isoformat(),
+                "command": "search", **metadata,
+            })
         print(output, end="")
         return 0
 
@@ -190,11 +208,7 @@ def run_transport(args) -> int:
         entry["remote_error"] = str(exc)
         entry["diverged"] = True
     log = Path(os.environ.get("RECALL_SHADOW_LOG", Path.home() / ".recall/shadow.jsonl")).expanduser()
-    log.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    descriptor = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-    os.fchmod(descriptor, 0o600)
-    with os.fdopen(descriptor, "a") as output:
-        output.write(json.dumps(entry, sort_keys=True) + "\n")
+    append_private_jsonl(log, entry)
     if local_err.getvalue():
         print(local_err.getvalue(), end="", file=sys.stderr)
     print(local_out.getvalue(), end="")

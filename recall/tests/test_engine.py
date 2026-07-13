@@ -375,7 +375,7 @@ class RemoteTransportTest(unittest.TestCase):
         self.shadow = self.root / "shadow.jsonl"
         self.old_env = {key: os.environ.get(key) for key in (
             "RECALL_CLAUDE_ROOT", "RECALL_CODEX_ROOT", "RECALL_DB", "RECALL_URL",
-            "RECALL_MODE", "RECALL_TOKEN_FILE", "RECALL_SHADOW_LOG",
+            "RECALL_MODE", "RECALL_TOKEN_FILE", "RECALL_SHADOW_LOG", "RECALL_REMOTE_TRACE",
         )}
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), RemoteHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True); self.thread.start()
@@ -429,7 +429,17 @@ class RemoteTransportTest(unittest.TestCase):
         self.assertEqual(request["body"]["limit"], 7)
 
     def test_remote_paths_show_related_and_doctor_keep_cli_surface(self):
+        remote_trace = self.root / "remote-trace.jsonl"
+        os.environ["RECALL_REMOTE_TRACE"] = str(remote_trace)
         self.assertEqual(self.call("search", "deadbeef", "--paths")[1].strip(), RemoteHandler.target_path)
+        trace = json.loads(remote_trace.read_text())
+        self.assertEqual(trace["remote_results"], [{
+            "path": RemoteHandler.target_path,
+            "receipt": "recall://claude:linux/session:1?rev=1#item=0",
+            "legs": ["exact"],
+        }])
+        self.assertNotIn("deadbeef", json.dumps(trace))
+        self.assertEqual(remote_trace.stat().st_mode & 0o777, 0o600)
         shown = self.call("show", RemoteHandler.target_path, "--prompts", "--tail", "5")[1]
         self.assertIn("user: remote prompt", shown)
         related = self.call("related", "--cwd", "/work/grep123/project", "--branch", "feature/remote")[1]
