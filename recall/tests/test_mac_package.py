@@ -28,6 +28,7 @@ class MacPackageTest(unittest.TestCase):
     def _write_runtime_fixture(self, *, include_license: bool = True) -> None:
         members = {
             "python/bin/python3.12": b"\xcf\xfa\xed\xfe\x0c\x00\x00\x01" + b"\x00" * 24,
+            "python/lib/python3.12/__pycache__/site.cpython-312.pyc": b"derived cache fixture",
             "python/lib/python3.12/ssl.py": b"# fixture\n",
             "python/lib/python3.12/sqlite3/__init__.py": b"# fixture\n",
         }
@@ -140,6 +141,8 @@ class MacPackageTest(unittest.TestCase):
         extracted = self.root / "extracted"
         extracted.mkdir()
         with tarfile.open(first, "r:gz") as archive:
+            names = archive.getnames()
+            self.assertFalse(any("__pycache__" in name or name.endswith(".pyc") for name in names))
             archive.extractall(extracted, filter="data")
         package = extracted / "recall-brain-macos"
         manifest = json.loads((package / "MANIFEST.json").read_text())
