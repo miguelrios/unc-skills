@@ -118,7 +118,10 @@ def remote_execute(args) -> tuple[str, dict]:
                 f"   [{result.get('surface') or '-'}] {snippet}\n"
                 f"   WHY: terms={terms}; legs={legs}; receipt={result.get('receipt') or '-'}"
             )
-        return ("\n".join(lines) + ("\n" if lines else ""), {"remote_results": results})
+        return (
+            "\n".join(lines) + ("\n" if lines else ""),
+            {"remote_results": results, "remote_diagnostics": response.get("diagnostics")},
+        )
     if args.command == "show":
         response = remote_request("POST", "/v1/show", {
             "target": args.target, "around": args.around, "prompts": args.prompts, "tail": args.tail,

@@ -346,7 +346,10 @@ class RemoteHandler(BaseHTTPRequestHandler):
                 "legs": ["exact"],
                 "tier": 2,
                 "receipt": "recall://claude:linux/session:1?rev=1#item=0"
-            }], "abstention_reason": None})
+            }], "abstention_reason": None, "diagnostics": {
+                "deadline_ms": 300, "elapsed_ms": 12.5, "deadline_exceeded": False,
+                "legs": [{"leg": "exact", "elapsed_ms": 10.0, "n_results": 1, "timed_out": False}],
+            }})
         elif self.path == "/v1/show":
             self.send_json(200, {"chunks": [{
                 "occurred_at": "2026-01-01T00:00:00Z", "surface": "user",
@@ -463,6 +466,8 @@ class RemoteTransportTest(unittest.TestCase):
         self.assertEqual(entry["command"], "search")
         self.assertEqual(entry["local_paths"], [str(self.claude / "session.jsonl")])
         self.assertEqual(entry["remote_results"][0]["receipt"], "recall://claude:linux/session:1?rev=1#item=0")
+        self.assertEqual(entry["remote_diagnostics"]["deadline_ms"], 300)
+        self.assertNotIn("deadbeef", json.dumps(entry["remote_diagnostics"]))
         self.assertTrue(entry["diverged"])
 
     def test_shadow_log_does_not_chmod_an_existing_shared_parent(self):

@@ -491,7 +491,7 @@ class BrainStore:
                     )))
                 for identifier in identifiers[:3]:
                     exact_rows = run_leg("identifier", lambda identifier=identifier: self._lexical_leg(
-                        conn, identifier, "plainto_tsquery", filters, "identifier", 2,
+                        conn, identifier, "plainto_tsquery", filters, "identifier", 3,
                         exact=identifier, authorized_source=authorized_source, deadline_at=deadline_at,
                     ))
                     merge(exact_rows)
