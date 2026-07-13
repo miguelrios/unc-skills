@@ -666,6 +666,89 @@ class TestUsageProbe(unittest.TestCase):
         self.assertEqual({w["window"]: w["used_pct"] for w in windows},
                          {"5h": 12.0, "7d": 60.0})
 
+    def test_claude_billing_preserves_current_meter_not_fake_week(self):
+        billing = self.pu.claude_billing({
+            "extra_usage": {"is_enabled": True, "used_credits": 136915,
+                            "currency": "USD", "decimal_places": 2,
+                            "daily": None, "weekly": None},
+            "spend": {"enabled": True,
+                      "used": {"amount_minor": 136915, "currency": "USD", "exponent": 2},
+                      "limit": None},
+        })
+        self.assertEqual(billing["used"], 1369.15)
+        self.assertEqual(billing["period"], "current")
+        self.assertIsNone(billing["daily"])
+        self.assertIsNone(billing["weekly"])
+        report = self.pu.format_report([
+            {"pool": "claude", "status": "ok", "plan": "max", "windows": [],
+             "billing": billing},
+        ])
+        self.assertIn("extra=$1,369.15 current", report)
+
+    def test_codex_billing_preserves_credit_and_spend_controls(self):
+        billing = self.pu.codex_billing({
+            "credits": {"has_credits": False, "balance": "0", "unlimited": False,
+                        "overage_limit_reached": False},
+            "spend_control": {"reached": False, "individual_limit": None},
+        })
+        self.assertFalse(billing["has_credits"])
+        self.assertFalse(billing["spend_control_reached"])
+        report = self.pu.format_report([
+            {"pool": "codex", "status": "ok", "plan": "pro", "windows": [],
+             "billing": billing},
+        ])
+        self.assertIn("credits=none", report)
+
+    def test_codex_window_uses_duration_not_primary_key_name(self):
+        windows = self.pu.codex_windows({
+            "rate_limit": {
+                "primary_window": {"used_percent": 84, "limit_window_seconds": 604800},
+                "secondary_window": None,
+            },
+        })
+        self.assertEqual(windows[0]["window"], "7d")
+        self.assertEqual(windows[0]["used_pct"], 84.0)
+
+    def test_probes_do_not_drop_provider_billing_fields(self):
+        import os as _os
+        import tempfile
+        original_get = self.pu._get_json
+        old_claude = _os.environ.get("CLAUDE_CONFIG_DIR")
+        old_codex = _os.environ.get("CODEX_HOME")
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / ".credentials.json").write_text(json.dumps({
+                    "claudeAiOauth": {"accessToken": "test", "subscriptionType": "max"},
+                }))
+                (root / "auth.json").write_text(json.dumps({
+                    "tokens": {"access_token": "test", "account_id": "acct"},
+                }))
+                _os.environ["CLAUDE_CONFIG_DIR"] = tmp
+                _os.environ["CODEX_HOME"] = tmp
+
+                def fake_get(url, headers, data=None):
+                    if "anthropic" in url:
+                        return {"extra_usage": {"is_enabled": True, "used_credits": 2500,
+                                                "currency": "USD", "decimal_places": 2}}
+                    return {"plan_type": "pro", "rate_limit": {},
+                            "credits": {"has_credits": True, "balance": "12.5"},
+                            "spend_control": {"reached": False}}
+
+                self.pu._get_json = fake_get
+                self.assertEqual(self.pu.probe_claude()["billing"]["used"], 25.0)
+                self.assertTrue(self.pu.probe_codex()["billing"]["has_credits"])
+        finally:
+            self.pu._get_json = original_get
+            if old_claude is None:
+                _os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            else:
+                _os.environ["CLAUDE_CONFIG_DIR"] = old_claude
+            if old_codex is None:
+                _os.environ.pop("CODEX_HOME", None)
+            else:
+                _os.environ["CODEX_HOME"] = old_codex
+
 
 class TestUsageCache(unittest.TestCase):
     """The disk cache exists because the usage endpoints throttle rapid polling

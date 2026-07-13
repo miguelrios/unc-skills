@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""parable_usage — read live subscription headroom across the pools, pre-turn.
+"""parable_usage — read live subscription headroom and billing state, pre-turn.
 
 The load-balancing story rests on one fact: every subscription parable routes to
 publishes its own remaining-headroom over an authenticated HTTP probe that costs
@@ -12,10 +12,12 @@ Three probes, each reading the same credential the local harness already stored
   claude  (Anthropic Max/Pro)  GET  api.anthropic.com/api/oauth/usage
           -> ~/.claude/.credentials.json  .claudeAiOauth.accessToken  (OAuth, user:profile scope)
           windows: five_hour, seven_day, seven_day_opus  (utilization 0-100, resets_at ISO)
+          billing: usage-credit enabled state and current-period spend (not weekly history)
 
   codex   (ChatGPT Pro/Plus)   GET  chatgpt.com/backend-api/wham/usage
           -> ~/.codex/auth.json  .tokens.access_token + .tokens.account_id
-          windows: primary (5h), secondary (weekly)  (used_percent 0-100, reset_at unix)
+          windows: primary/secondary, labeled from duration  (used_percent 0-100, reset_at unix)
+          billing: credit balance, overage state, and spend-control state
 
   cursor  (Cursor Pro/Ultra)   POST api2.cursor.sh/auth/exchange_user_api_key  (key->JWT)
           then POST .../aiserver.v1.DashboardService/GetCurrentPeriodUsage
@@ -75,6 +77,30 @@ def _unknown(pool: str, reason: str) -> dict:
     return {"pool": pool, "status": "unknown", "reason": reason, "windows": []}
 
 
+def _major_units(amount, exponent=2) -> float | None:
+    """Convert a provider minor-unit value without assuming cents forever."""
+    if amount is None:
+        return None
+    try:
+        places = int(exponent)
+        return round(float(amount) / (10 ** places), max(0, places))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _duration_label(seconds, fallback: str) -> str:
+    """Name a provider window from its duration; keys do not imply cadence."""
+    try:
+        seconds = int(seconds)
+    except (TypeError, ValueError):
+        return fallback
+    if seconds > 0 and seconds % 86400 == 0:
+        return f"{seconds // 86400}d"
+    if seconds > 0 and seconds % 3600 == 0:
+        return f"{seconds // 3600}h"
+    return fallback
+
+
 # ---------------------------------------------------------------------------
 # claude — Anthropic subscription (OAuth)
 # ---------------------------------------------------------------------------
@@ -104,7 +130,7 @@ def probe_claude() -> dict:
         return _unknown("claude", f"probe failed ({e})")
 
     return {"pool": "claude", "status": "ok", "plan": oauth.get("subscriptionType"),
-            "windows": claude_windows(body)}
+            "windows": claude_windows(body), "billing": claude_billing(body)}
 
 
 def claude_windows(body: dict) -> list[dict]:
@@ -140,6 +166,38 @@ def claude_windows(body: dict) -> list[dict]:
     return windows
 
 
+def claude_billing(body: dict) -> dict:
+    """Normalize Claude's current usage-credit meter.
+
+    The OAuth endpoint currently returns a cumulative current-period value while
+    ``daily`` and ``weekly`` may be null. Preserve those fields explicitly so a
+    caller cannot accidentally present the cumulative meter as weekly spend.
+    """
+    extra = body.get("extra_usage") if isinstance(body.get("extra_usage"), dict) else {}
+    spend = body.get("spend") if isinstance(body.get("spend"), dict) else {}
+    used = spend.get("used") if isinstance(spend.get("used"), dict) else {}
+    limit = spend.get("limit") if isinstance(spend.get("limit"), dict) else {}
+
+    currency = used.get("currency") or extra.get("currency") or limit.get("currency")
+    if used.get("amount_minor") is not None:
+        used_amount = _major_units(used.get("amount_minor"), used.get("exponent", 2))
+    else:
+        used_amount = _major_units(extra.get("used_credits"), extra.get("decimal_places", 2))
+    if limit.get("amount_minor") is not None:
+        limit_amount = _major_units(limit.get("amount_minor"), limit.get("exponent", 2))
+    else:
+        limit_amount = _major_units(extra.get("monthly_limit"), extra.get("decimal_places", 2))
+
+    return {"kind": "usage_credits",
+            "enabled": bool(spend.get("enabled", extra.get("is_enabled", False))),
+            "used": used_amount,
+            "limit": limit_amount,
+            "currency": currency,
+            "period": "current",
+            "daily": extra.get("daily"),
+            "weekly": extra.get("weekly")}
+
+
 # ---------------------------------------------------------------------------
 # codex — ChatGPT subscription (backend token)
 # ---------------------------------------------------------------------------
@@ -167,16 +225,42 @@ def probe_codex() -> dict:
     except Exception as e:
         return _unknown("codex", f"probe failed ({e})")
 
+    return {"pool": "codex", "status": "ok", "plan": body.get("plan_type"),
+            "windows": codex_windows(body), "billing": codex_billing(body)}
+
+
+def codex_windows(body: dict) -> list[dict]:
+    """Normalize ChatGPT windows, deriving cadence from duration.
+
+    ``primary_window`` is not guaranteed to mean five hours: current Pro
+    responses can put a 604800-second weekly bucket there with no secondary.
+    """
     rl = body.get("rate_limit", {})
     windows = []
-    for key, label in (("primary_window", "5h"), ("secondary_window", "7d")):
+    for key, fallback in (("primary_window", "5h"), ("secondary_window", "7d")):
         w = rl.get(key)
         if isinstance(w, dict) and w.get("used_percent") is not None:
-            windows.append({"window": label,
+            windows.append({"window": _duration_label(w.get("limit_window_seconds"), fallback),
                             "used_pct": round(float(w["used_percent"]), 1),
                             "resets_in_min": _mins_until(w.get("reset_at"))})
-    return {"pool": "codex", "status": "ok", "plan": body.get("plan_type"),
-            "windows": windows}
+    return windows
+
+
+def codex_billing(body: dict) -> dict:
+    """Preserve ChatGPT credit/overage facts without inventing dollar spend.
+
+    Unlike Claude's endpoint, ``wham/usage`` does not publish historical cost.
+    Its balance is therefore kept in the provider's native representation.
+    """
+    credits = body.get("credits") if isinstance(body.get("credits"), dict) else {}
+    control = body.get("spend_control") if isinstance(body.get("spend_control"), dict) else {}
+    return {"kind": "credits",
+            "has_credits": bool(credits.get("has_credits", False)),
+            "balance": credits.get("balance"),
+            "unlimited": bool(credits.get("unlimited", False)),
+            "overage_limit_reached": bool(credits.get("overage_limit_reached", False)),
+            "spend_control_reached": bool(control.get("reached", False)),
+            "individual_limit": control.get("individual_limit")}
 
 
 # ---------------------------------------------------------------------------
@@ -299,12 +383,32 @@ def format_report(reports: list[dict]) -> str:
             + (f"(${w['remaining_usd']:.2f} left)" if "remaining_usd" in w else "")
             + (f"↻{w['resets_in_min']}m" if w.get("resets_in_min") is not None else "")
             for w in r["windows"])
+        billing = r.get("billing") or {}
+        bill = ""
+        if billing.get("kind") == "usage_credits":
+            used = billing.get("used")
+            currency = billing.get("currency") or ""
+            if used is not None:
+                symbol = "$" if currency == "USD" else f"{currency} "
+                limit = billing.get("limit")
+                amount = f"{symbol}{used:,.2f}" + (f"/{symbol}{limit:,.2f}" if limit is not None else "")
+                bill = f"  extra={amount} {billing.get('period', 'current')}"
+            elif billing.get("enabled"):
+                bill = "  extra=enabled"
+        elif billing.get("kind") == "credits":
+            if billing.get("overage_limit_reached") or billing.get("spend_control_reached"):
+                bill = "  credits=BLOCKED"
+            elif billing.get("has_credits"):
+                balance = billing.get("balance")
+                bill = "  credits=available" + (f"({balance})" if balance is not None else "")
+            else:
+                bill = "  credits=none"
         flag = " ⚠ TIGHT" if worst is not None and worst >= 80 else ""
         if r.get("stale_seconds") is not None:
             flag += f" (cached {r['stale_seconds']}s — live probe: {r.get('live_probe')})"
         elif r.get("cached"):
             flag += " (cached)"
-        lines.append(f"{head} {wins}{flag}")
+        lines.append(f"{head} {wins}{bill}{flag}")
     return "\n".join(lines) if lines else "  (no pools probed)"
 
 
