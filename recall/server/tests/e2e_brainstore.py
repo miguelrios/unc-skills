@@ -221,6 +221,10 @@ def main() -> None:
             assert secret not in log_path.read_text()
             assert nul_marker not in log_path.read_text()
             with store.connect() as conn:
+                tombstone_lookup_index = conn.execute(
+                    "SELECT indexdef FROM pg_indexes WHERE schemaname='public' AND indexname='items_source_event_idx'"
+                ).fetchone()
+                assert tombstone_lookup_index and "(source_id, event_native_id)" in tombstone_lookup_index["indexdef"]
                 summary = {
                     "source_events": conn.execute("SELECT count(*) AS n FROM source_events").fetchone()["n"],
                     "live_items": conn.execute("SELECT count(*) AS n FROM items WHERE deleted_at IS NULL").fetchone()["n"],
@@ -235,6 +239,7 @@ def main() -> None:
                     "secret_projection_leaks": 0,
                     "dead_letters": conn.execute("SELECT count(*) AS n FROM dead_letters").fetchone()["n"],
                     "projection_lag": store.service_metrics()["projection_lag"],
+                    "tombstone_lookup_index": True,
                 }
             assert summary["projection_lag"] == 0
             result = {"status": "pass", "runtime": {"python": sys.version.split()[0], "postgres": "17-alpine", "psycopg": psycopg.__version__}, "summary": summary}

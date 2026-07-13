@@ -208,6 +208,50 @@ class CollectorTest(unittest.TestCase):
         self.assertEqual(received, "before[NUL]after")
         collector.close()
 
+    def test_flush_collapses_repaired_duplicate_of_acknowledged_identity(self) -> None:
+        transcript = self.root / "session.jsonl"
+        transcript.write_text(claude_line("before[NUL]after"))
+        collector = self.collector(); collector.scan(); collector.flush()
+        acked = collector.db.execute(
+            "SELECT id,path,native_id,content_sha256,start_offset,end_offset,receipt FROM outbox"
+        ).fetchone()
+        clean = AckServer.received[-1]["events"][0]
+        legacy = json.loads(json.dumps(clean))
+        legacy["content"]["message"]["content"] = "before\x00after"
+        legacy["content_sha256"] = hashlib.sha256(
+            json.dumps(legacy["content"], sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        collector.db.execute(
+            "INSERT INTO outbox(path,native_id,content_sha256,start_offset,end_offset,shard_key,envelope_json,queued_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (
+                acked["path"], acked["native_id"], legacy["content_sha256"], acked["start_offset"],
+                acked["end_offset"], 0, json.dumps(legacy, sort_keys=True, separators=(",", ":")), 0,
+            ),
+        )
+        collector.db.execute(
+            "UPDATE active_records SET content_sha256=?,receipt=NULL WHERE path=? AND native_id=?",
+            (legacy["content_sha256"], acked["path"], acked["native_id"]),
+        )
+        collector.db.execute("UPDATE files SET committed_offset=0 WHERE path=?", (acked["path"],))
+        collector.db.commit()
+        requests_before = AckServer.requests
+
+        result = collector.flush()
+
+        self.assertEqual(result["acked"], 0)
+        self.assertEqual(AckServer.requests, requests_before)
+        self.assertEqual(collector.doctor()["pending"], 0)
+        self.assertEqual(collector.doctor()["acked"], 1)
+        active = collector.db.execute(
+            "SELECT content_sha256,receipt FROM active_records WHERE path=? AND native_id=?",
+            (acked["path"], acked["native_id"]),
+        ).fetchone()
+        self.assertEqual(active["content_sha256"], acked["content_sha256"])
+        self.assertEqual(active["receipt"], acked["receipt"])
+        self.assertEqual(collector.doctor()["committed_files"], 1)
+        collector.close()
+
     def test_oversized_dead_row_recovers_from_exact_source_window(self) -> None:
         (self.root / "session.jsonl").write_text(claude_line("x" * 1000))
         collector = self.collector(); collector.scan()

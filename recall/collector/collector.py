@@ -339,7 +339,7 @@ class Collector:
         self.db.commit()
         return result
 
-    def _repair_pending_envelope(self, row: sqlite3.Row) -> dict:
+    def _repair_pending_envelope(self, row: sqlite3.Row) -> dict | None:
         envelope = json.loads(row["envelope_json"])
         clean = sanitize(envelope["content"])
         if clean == envelope["content"]:
@@ -348,6 +348,24 @@ class Collector:
         envelope["content"] = clean
         envelope["content_sha256"] = hashlib.sha256(canonical_json(clean)).hexdigest()
         rendered = canonical_json(envelope).decode()
+        duplicate = self.db.execute(
+            "SELECT id,state,receipt FROM outbox WHERE native_id=? AND content_sha256=? AND id<>?",
+            (row["native_id"], envelope["content_sha256"], row["id"]),
+        ).fetchone()
+        if duplicate is not None and duplicate["state"] in {"pending", "acked"}:
+            receipt = duplicate["receipt"] if duplicate["state"] == "acked" else None
+            self.db.execute("DELETE FROM outbox WHERE id=?", (row["id"],))
+            self.db.execute(
+                "UPDATE active_records SET content_sha256=?,receipt=? WHERE path=? AND native_id=?",
+                (envelope["content_sha256"], receipt, row["path"], row["native_id"]),
+            )
+            if duplicate["state"] == "acked":
+                pending = self.db.execute(
+                    "SELECT 1 FROM outbox WHERE path=? AND state='pending' LIMIT 1", (row["path"],)
+                ).fetchone()
+                if not pending:
+                    self.db.execute("UPDATE files SET committed_offset=scanned_offset WHERE path=?", (row["path"],))
+            return None
         self.db.execute(
             "UPDATE outbox SET content_sha256=?,envelope_json=? WHERE id=?",
             (envelope["content_sha256"], rendered, row["id"]),
@@ -369,7 +387,13 @@ class Collector:
                 "SELECT * FROM outbox WHERE state='pending' AND (shard_key % ?) = ? ORDER BY id LIMIT ?",
                 (self.shard_count, self.shard_index, self.batch_size),
             ))
-            candidates = [self._repair_pending_envelope(row) for row in raw_candidates]
+            if not raw_candidates:
+                break
+            candidates = []
+            for row in raw_candidates:
+                candidate = self._repair_pending_envelope(row)
+                if candidate is not None:
+                    candidates.append(candidate)
             self.db.commit()
             rows: list[dict] = []
             body_size = len(b'{"events":[]}')
@@ -389,8 +413,6 @@ class Collector:
                 rows.append(candidate)
                 body_size += event_size
             if not rows:
-                if not candidates:
-                    break
                 continue
             events = [json.loads(row["envelope_json"]) for row in rows]
             key_material = self.source_id + ":" + ",".join(f"{row['id']}:{row['content_sha256']}" for row in rows)
