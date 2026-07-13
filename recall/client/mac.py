@@ -7,7 +7,6 @@ import platform
 import re
 import ssl
 import stat
-import subprocess
 import urllib.parse
 import urllib.request
 import uuid
@@ -147,17 +146,39 @@ def load_file_token(path: Path) -> str:
 def load_keychain_token(service: str, account: str) -> str:
     if not service or not account:
         raise ValueError("Keychain service and account are required")
-    completed = subprocess.run(
-        ["/usr/bin/security", "find-generic-password", "-s", service, "-a", account, "-w"],
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
+    if platform.system() != "Darwin":
+        raise RuntimeError("Keychain lookup is available only on macOS")
+    import ctypes
+    import ctypes.util
+
+    framework = ctypes.util.find_library("Security")
+    if not framework:
+        raise RuntimeError("macOS Security framework is unavailable")
+    security = ctypes.CDLL(framework)
+    security.SecKeychainFindGenericPassword.restype = ctypes.c_int32
+    security.SecKeychainItemFreeContent.restype = ctypes.c_int32
+    service_bytes = service.encode()
+    account_bytes = account.encode()
+    length = ctypes.c_uint32()
+    data = ctypes.c_void_p()
+    item = ctypes.c_void_p()
+    status = security.SecKeychainFindGenericPassword(
+        None,
+        len(service_bytes), ctypes.c_char_p(service_bytes),
+        len(account_bytes), ctypes.c_char_p(account_bytes),
+        ctypes.byref(length), ctypes.byref(data), ctypes.byref(item),
     )
-    value = completed.stdout.rstrip("\r\n")
-    if not value:
-        raise ValueError("Keychain item is empty")
-    return value
+    if status != 0:
+        raise RuntimeError(f"Keychain lookup failed with OSStatus {status}")
+    try:
+        value = ctypes.string_at(data, length.value).decode()
+        if not value:
+            raise ValueError("Keychain item is empty")
+        return value
+    finally:
+        security.SecKeychainItemFreeContent(None, data)
+        core = ctypes.CDLL(ctypes.util.find_library("CoreFoundation"))
+        core.CFRelease(item)
 
 
 def store_keychain_token(service: str, account: str, token: str) -> None:
