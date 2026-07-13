@@ -139,6 +139,14 @@ def main() -> None:
             assert entity_status == 201, (entity_status, entity_ack)
             entity_search = store.search("which trace used " + entity_marker, {}, 5)
             assert entity_search["results"][0]["session_native_id"] == "session-entity"
+
+            # Entity values live in heap text, never directly in a btree uniqueness key:
+            # real tool output can contain paths longer than PostgreSQL's index-row limit.
+            long_segment = "".join(hashlib.sha256(str(index).encode()).hexdigest() for index in range(50))
+            long_path = "/workspace/" + long_segment + "/trace.log"
+            long_entity = make_envelope("session-long-entity:turn-1", {"role": "tool", "text": long_path}, parent="session-long-entity")
+            long_status, long_ack = request(base, "POST", "/v1/ingest/batches", {"events": [long_entity]}, "batch-long-entity")
+            assert long_status == 201, (long_status, long_ack)
             assert "entity" in entity_search["results"][0]["legs"]
             with store.connect() as conn:
                 projected = conn.execute(
@@ -309,7 +317,11 @@ def main() -> None:
                 entity_index = conn.execute(
                     "SELECT indexdef FROM pg_indexes WHERE schemaname='public' AND indexname='entities_normalized_source_idx'"
                 ).fetchone()
-                assert entity_index and "source_id" in entity_index["indexdef"] and "normalized" in entity_index["indexdef"]
+                assert entity_index and "source_id" in entity_index["indexdef"] and "octet_length" in entity_index["indexdef"]
+                entity_identity = conn.execute(
+                    "SELECT indexdef FROM pg_indexes WHERE schemaname='public' AND indexname='entities_identity_hash_idx'"
+                ).fetchone()
+                assert entity_identity and "md5(value)" in entity_identity["indexdef"]
                 summary = {
                     "source_events": conn.execute("SELECT count(*) AS n FROM source_events").fetchone()["n"],
                     "live_items": conn.execute("SELECT count(*) AS n FROM items WHERE deleted_at IS NULL").fetchone()["n"],

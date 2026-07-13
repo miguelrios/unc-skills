@@ -396,7 +396,7 @@ class BrainStore:
             JOIN items i ON i.id=e.item_id
             JOIN sessions s ON s.source_id=i.source_id AND s.native_id=i.session_native_id
             JOIN source_events se ON se.id=i.event_id
-            WHERE e.normalized = ANY(%s) AND {where}
+            WHERE octet_length(e.normalized) <= 512 AND e.normalized = ANY(%s) AND {where}
             ORDER BY i.id DESC
             LIMIT %s
             """,
