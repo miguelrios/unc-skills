@@ -45,6 +45,11 @@ your agent    -> read the winning window and get back to work
 The transcripts remain the source of truth. The SQLite index is disposable and
 fully rebuildable.
 
+When a private Recall Brain service is available, set `RECALL_URL` to use the same read commands
+over the tailnet. `RECALL_MODE=shadow` compares central receipts while returning local behavior;
+`RECALL_MODE=local` is an instant rollback that does not rewrite either store. Remote failures do
+not silently fall back to stale local results.
+
 ## Receipts
 
 Measured on one development machine against 5,959 real transcripts and 2.5

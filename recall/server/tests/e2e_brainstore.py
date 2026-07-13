@@ -149,6 +149,11 @@ def main() -> None:
             _, beta_resolved = request(base, "GET", "/v1/receipts/resolve?" + urllib.parse.urlencode({"receipt": beta_ack["receipts"][0]}))
             assert alpha_resolved["event"]["source_id"] == "source:alpha" and "alpha evidence" in json.dumps(alpha_resolved)
             assert beta_resolved["event"]["source_id"] == "source:beta" and "beta evidence" in json.dumps(beta_resolved)
+            scoped_alpha = store.search("alpha evidence", {}, 5, authorized_source="source:alpha")
+            assert scoped_alpha["results"] and {hit["source_id"] for hit in scoped_alpha["results"]} == {"source:alpha"}
+            assert store.search("beta evidence", {}, 5, authorized_source="source:alpha")["results"] == []
+            assert store.show(beta_ack["receipts"][0], authorized_source="source:alpha") is None
+            assert store.doctor("source:alpha")["source_events"] == 1
 
             # Concurrent different batches carrying the same event converge on one event row.
             raced = make_envelope("session-race:turn-1", {"role": "tool", "text": "race-safe marker"}, parent="session-race")
@@ -281,6 +286,7 @@ def main() -> None:
                     "remote_show_window": True,
                     "remote_related_context": True,
                     "remote_doctor_content_free": True,
+                    "source_scoped_reads": True,
                 }
             assert summary["projection_lag"] == 0
             result = {"status": "pass", "runtime": {"python": sys.version.split()[0], "postgres": "17-alpine", "psycopg": psycopg.__version__}, "summary": summary}
