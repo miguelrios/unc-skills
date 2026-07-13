@@ -9,6 +9,13 @@
 
 **Multi-model coding orchestration for Claude Code, Codex, and pi.**
 
+It is Tuesday. You ask Fable to extract a helper and add a test. Three hundred lines later, the
+helper has its own module and two new dependencies. The model is pleased with itself. You open
+the billing console.
+
+Parable changes the execution model: Fable plans and routes the work; specialized executors do
+the implementation.
+
 ```text
 Request
    |
@@ -36,15 +43,10 @@ Shared worktree -> tests + independent review -> commit
                        +-- fail -> resume that task's executor
 ```
 
-Fable decomposes the request, writes a `plan.md` for each task, and routes each task by fit,
-marginal cost, and live subscription headroom. The executors edit the shared worktree; tests and
-a non-author model gate the combined result.
-
-It is Tuesday. You are pair-programming with Fable on a small task: extract a helper
-function and add a test. Three hundred lines later, the helper has its own module and two new
-dependencies. The model is pleased with itself.
-
-You open the billing console.
+Each task gets its own `plan.md` and the best available executor for its requirements, marginal
+cost, and live subscription headroom. Independent tasks can run in parallel, but they converge
+on one worktree and one verification gate. Fable spends its context on decomposition, routing,
+and judgment—not routine implementation.
 
 ## Unscientific stats
 
