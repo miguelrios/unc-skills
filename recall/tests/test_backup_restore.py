@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import subprocess
 import tempfile
@@ -78,6 +79,82 @@ case "$*" in *'max(created_at)'*) echo 0;; *) echo '1:synthetic-fingerprint';; e
                     except subprocess.TimeoutExpired:
                         process.kill()
                         process.communicate()
+                else:
+                    process.communicate()
+
+    def test_restore_uses_immutable_copy_when_hardlinks_are_forbidden(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            backup = root / "latest"
+            backup.mkdir()
+            original = b"stable-root-owned-dump"
+            (backup / "brain.dump").write_bytes(original)
+            (backup / "manifest.json").write_text(json.dumps({
+                "dump_sha256": hashlib.sha256(original).hexdigest(),
+                "source_fingerprint": "1:synthetic-fingerprint",
+            }))
+            control = root / "control"
+            control.mkdir()
+            binaries = root / "bin"
+            binaries.mkdir()
+            docker = binaries / "docker"
+            docker.write_text(
+                """#!/bin/sh
+set -eu
+mount=''
+for argument in "$@"; do
+  case "$argument" in *:/backup:ro) mount=${argument%:/backup:ro};; esac
+done
+test -n "$mount"
+touch "$BACKUP_CONTROL_DIR/snapshot-opened"
+while test ! -e "$BACKUP_CONTROL_DIR/continue"; do sleep 0.02; done
+test "$(cat "$mount/brain.dump")" = 'stable-root-owned-dump'
+"""
+            )
+            docker.chmod(0o755)
+            psql = binaries / "psql"
+            psql.write_text("#!/bin/sh\necho '1:synthetic-fingerprint'\n")
+            psql.chmod(0o755)
+            forbidden_link = binaries / "ln"
+            forbidden_link.write_text("#!/bin/sh\necho 'hardlink forbidden' >&2\nexit 1\n")
+            forbidden_link.chmod(0o755)
+            environment = os.environ | {
+                "PATH": str(binaries) + os.pathsep + os.environ["PATH"],
+                "RECALL_RESTORE_DATABASE_URL": "postgresql://synthetic.invalid/restore",
+                "BACKUP_CONTROL_DIR": str(control),
+            }
+            process = subprocess.Popen(
+                [str(SCRIPT), "restore-test", str(backup)], env=environment,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            try:
+                deadline = time.monotonic() + 2
+                while (
+                    not (control / "snapshot-opened").exists()
+                    and process.poll() is None
+                    and time.monotonic() < deadline
+                ):
+                    time.sleep(0.02)
+                self.assertTrue(
+                    (control / "snapshot-opened").exists(),
+                    "restore depended on the forbidden hardlink",
+                )
+                (backup / "brain.dump").write_bytes(b"concurrently-published-replacement")
+                (backup / "manifest.json").write_text("{}")
+                (control / "continue").touch()
+                stdout, stderr = process.communicate(timeout=5)
+                self.assertEqual(process.returncode, 0, stderr)
+                self.assertIn('"status": "pass"', stdout)
+            finally:
+                (control / "continue").touch()
+                if process.poll() is None:
+                    try:
+                        process.communicate(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.communicate()
+                else:
+                    process.communicate()
 
 
 if __name__ == "__main__":

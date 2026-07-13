@@ -62,7 +62,7 @@ PY
     [ -f "$BACKUP_DIR/brain.dump" ] && [ -f "$BACKUP_DIR/manifest.json" ] || usage
     snapshot=$(mktemp -d "$BACKUP_DIR/.restore.XXXXXX")
     trap 'rm -rf "$snapshot"' EXIT
-    ln "$BACKUP_DIR/brain.dump" "$snapshot/brain.dump"
+    cp --reflink=auto -- "$BACKUP_DIR/brain.dump" "$snapshot/brain.dump"
     cp "$BACKUP_DIR/manifest.json" "$snapshot/manifest.json"
     expected_sha=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["dump_sha256"])' "$snapshot/manifest.json")
     actual_sha=$(sha256sum "$snapshot/brain.dump" | awk '{print $1}')
