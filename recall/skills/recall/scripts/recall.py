@@ -477,11 +477,23 @@ def codex_record(data: dict) -> tuple[list[tuple[float | None, str, str, list[tu
                 value = payload.get(source, data.get(source))
                 meta[target] = clean_text(value) if isinstance(value, str) else value
         return out, meta
+    if typ == "event_msg" and isinstance(payload, dict):
+        event_surface = {
+            "user_message": "user",
+            "agent_message": "assistant",
+        }.get(payload.get("type"))
+        message = payload.get("message")
+        if event_surface and isinstance(message, str) and message:
+            out.append((ts, event_surface, clean_text(message), []))
+        return out, meta
     if typ != "response_item" or not isinstance(payload, dict):
         return out, meta
     role = payload.get("role")
     ptype = payload.get("type")
-    if role in ("user", "assistant"):
+    message_surface = role if role in ("user", "assistant") else (
+        "assistant" if ptype == "agent_message" else None
+    )
+    if message_surface:
         texts = []
         for block in payload.get("content", []) if isinstance(payload.get("content"), list) else []:
             if isinstance(block, dict) and block.get("type") in ("input_text", "output_text", "text"):
@@ -489,12 +501,13 @@ def codex_record(data: dict) -> tuple[list[tuple[float | None, str, str, list[tu
         if not texts and isinstance(payload.get("content"), str):
             texts = [payload["content"]]
         if texts:
-            out.append((ts, role, clean_text("\n".join(texts)), []))
-    elif ptype == "function_call":
+            out.append((ts, message_surface, clean_text("\n".join(texts)), []))
+    elif ptype in {"function_call", "custom_tool_call"}:
         name = str(payload.get("name", ""))
-        out.append((ts, "tool_input", clipped(payload.get("arguments", ""), MAX_TOOL_INPUT), [("tool", name)] if name else []))
-    elif ptype == "function_call_output":
-        out.append((ts, "tool_output", clipped(payload.get("output", ""), MAX_TOOL_OUTPUT), []))
+        tool_input = payload.get("arguments") if ptype == "function_call" else payload.get("input")
+        out.append((ts, "tool_input", clipped(tool_input or "", MAX_TOOL_INPUT), [("tool", name)] if name else []))
+    elif ptype in {"function_call_output", "custom_tool_call_output"}:
+        out.append((ts, "tool_output", clipped(content_text(payload.get("output", "")), MAX_TOOL_OUTPUT), []))
     return [(a, b, c, d) for a, b, c, d in out if c], meta
 
 

@@ -144,6 +144,79 @@ class RecallEngineTest(unittest.TestCase):
         self.assertNotIn(secret, stored[0]); self.assertNotIn(secret, stored[1])
         self.assertEqual(stored[0], "[redacted-secret-line]")
 
+    def test_current_codex_record_shapes_project_user_agent_and_tool_surfaces(self):
+        marker = "c6a-current-codex-projection-4f18"
+        cases = [
+            (
+                {
+                    "timestamp": "2026-07-13T00:00:00Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "user_message", "message": marker + " question",
+                        "images": [], "local_images": [], "text_elements": [],
+                    },
+                },
+                ("user", marker + " question"),
+            ),
+            (
+                {
+                    "timestamp": "2026-07-13T00:00:00Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "agent_message", "message": marker,
+                        "phase": "final_answer", "memory_citation": None,
+                    },
+                },
+                ("assistant", marker),
+            ),
+            (
+                {
+                    "timestamp": "2026-07-13T00:00:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "agent_message", "author": "assistant",
+                        "recipient": "user", "content": [
+                            {"type": "text", "text": marker + " response"},
+                            {"type": "encrypted_content", "encrypted_content": "opaque"},
+                        ],
+                    },
+                },
+                ("assistant", marker + " response"),
+            ),
+            (
+                {
+                    "timestamp": "2026-07-13T00:00:02Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "custom_tool_call", "name": "synthetic_tool",
+                        "call_id": "call-1", "input": marker + " input",
+                    },
+                },
+                ("tool_input", marker + " input"),
+            ),
+            (
+                {
+                    "timestamp": "2026-07-13T00:00:03Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "custom_tool_call_output", "call_id": "call-1",
+                        "output": [{"type": "text", "text": marker + " output"}],
+                    },
+                },
+                ("tool_output", marker + " output"),
+            ),
+        ]
+        for record, expected in cases:
+            with self.subTest(record_type=record["payload"]["type"]):
+                parsed, _metadata = engine.codex_record(record)
+                self.assertEqual([(surface, text) for _, surface, text, _ in parsed], [expected])
+
+        ignored, _metadata = engine.codex_record({
+            "timestamp": "2026-07-13T00:00:04Z", "type": "event_msg",
+            "payload": {"type": "token_count", "info": {"total": 42}},
+        })
+        self.assertEqual(ignored, [])
+
     def test_partial_fts_or_fallback_returns_natural_partial_matches(self):
         (self.claude / "alpha.jsonl").write_text(json.dumps({"type":"user", "timestamp":"2026-01-01T00:00:00Z", "message":{"content":"alpha bravo only"}}) + "\n")
         (self.claude / "beta.jsonl").write_text(json.dumps({"type":"user", "timestamp":"2026-01-01T00:00:01Z", "message":{"content":"alpha charlie only"}}) + "\n")
