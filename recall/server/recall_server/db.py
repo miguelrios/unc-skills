@@ -16,7 +16,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from . import PROJECTOR_VERSION
-from .projectors import advisory_lock_key, canonical_json, event_receipt, legacy_engine, partial_lexical_probes, preferred_phrase_probes, project, redact_text, validate_envelope
+from .projectors import advisory_lock_key, canonical_json, event_receipt, legacy_engine, partial_lexical_probes, phrase_query_spec, preferred_phrase_probes, project, redact_text, validate_envelope
 
 
 class IdempotencyConflict(Exception):
@@ -530,14 +530,13 @@ class BrainStore:
                         if exact_rows:
                             break
                 else:
-                    for phrase_index, phrase in enumerate(preferred_phrase_probes(engine.phrase_queries(query))):
-                        diagnostic_leg = "phrase" if phrase_index == 0 else "phrase-fallback"
-                        merge(run_leg(diagnostic_leg, lambda phrase=phrase: self._lexical_leg(
-                            conn, phrase, "phraseto_tsquery", filters, "phrase", 3,
+                    phrase_spec = phrase_query_spec(preferred_phrase_probes(engine.phrase_queries(query)))
+                    if phrase_spec:
+                        phrase_query, phrase_function = phrase_spec
+                        merge(run_leg("phrase", lambda: self._lexical_leg(
+                            conn, phrase_query, phrase_function, filters, "phrase", 3,
                             limit=100, authorized_source=authorized_source, deadline_at=deadline_at,
                         )))
-                        if not should_run_partial(candidate_count=len(candidates), result_limit=limit):
-                            break
                     entity_values = [
                         part
                         for term in informative

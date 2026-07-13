@@ -130,6 +130,16 @@ def preferred_phrase_probe(phrases: list[str]) -> str | None:
     return probes[0] if probes else None
 
 
+def phrase_query_spec(probes: list[str]) -> tuple[str, str] | None:
+    """Compile bounded phrase alternatives into one indexed PostgreSQL query."""
+    if not probes:
+        return None
+    if len(probes) == 1:
+        return probes[0], "phraseto_tsquery"
+    quoted = [f'"{probe.replace(chr(34), " ")}"' for probe in probes]
+    return " OR ".join(quoted), "websearch_to_tsquery"
+
+
 def project(envelope: dict, revision: int) -> tuple[list[dict], dict]:
     """Return sanitized items and session metadata for one canonical event."""
     kind = envelope["kind"]

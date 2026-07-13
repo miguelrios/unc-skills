@@ -9,7 +9,7 @@ from pathlib import Path
 SERVER = Path(__file__).resolve().parents[2] / "server"
 sys.path.insert(0, str(SERVER))
 
-from recall_server.projectors import advisory_lock_key, canonical_json, partial_lexical_probes, preferred_phrase_probe, preferred_phrase_probes, project, redact_text, validate_envelope
+from recall_server.projectors import advisory_lock_key, canonical_json, partial_lexical_probes, phrase_query_spec, preferred_phrase_probe, preferred_phrase_probes, project, redact_text, validate_envelope
 from recall_server.db import evidence_rank_components, retrieval_leg_order, should_run_partial
 
 
@@ -136,6 +136,13 @@ class EnvelopeContractTest(unittest.TestCase):
     def test_sparse_phrase_candidates_do_not_suppress_structural_fallback(self) -> None:
         self.assertTrue(should_run_partial(candidate_count=1, result_limit=10))
         self.assertFalse(should_run_partial(candidate_count=29, result_limit=10))
+
+    def test_phrase_fallbacks_share_one_bounded_database_leg(self) -> None:
+        self.assertEqual(
+            phrase_query_spec(["ConnectTimeout transient dispatch error", "transient dispatch error"]),
+            ('"ConnectTimeout transient dispatch error" OR "transient dispatch error"', "websearch_to_tsquery"),
+        )
+        self.assertEqual(phrase_query_spec(["504 gateway timeout"]), ("504 gateway timeout", "phraseto_tsquery"))
 
     def test_rank_components_keep_identifier_phrase_and_error_evidence_distinct(self) -> None:
         identifier = evidence_rank_components(
