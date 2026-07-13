@@ -9,7 +9,7 @@ from pathlib import Path
 SERVER = Path(__file__).resolve().parents[2] / "server"
 sys.path.insert(0, str(SERVER))
 
-from recall_server.projectors import advisory_lock_key, canonical_json, partial_lexical_probes, project, redact_text, validate_envelope
+from recall_server.projectors import advisory_lock_key, canonical_json, partial_lexical_probes, preferred_phrase_probe, project, redact_text, validate_envelope
 
 
 def envelope(**updates):
@@ -81,6 +81,15 @@ class EnvelopeContractTest(unittest.TestCase):
         self.assertEqual(
             partial_lexical_probes(["greptile", "review", "passes"], has_time_filter=True)[-1],
             ("greptile", "time-anchor", 1),
+        )
+
+    def test_compact_parser_phrase_is_preferred_over_the_full_question(self) -> None:
+        self.assertEqual(
+            preferred_phrase_probe([
+                "what was that 504 gateway timeout we hit from a tool call",
+                "timeout we hit from a tool", "504 gateway timeout",
+            ]),
+            "504 gateway timeout",
         )
 
 

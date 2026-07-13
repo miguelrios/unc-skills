@@ -16,7 +16,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from . import PROJECTOR_VERSION
-from .projectors import advisory_lock_key, canonical_json, event_receipt, legacy_engine, partial_lexical_probes, project, redact_text, validate_envelope
+from .projectors import advisory_lock_key, canonical_json, event_receipt, legacy_engine, partial_lexical_probes, preferred_phrase_probe, project, redact_text, validate_envelope
 
 
 class IdempotencyConflict(Exception):
@@ -30,7 +30,7 @@ class SearchDeadlineExceeded(Exception):
 class BrainStore:
     def __init__(self, dsn: str, search_deadline_ms: int | None = None):
         self.dsn = dsn
-        configured = search_deadline_ms if search_deadline_ms is not None else int(os.environ.get("RECALL_SEARCH_DEADLINE_MS", "300"))
+        configured = search_deadline_ms if search_deadline_ms is not None else int(os.environ.get("RECALL_SEARCH_DEADLINE_MS", "250"))
         if not 10 <= configured <= 2000:
             raise ValueError("search deadline must be between 10 and 2000 milliseconds")
         self.search_deadline_ms = configured
@@ -464,10 +464,10 @@ class BrainStore:
 
         try:
             with self.connect() as conn:
-                phrases = engine.phrase_queries(query)
-                if phrases:
+                phrase = preferred_phrase_probe(engine.phrase_queries(query))
+                if phrase:
                     merge(run_leg("phrase", lambda: self._lexical_leg(
-                        conn, phrases[0], "phraseto_tsquery", filters, "phrase", 2,
+                        conn, phrase, "phraseto_tsquery", filters, "phrase", 3,
                         authorized_source=authorized_source, deadline_at=deadline_at,
                     )))
                 identifiers = sorted(
@@ -492,12 +492,12 @@ class BrainStore:
                 for identifier in identifiers[:3]:
                     exact_rows = run_leg("identifier", lambda identifier=identifier: self._lexical_leg(
                         conn, identifier, "plainto_tsquery", filters, "identifier", 3,
-                        exact=identifier, authorized_source=authorized_source, deadline_at=deadline_at,
+                        exact=identifier, limit=100, authorized_source=authorized_source, deadline_at=deadline_at,
                     ))
                     merge(exact_rows)
                     if exact_rows:
                         break
-                if not identifiers:
+                if not identifiers and not any(row["tier"] >= 3 for row in candidates.values()):
                     for probe, leg, tier in partial_lexical_probes(
                         informative,
                         has_time_filter=bool(filters.get("since") or filters.get("until")),
@@ -520,7 +520,8 @@ class BrainStore:
             matched = [term for term in informative if term.casefold() in row["text_redacted"].casefold()]
             if row["tier"] == 0 and len([term for term in matched if len(term) >= 5]) < 2:
                 continue
-            weight = {"user": 4.0, "assistant": 2.0, "tool_input": 1.5, "tool_output": 1.0}.get(row["surface"], 1.0)
+            structural = bool(row["legs"] & {"phrase", "pair", "anchor", "entity", "identifier"})
+            weight = 1.0 if structural else {"user": 4.0, "assistant": 2.0, "tool_input": 1.5, "tool_output": 1.0}.get(row["surface"], 1.0)
             occurred = row["occurred_at"] or row["started_at"]
             epoch = occurred.timestamp() if occurred else now
             score = max(0.01, float(row["lexical_rank"])) * weight

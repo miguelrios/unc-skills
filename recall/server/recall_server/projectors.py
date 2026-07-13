@@ -103,6 +103,11 @@ def partial_lexical_probes(informative: list[str], *, has_time_filter: bool) -> 
     return probes[:3]
 
 
+def preferred_phrase_probe(phrases: list[str]) -> str | None:
+    """Prefer the parser's compact error/quoted window over a filler-heavy question."""
+    return phrases[-1] if phrases else None
+
+
 def project(envelope: dict, revision: int) -> tuple[list[dict], dict]:
     """Return sanitized items and session metadata for one canonical event."""
     kind = envelope["kind"]
