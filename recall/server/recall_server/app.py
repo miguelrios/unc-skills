@@ -186,6 +186,12 @@ class Handler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(length))
                 if path == "/v1/search":
                     result = self.store.search(body.get("query"), body.get("filters", {}), body.get("limit", 10), authorized_source)
+                    timing = result.get("diagnostics", {})
+                    LOG.info(
+                        "search timing elapsed_ms=%s deadline_ms=%s deadline_exceeded=%s legs=%s",
+                        timing.get("elapsed_ms"), timing.get("deadline_ms"), timing.get("deadline_exceeded"),
+                        ",".join(str(item.get("leg")) for item in timing.get("legs", [])),
+                    )
                 elif path == "/v1/show":
                     result = self.store.show(
                         body.get("target", ""), around=body.get("around"),

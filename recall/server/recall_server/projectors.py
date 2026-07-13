@@ -71,6 +71,38 @@ def item_receipt(source_id: str, native_id: str, revision: int, ordinal: int) ->
     return f"{event_receipt(source_id, native_id, revision)}#item={ordinal}"
 
 
+def projected_entities(engine, text: str, extra: list[tuple[str, str]] | None = None) -> list[dict]:
+    return [
+        {"kind": kind, "value": value, "normalized": value.casefold()}
+        for kind, value in engine.extract_entities(text, extra)
+    ]
+
+
+def partial_lexical_probes(informative: list[str], *, has_time_filter: bool) -> list[tuple[str, str, int]]:
+    """Bounded structural probes for one-token drift; never encode domain answers."""
+    if not informative:
+        return []
+    scored = sorted(
+        enumerate(informative),
+        key=lambda item: (
+            bool(re.search(r"[._/-]", item[1])),
+            any(character.isdigit() for character in item[1]),
+            len(item[1]),
+            -item[0],
+        ),
+        reverse=True,
+    )
+    probes: list[tuple[str, str, int]] = []
+    if len(scored) >= 2:
+        probes.append((" ".join([scored[0][1], scored[1][1]]), "pair", 2))
+    compound = [value for value in informative if re.search(r"[._/-]", value)]
+    if compound:
+        probes.append((max(compound, key=len), "anchor", 2))
+    if has_time_filter and not compound:
+        probes.append((informative[0], "time-anchor", 1))
+    return probes[:3]
+
+
 def project(envelope: dict, revision: int) -> tuple[list[dict], dict]:
     """Return sanitized items and session metadata for one canonical event."""
     kind = envelope["kind"]
@@ -95,13 +127,15 @@ def project(envelope: dict, revision: int) -> tuple[list[dict], dict]:
         parsed, parsed_meta = parser(content)
         metadata.update({key: redact_text(str(value)) for key, value in parsed_meta.items() if value is not None})
         metadata["harness"] = harness
-        for ordinal, (timestamp, surface, text, _entities) in enumerate(parsed):
+        for ordinal, (timestamp, surface, text, entities) in enumerate(parsed):
+            cleaned = engine.clean_text(text)
             items.append({
                 "ordinal": ordinal,
                 "occurred_at": timestamp,
                 "role": surface,
                 "surface": surface,
-                "text_redacted": engine.clean_text(text),
+                "text_redacted": cleaned,
+                "entities": projected_entities(engine, cleaned, entities),
                 "receipt": item_receipt(envelope["source_id"], envelope["native_id"], revision, ordinal),
             })
         return items, metadata
@@ -118,12 +152,14 @@ def project(envelope: dict, revision: int) -> tuple[list[dict], dict]:
         text = json.dumps(content, sort_keys=True)
         role = None
         surface = kind
+    cleaned = redact_text(text)
     items.append({
         "ordinal": 0,
         "occurred_at": envelope["occurred_at"],
         "role": role,
         "surface": surface,
-        "text_redacted": redact_text(text),
+        "text_redacted": cleaned,
+        "entities": projected_entities(legacy_engine(), cleaned),
         "receipt": item_receipt(envelope["source_id"], envelope["native_id"], revision, 0),
     })
     return items, metadata

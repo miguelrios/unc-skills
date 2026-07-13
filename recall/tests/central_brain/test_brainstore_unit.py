@@ -9,7 +9,7 @@ from pathlib import Path
 SERVER = Path(__file__).resolve().parents[2] / "server"
 sys.path.insert(0, str(SERVER))
 
-from recall_server.projectors import advisory_lock_key, canonical_json, project, redact_text, validate_envelope
+from recall_server.projectors import advisory_lock_key, canonical_json, partial_lexical_probes, project, redact_text, validate_envelope
 
 
 def envelope(**updates):
@@ -60,8 +60,28 @@ class EnvelopeContractTest(unittest.TestCase):
         items, _ = project(envelope(), 3)
         self.assertEqual(items[0]["receipt"], "recall://codex:laptop/session-1:turn-1?rev=3#item=0")
 
+    def test_projection_carries_shared_normalized_entities(self) -> None:
+        marker = "DEADBEEF-1234-1234-1234-123456789ABC"
+        items, _ = project(envelope(content={"role": "user", "text": f"/tmp/trace.json {marker} ConnectTimeout"}), 1)
+        self.assertIn({"kind": "file_path", "value": "/tmp/trace.json", "normalized": "/tmp/trace.json"}, items[0]["entities"])
+        self.assertIn({"kind": "uuid", "value": marker.lower(), "normalized": marker.lower()}, items[0]["entities"])
+        self.assertIn({"kind": "error", "value": "ConnectTimeout", "normalized": "connecttimeout"}, items[0]["entities"])
+
     def test_redaction_does_not_use_semantic_matching(self) -> None:
         self.assertEqual(redact_text("a harmless discussion about password rotation"), "a harmless discussion about password rotation")
+
+    def test_partial_probes_prefer_structural_anchors_and_are_bounded(self) -> None:
+        probes = partial_lexical_probes(
+            ["foreign-key", "violation", "check_result", "agent_instance_id"],
+            has_time_filter=False,
+        )
+        self.assertEqual(probes[0], ("agent_instance_id check_result", "pair", 2))
+        self.assertIn(("agent_instance_id", "anchor", 2), probes)
+        self.assertLessEqual(len(probes), 3)
+        self.assertEqual(
+            partial_lexical_probes(["greptile", "review", "passes"], has_time_filter=True)[-1],
+            ("greptile", "time-anchor", 1),
+        )
 
 
 if __name__ == "__main__":

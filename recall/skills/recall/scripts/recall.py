@@ -315,8 +315,9 @@ def discover(root: Path, harness: str):
     return sorted(p for p in root.rglob("*.jsonl") if p.is_file())
 
 
-def add_entities(conn: sqlite3.Connection, chunk_id: int, text: str, extra: list[tuple[str, str]]) -> None:
-    found = set(extra)
+def extract_entities(text: str, extra: list[tuple[str, str]] | None = None) -> list[tuple[str, str]]:
+    """Return deterministic entities without binding projection semantics to SQLite."""
+    found = set(extra or [])
     found.update(("file_path", x) for x in PATH_RE.findall(text))
     found.update(("pr", x) for x in re.findall(r"#\d{3,5}\b", text))
     found.update(("ticket", x) for x in re.findall(r"\bPAR-\d+\b", text))
@@ -326,9 +327,13 @@ def add_entities(conn: sqlite3.Connection, chunk_id: int, text: str, extra: list
     # Full UUIDs are also indexed by their conventional eight-hex short form.
     found.update(("uuid", x[:8].lower()) for x in uuid_values if "-" in x)
     found.update(("skill", x) for x in re.findall(r"Launching skill:\s*(\w[\w-]*)", text))
-    found.update(("error", x) for x in re.findall(r"\b\w+(?:Error|Exception)\b", text))
+    found.update(("error", x) for x in re.findall(r"\b\w+(?:Error|Exception|Timeout)\b", text))
+    return sorted(found)
+
+
+def add_entities(conn: sqlite3.Connection, chunk_id: int, text: str, extra: list[tuple[str, str]]) -> None:
     conn.executemany("INSERT INTO entities(chunk_id,kind,value) VALUES (?,?,?)",
-                     [(chunk_id, kind, value) for kind, value in found])
+                     [(chunk_id, kind, value) for kind, value in extract_entities(text, extra)])
 
 
 def content_text(value) -> str:

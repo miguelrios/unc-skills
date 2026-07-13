@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[3]
 SERVER = ROOT / "recall/server"
 sys.path.insert(0, str(SERVER))
 
-from recall_server.db import BrainStore
+from recall_server.db import BrainStore, SearchDeadlineExceeded
 from recall_server.projectors import canonical_json, project
 
 
@@ -116,7 +116,46 @@ def main() -> None:
             assert first_hit["path"] == "/evidence/codex-linux/session-1.jsonl"
             assert first_hit["receipt"].startswith("recall://codex:linux/session-1:turn-1?rev=1#item=")
             assert first_hit["tier"] >= 1 and first_hit["legs"]
+            diagnostics = searched["diagnostics"]
+            assert diagnostics["deadline_ms"] < 500 and diagnostics["elapsed_ms"] >= 0
+            assert diagnostics["legs"] and all(set(leg) == {"leg", "elapsed_ms", "n_results", "timed_out"} for leg in diagnostics["legs"])
+            assert "quartz" not in json.dumps(diagnostics).lower()
             assert request(base, "GET", "/v1/receipts/resolve?" + urllib.parse.urlencode({"receipt": first_hit["receipt"]}))[0] == 200
+
+            bounded_started = time.monotonic()
+            with store.connect() as deadline_conn:
+                try:
+                    with deadline_conn.transaction():
+                        store._execute_bounded(deadline_conn, "SELECT pg_sleep(1)", [], time.monotonic() + 0.03)
+                except SearchDeadlineExceeded:
+                    pass
+                else:
+                    raise AssertionError("adversarial query escaped the server deadline")
+            assert time.monotonic() - bounded_started < 0.25
+
+            entity_marker = "deadbeef-1234-1234-1234-123456789abc"
+            entity_env = make_envelope("session-entity:turn-1", {"role": "tool", "text": entity_marker}, parent="session-entity")
+            entity_status, entity_ack = request(base, "POST", "/v1/ingest/batches", {"events": [entity_env]}, "batch-entity")
+            assert entity_status == 201, (entity_status, entity_ack)
+            entity_search = store.search("which trace used " + entity_marker, {}, 5)
+            assert entity_search["results"][0]["session_native_id"] == "session-entity"
+            assert "entity" in entity_search["results"][0]["legs"]
+            with store.connect() as conn:
+                projected = conn.execute(
+                    "SELECT kind,value,normalized FROM entities ORDER BY kind,value"
+                ).fetchall()
+                assert {("uuid", entity_marker, entity_marker), ("uuid", "deadbeef", "deadbeef")} <= {
+                    (row["kind"], row["value"], row["normalized"]) for row in projected
+                }
+                conn.execute("DELETE FROM entities")
+                conn.execute("DELETE FROM projection_backfills WHERE name='entities-v2'")
+            first_backfill = store.backfill_entities(batch_size=1, max_batches=1)
+            assert first_backfill["items_scanned"] == 1 and not first_backfill["completed"]
+            final_backfill = store.backfill_entities(batch_size=3)
+            assert final_backfill["completed"] and final_backfill["last_item_id"] == final_backfill["target_item_id"]
+            assert store.backfill_entities(batch_size=3)["items_scanned"] == 0
+            entity_search = store.search("which trace used " + entity_marker, {}, 5)
+            assert entity_search["results"][0]["session_native_id"] == "session-entity"
 
             status, shown = request(base, "POST", "/v1/show", {
                 "target": first_hit["path"], "tail": 5, "prompts": False, "around": None,
@@ -250,6 +289,7 @@ def main() -> None:
                 before[receipt] = request(base, "GET", "/v1/receipts/resolve?" + urllib.parse.urlencode({"receipt": receipt}))[1]
             rebuild = store.rebuild()
             assert rebuild["items_before"] == rebuild["items_after"]
+            assert rebuild["entities_before"] == rebuild["entities_after"]
             for receipt, _ in fixture_receipts:
                 after = request(base, "GET", "/v1/receipts/resolve?" + urllib.parse.urlencode({"receipt": receipt}))[1]
                 assert after == before[receipt]
@@ -266,6 +306,10 @@ def main() -> None:
                     "SELECT indexdef FROM pg_indexes WHERE schemaname='public' AND indexname='items_search_vector_idx'"
                 ).fetchone()
                 assert lexical_index and "to_tsvector" in lexical_index["indexdef"]
+                entity_index = conn.execute(
+                    "SELECT indexdef FROM pg_indexes WHERE schemaname='public' AND indexname='entities_normalized_source_idx'"
+                ).fetchone()
+                assert entity_index and "source_id" in entity_index["indexdef"] and "normalized" in entity_index["indexdef"]
                 summary = {
                     "source_events": conn.execute("SELECT count(*) AS n FROM source_events").fetchone()["n"],
                     "live_items": conn.execute("SELECT count(*) AS n FROM items WHERE deleted_at IS NULL").fetchone()["n"],
@@ -282,6 +326,11 @@ def main() -> None:
                     "projection_lag": store.service_metrics()["projection_lag"],
                     "tombstone_lookup_index": True,
                     "lexical_index": True,
+                    "entity_projection": True,
+                    "entity_source_index": True,
+                    "entity_rebuild_equivalence": True,
+                    "bounded_adversarial_query": True,
+                    "content_free_search_diagnostics": True,
                     "remote_search_receipt_resolved": True,
                     "remote_show_window": True,
                     "remote_related_context": True,

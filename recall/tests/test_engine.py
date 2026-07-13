@@ -111,6 +111,19 @@ class RecallEngineTest(unittest.TestCase):
         self.assertEqual(self.rows("select length(text) from chunks where surface='tool_output'")[0][0], 4096)
         self.cli("search", '"foo OR bar)(')
 
+    def test_entity_extraction_is_pure_normalized_and_shared(self):
+        uuid = "DEADBEEF-1234-1234-1234-123456789ABC"
+        entities = engine.extract_entities(
+            f"see /workspace/pkg/file.py and {uuid} after ConnectTimeout",
+            [("tool", "Read")],
+        )
+        self.assertIn(("file_path", "/workspace/pkg/file.py"), entities)
+        self.assertIn(("uuid", uuid.lower()), entities)
+        self.assertIn(("uuid", "deadbeef"), entities)
+        self.assertIn(("error", "ConnectTimeout"), entities)
+        self.assertIn(("tool", "Read"), entities)
+        self.assertEqual(entities, sorted(set(entities)))
+
     def test_quoted_secret_and_codex_metadata_are_redacted(self):
         secret = "AbCdEfGhIjKlMnOpQrStUvWxYz123456"
         rollout = self.codex / "2026/01/01/rollout-secret.jsonl"

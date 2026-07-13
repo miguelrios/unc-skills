@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import secrets
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,16 +16,24 @@ import psycopg
 from psycopg.rows import dict_row
 
 from . import PROJECTOR_VERSION
-from .projectors import advisory_lock_key, canonical_json, event_receipt, legacy_engine, project, redact_text, validate_envelope
+from .projectors import advisory_lock_key, canonical_json, event_receipt, legacy_engine, partial_lexical_probes, project, redact_text, validate_envelope
 
 
 class IdempotencyConflict(Exception):
     pass
 
 
+class SearchDeadlineExceeded(Exception):
+    pass
+
+
 class BrainStore:
-    def __init__(self, dsn: str):
+    def __init__(self, dsn: str, search_deadline_ms: int | None = None):
         self.dsn = dsn
+        configured = search_deadline_ms if search_deadline_ms is not None else int(os.environ.get("RECALL_SEARCH_DEADLINE_MS", "300"))
+        if not 10 <= configured <= 2000:
+            raise ValueError("search deadline must be between 10 and 2000 milliseconds")
+        self.search_deadline_ms = configured
 
     def connect(self):
         return psycopg.connect(self.dsn, row_factory=dict_row)
@@ -254,6 +264,15 @@ class BrainStore:
                 "INSERT INTO chunks(item_id,ordinal,text_redacted,receipt) VALUES (%s,0,%s,%s)",
                 (row["id"], item["text_redacted"], item["receipt"]),
             )
+            if item.get("entities"):
+                with conn.cursor() as cursor:
+                    cursor.executemany(
+                        "INSERT INTO entities(item_id,source_id,kind,value,normalized) VALUES (%s,%s,%s,%s,%s)",
+                        [
+                            (row["id"], envelope["source_id"], entity["kind"], entity["value"], entity["normalized"])
+                            for entity in item["entities"]
+                        ],
+                    )
         self._advance_projector(conn, event_id)
 
     def _advance_projector(self, conn, event_id: int) -> None:
@@ -314,7 +333,8 @@ class BrainStore:
 
     def _lexical_leg(self, conn, query: str, query_function: str, filters: dict,
                      leg: str, tier: int, *, exact: str | None = None,
-                     limit: int = 400, authorized_source: str | None = None) -> list[dict]:
+                     limit: int = 400, authorized_source: str | None = None,
+                     deadline_at: float | None = None) -> list[dict]:
         if query_function not in {"plainto_tsquery", "phraseto_tsquery", "websearch_to_tsquery"}:
             raise ValueError("unsupported query function")
         where, params = self._read_filters(filters, authorized_source)
@@ -342,8 +362,48 @@ class BrainStore:
         if exact is not None:
             values.append(exact.casefold())
         values.append(limit)
-        rows = conn.execute(sql, values).fetchall()
+        rows = self._execute_bounded(conn, sql, values, deadline_at).fetchall()
         return [{**dict(row), "leg": leg, "tier": tier} for row in rows]
+
+    @staticmethod
+    def _execute_bounded(conn, sql: str, values: list[Any] | tuple[Any, ...], deadline_at: float | None):
+        if deadline_at is None:
+            return conn.execute(sql, values)
+        remaining_ms = int((deadline_at - time.monotonic()) * 1000)
+        if remaining_ms <= 0:
+            raise SearchDeadlineExceeded("search deadline exceeded")
+        conn.execute("SELECT set_config('statement_timeout', %s, true)", (f"{remaining_ms}ms",))
+        try:
+            return conn.execute(sql, values)
+        except psycopg.errors.QueryCanceled as exc:
+            raise SearchDeadlineExceeded("search deadline exceeded") from exc
+
+    def _entity_leg(self, conn, values: list[str], filters: dict,
+                    *, authorized_source: str | None = None, limit: int = 400,
+                    deadline_at: float | None = None) -> list[dict]:
+        normalized = sorted({value.casefold() for value in values if value})
+        if not normalized:
+            return []
+        where, params = self._read_filters(filters, authorized_source)
+        rows = self._execute_bounded(
+            conn,
+            f"""
+            SELECT DISTINCT i.id,i.source_id,i.session_native_id,i.event_native_id,i.occurred_at,i.surface,
+                   i.text_redacted,i.receipt,i.projector_version,s.started_at,s.ended_at,s.metadata,
+                   se.envelope #>> '{{provenance,original_path}}' AS path,se.observed_at,
+                   1.0::real AS lexical_rank
+            FROM entities e
+            JOIN items i ON i.id=e.item_id
+            JOIN sessions s ON s.source_id=i.source_id AND s.native_id=i.session_native_id
+            JOIN source_events se ON se.id=i.event_id
+            WHERE e.normalized = ANY(%s) AND {where}
+            ORDER BY i.id DESC
+            LIMIT %s
+            """,
+            [normalized, *params, limit],
+            deadline_at,
+        ).fetchall()
+        return [{**dict(row), "leg": "entity", "tier": 3} for row in rows]
 
     def search(self, query: str, filters: dict | None = None, limit: int = 10,
                authorized_source: str | None = None) -> dict:
@@ -357,8 +417,18 @@ class BrainStore:
         engine = legacy_engine()
         informative = engine.informative_terms(query)
         if not informative:
-            return {"results": [], "abstention_reason": "no informative lexical terms"}
+            return {
+                "results": [], "abstention_reason": "no informative lexical terms",
+                "diagnostics": {
+                    "deadline_ms": self.search_deadline_ms, "elapsed_ms": 0.0,
+                    "deadline_exceeded": False, "legs": [],
+                },
+            }
         candidates: dict[int, dict] = {}
+        started = time.monotonic()
+        deadline_at = started + self.search_deadline_ms / 1000
+        leg_timings: list[dict[str, Any]] = []
+        deadline_exceeded = False
 
         def merge(rows: list[dict]) -> None:
             for row in rows:
@@ -374,11 +444,33 @@ class BrainStore:
                         row.pop("leg")
                         candidates[row["id"]] = row
 
-        with self.connect() as conn:
-            phrases = engine.phrase_queries(query)
-            if phrases:
-                merge(self._lexical_leg(conn, phrases[0], "phraseto_tsquery", filters, "phrase", 2, authorized_source=authorized_source))
-            identifiers = sorted(
+        def run_leg(name: str, operation) -> list[dict]:
+            nonlocal deadline_exceeded
+            leg_started = time.monotonic()
+            try:
+                rows = operation()
+                leg_timings.append({
+                    "leg": name, "elapsed_ms": round((time.monotonic() - leg_started) * 1000, 3),
+                    "n_results": len(rows), "timed_out": False,
+                })
+                return rows
+            except SearchDeadlineExceeded:
+                deadline_exceeded = True
+                leg_timings.append({
+                    "leg": name, "elapsed_ms": round((time.monotonic() - leg_started) * 1000, 3),
+                    "n_results": 0, "timed_out": True,
+                })
+                raise
+
+        try:
+            with self.connect() as conn:
+                phrases = engine.phrase_queries(query)
+                if phrases:
+                    merge(run_leg("phrase", lambda: self._lexical_leg(
+                        conn, phrases[0], "phraseto_tsquery", filters, "phrase", 2,
+                        authorized_source=authorized_source, deadline_at=deadline_at,
+                    )))
+                identifiers = sorted(
                 engine.identifier_terms(informative),
                 key=lambda value: (
                     bool(re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", value)),
@@ -386,15 +478,41 @@ class BrainStore:
                 ),
                 reverse=True,
             )
-            for identifier in identifiers[:3]:
-                exact_rows = self._lexical_leg(
-                    conn, identifier, "plainto_tsquery", filters, "identifier", 2,
-                    exact=identifier, authorized_source=authorized_source,
-                )
-                merge(exact_rows)
-                if exact_rows:
-                    break
-            merge(self._lexical_leg(conn, " ".join(informative), "plainto_tsquery", filters, "all", 1, authorized_source=authorized_source))
+                entity_values = list(identifiers)
+                for term in informative:
+                    entity_values.extend(
+                        part for part in re.split(r"[./_-]+", term)
+                        if re.search(r"(?:error|exception|timeout)$", part, re.I)
+                    )
+                if entity_values:
+                    merge(run_leg("entity", lambda: self._entity_leg(
+                        conn, entity_values, filters, authorized_source=authorized_source,
+                        deadline_at=deadline_at,
+                    )))
+                for identifier in identifiers[:3]:
+                    exact_rows = run_leg("identifier", lambda identifier=identifier: self._lexical_leg(
+                        conn, identifier, "plainto_tsquery", filters, "identifier", 2,
+                        exact=identifier, authorized_source=authorized_source, deadline_at=deadline_at,
+                    ))
+                    merge(exact_rows)
+                    if exact_rows:
+                        break
+                if not identifiers:
+                    for probe, leg, tier in partial_lexical_probes(
+                        informative,
+                        has_time_filter=bool(filters.get("since") or filters.get("until")),
+                    ):
+                        merge(run_leg(leg, lambda probe=probe, leg=leg, tier=tier: self._lexical_leg(
+                            conn, probe, "plainto_tsquery", filters, leg, tier,
+                            limit=100, authorized_source=authorized_source, deadline_at=deadline_at,
+                        )))
+                if not any(row["tier"] >= 3 for row in candidates.values()):
+                    merge(run_leg("all", lambda: self._lexical_leg(
+                        conn, " ".join(informative), "plainto_tsquery", filters, "all", 1,
+                        authorized_source=authorized_source, deadline_at=deadline_at,
+                    )))
+        except SearchDeadlineExceeded:
+            pass
 
         now = datetime.now(timezone.utc).timestamp()
         grouped: dict[tuple[str, str], tuple[tuple[int, float], dict]] = {}
@@ -428,7 +546,17 @@ class BrainStore:
                 "legs": sorted(row["legs"]), "tier": row["tier"],
                 "projector_version": row["projector_version"],
             })
-        return {"results": results, "abstention_reason": None if results else "insufficient lexical evidence"}
+        diagnostics = {
+            "deadline_ms": self.search_deadline_ms,
+            "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+            "deadline_exceeded": deadline_exceeded,
+            "legs": leg_timings,
+        }
+        return {
+            "results": results,
+            "abstention_reason": None if results else ("search deadline exceeded" if deadline_exceeded else "insufficient lexical evidence"),
+            "diagnostics": diagnostics,
+        }
 
     def show(self, target: str, *, around: str | None = None, tail: int = 0,
              prompts: bool = False, authorized_source: str | None = None) -> dict | None:
@@ -552,12 +680,99 @@ class BrainStore:
         with self.connect() as conn:
             with conn.transaction():
                 before = conn.execute("SELECT count(*) AS n FROM items WHERE deleted_at IS NULL").fetchone()["n"]
-                conn.execute("TRUNCATE chunks,items,sessions,projection_watermarks RESTART IDENTITY")
+                entities_before = conn.execute("SELECT count(*) AS n FROM entities").fetchone()["n"]
+                conn.execute("TRUNCATE entities,chunks,items,sessions,projection_watermarks RESTART IDENTITY")
                 rows = conn.execute("SELECT id,envelope,revision FROM source_events ORDER BY id").fetchall()
                 for row in rows:
                     self._project_one(conn, row["id"], row["envelope"], row["revision"])
                 after = conn.execute("SELECT count(*) AS n FROM items WHERE deleted_at IS NULL").fetchone()["n"]
-                return {"events": len(rows), "items_before": before, "items_after": after}
+                entities_after = conn.execute("SELECT count(*) AS n FROM entities").fetchone()["n"]
+                return {
+                    "events": len(rows), "items_before": before, "items_after": after,
+                    "entities_before": entities_before, "entities_after": entities_after,
+                }
+
+    def backfill_entities(self, batch_size: int = 5000, max_batches: int | None = None) -> dict:
+        """Resume an online canonical-event replay into the entity projection."""
+        if not 1 <= batch_size <= 20000:
+            raise ValueError("batch size must be between 1 and 20000")
+        if max_batches is not None and max_batches < 1:
+            raise ValueError("max batches must be positive")
+        engine = legacy_engine()
+        batches = scanned = inserted = 0
+        with self.connect() as conn:
+            conn.autocommit = True
+            conn.execute("SELECT pg_advisory_lock(hashtextextended('recall:entity-backfill',0))")
+            try:
+                while max_batches is None or batches < max_batches:
+                    with conn.transaction():
+                        state = conn.execute(
+                            "SELECT target_item_id,last_item_id,completed_at FROM projection_backfills WHERE name='entities-v2' FOR UPDATE"
+                        ).fetchone()
+                        if state is None:
+                            target = conn.execute("SELECT COALESCE(max(id),0) AS n FROM items").fetchone()["n"]
+                            conn.execute(
+                                "INSERT INTO projection_backfills(name,target_item_id,last_item_id) VALUES ('entities-v2',%s,0)",
+                                (target,),
+                            )
+                            state = {"target_item_id": target, "last_item_id": 0, "completed_at": None}
+                        if state["completed_at"] is not None:
+                            break
+                        rows = conn.execute(
+                            """SELECT i.id,i.ordinal,i.text_redacted,se.envelope,se.revision
+                               FROM items i JOIN source_events se ON se.id=i.event_id
+                               WHERE i.id>%s AND i.id<=%s ORDER BY i.id LIMIT %s""",
+                            (state["last_item_id"], state["target_item_id"], batch_size),
+                        ).fetchall()
+                        if not rows:
+                            conn.execute(
+                                "UPDATE projection_backfills SET completed_at=now(),updated_at=now() WHERE name='entities-v2'"
+                            )
+                            break
+                        entity_rows = []
+                        for row in rows:
+                            projected, _metadata = project(row["envelope"], row["revision"])
+                            projected_item = next(
+                                (item for item in projected if item["ordinal"] == row["ordinal"]), None
+                            )
+                            entities = projected_item.get("entities", []) if projected_item else [
+                                {"kind": kind, "value": value, "normalized": value.casefold()}
+                                for kind, value in engine.extract_entities(row["text_redacted"])
+                            ]
+                            entity_rows.extend(
+                                (row["id"], row["envelope"]["source_id"], entity["kind"], entity["value"], entity["normalized"])
+                                for entity in entities
+                            )
+                        if entity_rows:
+                            with conn.cursor() as cursor:
+                                cursor.executemany(
+                                    """INSERT INTO entities(item_id,source_id,kind,value,normalized)
+                                       VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+                                    entity_rows,
+                                )
+                        last_item_id = rows[-1]["id"]
+                        completed = last_item_id >= state["target_item_id"]
+                        conn.execute(
+                            """UPDATE projection_backfills SET last_item_id=%s,
+                               completed_at=CASE WHEN %s THEN now() ELSE NULL END,updated_at=now()
+                               WHERE name='entities-v2'""",
+                            (last_item_id, completed),
+                        )
+                        batches += 1
+                        scanned += len(rows)
+                        inserted += len(entity_rows)
+                        if completed:
+                            break
+                state = conn.execute(
+                    "SELECT target_item_id,last_item_id,completed_at FROM projection_backfills WHERE name='entities-v2'"
+                ).fetchone()
+            finally:
+                conn.execute("SELECT pg_advisory_unlock(hashtextextended('recall:entity-backfill',0))")
+        return {
+            "batches": batches, "items_scanned": scanned, "entity_rows_attempted": inserted,
+            "target_item_id": state["target_item_id"], "last_item_id": state["last_item_id"],
+            "completed": state["completed_at"] is not None,
+        }
 
     def export_raw(self) -> list[dict]:
         """Admin/offline API only; intentionally not routed by the HTTP app."""
