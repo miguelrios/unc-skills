@@ -1,0 +1,649 @@
+import asyncio
+import concurrent.futures
+import hashlib
+import importlib.util
+import json
+import os
+import pathlib
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import types
+import unittest
+from unittest import mock
+
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+RUNTIME_PATH = ROOT / "runtime" / "bridge_runtime.py"
+PLUGIN_PATH = ROOT / "runtime" / "plugin" / "__init__.py"
+NOTIFIER_PATH = ROOT / "skills" / "tether" / "scripts" / "tether_notify.py"
+INSTALL_PATH = ROOT / "install.sh"
+
+
+def load_runtime(home: pathlib.Path):
+    env = {
+        "HOME": str(home),
+        "HERMES_HOME": str(home / ".hermes"),
+        "XDG_DATA_HOME": str(home / ".local" / "share"),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+    }
+    with mock.patch.dict(os.environ, env, clear=False):
+        name = f"bridge_runtime_test_{id(home)}"
+        spec = importlib.util.spec_from_file_location(name, RUNTIME_PATH)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        return module
+
+
+class StoreTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.home = pathlib.Path(self.temp.name)
+        self.runtime = load_runtime(self.home)
+        self.store = self.runtime.Store(self.home / "bridges.db")
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def request(self, key="run-1"):
+        return {
+            "source_kind": "headless_run",
+            "source": {"run_id": "run-1", "cwd": "/tmp/project"},
+            "owner_user_id": "U12345678",
+            "team_id": "T12345678",
+            "channel_id": "C12345678",
+            "idempotency_key": key,
+        }
+
+    def test_idempotency_and_exact_thread_lookup(self):
+        first = self.store.create(self.request())
+        second = self.store.create(self.request())
+        self.assertEqual(first.bridge_id, second.bridge_id)
+        active = self.store.bind(first.bridge_id, "123.456")
+        self.assertEqual(self.store.find("T12345678", "C12345678", "123.456"), active)
+        self.assertIsNone(self.store.find("T12345678", "C99999999", "123.456"))
+
+    def test_events_are_deduplicated_and_serialized(self):
+        bridge = self.store.bind(self.store.create(self.request()).bridge_id, "123.456")
+        self.assertTrue(self.store.enqueue_event("111.1", bridge.bridge_id, "first"))
+        self.assertFalse(self.store.enqueue_event("111.1", bridge.bridge_id, "duplicate"))
+        self.assertTrue(self.store.enqueue_event("111.2", bridge.bridge_id, "second"))
+        first = self.store.claim_next_event(bridge.bridge_id)
+        self.assertEqual(first["text"], "first")
+        self.assertIsNone(self.store.claim_next_event(bridge.bridge_id), "a processing event blocks the next claim")
+        self.store.finish_event(first["event_id"])
+        self.assertEqual(self.store.claim_next_event(bridge.bridge_id)["text"], "second")
+
+    def test_processing_events_are_requeued_after_restart(self):
+        bridge = self.store.create(self.request())
+        self.assertTrue(self.store.enqueue_event("111.1", bridge.bridge_id, "resume me"))
+        self.assertEqual(self.store.claim_next_event(bridge.bridge_id)["text"], "resume me")
+        self.store.requeue_processing()
+        self.assertEqual(self.store.claim_next_event(bridge.bridge_id)["text"], "resume me")
+
+    def test_stored_errors_are_truncated(self):
+        bridge = self.store.create(self.request())
+        self.store.claim_event("111.1", bridge.bridge_id)
+        self.store.finish_event("111.1", "sensitive" * 500)
+        with self.store.connect() as db:
+            error = db.execute("SELECT error FROM bridge_events WHERE event_id='111.1'").fetchone()[0]
+        self.assertEqual(len(error), 1000)
+
+    def test_invalid_ids_fail_closed(self):
+        request = self.request()
+        request["owner_user_id"] = "not-a-slack-id"
+        with self.assertRaises(ValueError):
+            self.store.create(request)
+
+    def test_source_metadata_rejects_unknown_or_oversized_values(self):
+        request = self.request()
+        request["source"]["prompt"] = "should never be persisted"
+        with self.assertRaisesRegex(ValueError, "invalid bridge source"):
+            self.store.create(request)
+
+        request = self.request()
+        request["source"]["cwd"] = "x" * (self.runtime.MAX_SOURCE_VALUE + 1)
+        with self.assertRaisesRegex(ValueError, "source value is too large"):
+            self.store.create(request)
+
+    def test_broker_socket_is_private(self):
+        socket_path = self.home / "hermes" / "bridge.sock"
+        server = self.runtime.start_broker("test-token", socket_path)
+        try:
+            self.assertTrue(socket_path.is_socket())
+            self.assertEqual(socket_path.stat().st_mode & 0o777, 0o600)
+            with self.assertRaisesRegex(RuntimeError, "unsupported operation"):
+                self.runtime.broker_call({"op": "unsupported"}, socket_path)
+        finally:
+            server.shutdown()
+            server.server_close()
+            socket_path.unlink(missing_ok=True)
+
+    def test_broker_reuses_hermes_channel_and_allowlist_without_copying_ids(self):
+        broker = self.runtime.Broker("test-token", self.store)
+        request = {
+            "op": "notify", "text": "finished", "source_kind": "headless_run",
+            "source": {"run_id": "run-2", "cwd": "/tmp/project"},
+            "idempotency_key": "run-2",
+        }
+        with mock.patch.dict(os.environ, {
+            "SLACK_HOME_CHANNEL": "C12345678",
+            "SLACK_ALLOWED_USERS": "U12345678,U87654321",
+        }, clear=False), mock.patch.object(self.runtime, "slack_post", return_value="123.456"):
+            result = broker.handle(request)
+            status = broker.handle({"op": "status"})
+        bridge = self.store.get(result["bridge_id"])
+        self.assertEqual(bridge.channel_id, "C12345678")
+        self.assertEqual(bridge.owner_user_id, "*", "Hermes's explicit allowlist is shared by default")
+        self.assertEqual(status["allowed_user_count"], 2)
+        self.assertNotIn("allowed_users", status, "status reports readiness, never identities")
+
+    def test_concurrent_idempotent_notifications_post_one_root_message(self):
+        broker = self.runtime.Broker("test-token", self.store)
+        request = {
+            "op": "notify", "text": "finished", "source_kind": "headless_run",
+            "source": {"run_id": "run-concurrent", "cwd": "/tmp/project"},
+            "idempotency_key": "run-concurrent",
+        }
+        barrier = threading.Barrier(2)
+
+        def notify():
+            barrier.wait()
+            return broker.handle(dict(request))
+
+        with mock.patch.dict(os.environ, {
+            "SLACK_HOME_CHANNEL": "C12345678",
+            "SLACK_ALLOWED_USERS": "U12345678",
+        }, clear=False), mock.patch.object(self.runtime, "slack_post", return_value="123.456") as post:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                results = list(executor.map(lambda _: notify(), range(2)))
+
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual({result["thread_ts"] for result in results}, {"123.456"})
+        self.assertEqual(sorted(result["deduplicated"] for result in results), [False, True])
+
+
+class CredentialBoundaryTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.home = pathlib.Path(self.temp.name)
+        self.runtime = load_runtime(self.home)
+        self.bridge = self.runtime.Bridge(
+            "brg_test", "codex_session", {"session_id": "session-1", "cwd": str(self.home)},
+            "U12345678", "T12345678", "C12345678", "123.456", "key", "active",
+        )
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_gateway_secrets_are_absent_from_native_environment(self):
+        config = self.runtime.Config()
+        captured = {}
+
+        class Process:
+            returncode = 0
+            pid = 12345
+
+            def __init__(self, command, **kwargs):
+                captured["command"] = command
+                captured["env"] = kwargs["env"]
+
+            def communicate(self, input=None, timeout=None):
+                captured["input"] = input
+                return "native answer", ""
+
+        with mock.patch.dict(os.environ, {
+            "SLACK_BOT_TOKEN": "not-forwarded",
+            "OP_SERVICE_ACCOUNT_TOKEN": "not-forwarded",
+            "HOME": str(self.home),
+            "PATH": os.environ.get("PATH", ""),
+        }, clear=False), mock.patch.object(self.runtime, "load_config", return_value=config), mock.patch.object(
+            self.runtime, "_resolve_executable", return_value="/usr/bin/codex"
+        ), mock.patch.object(self.runtime.subprocess, "Popen", Process):
+            output = self.runtime.continue_native(self.bridge, "private operator prompt")
+
+        self.assertEqual(output, "native answer")
+        self.assertNotIn("private operator prompt", captured["command"])
+        self.assertEqual(captured["command"][-1], "-")
+        self.assertEqual(captured["input"], "private operator prompt")
+        self.assertNotIn("SLACK_BOT_TOKEN", captured["env"])
+        self.assertNotIn("OP_SERVICE_ACCOUNT_TOKEN", captured["env"])
+
+    def test_credential_helper_is_allowlisted_and_silent(self):
+        config = self.runtime.Config(
+            credential_command=("credential-helper",),
+            credential_env_allowlist=("OPENAI_API_KEY", "OPENAI_BASE_URL"),
+        )
+        result = types.SimpleNamespace(returncode=0, stdout=json.dumps({"OPENAI_API_KEY": "short-lived"}))
+        with mock.patch.object(
+            self.runtime, "_resolve_executable", return_value="/usr/bin/credential-helper"
+        ), mock.patch.object(self.runtime.subprocess, "run", return_value=result) as run:
+            values = self.runtime._credential_env(self.bridge, config)
+        self.assertEqual(values, {"OPENAI_API_KEY": "short-lived"})
+        self.assertEqual(run.call_args.kwargs["stderr"], subprocess.DEVNULL)
+        self.assertNotIn("SLACK_BOT_TOKEN", run.call_args.kwargs["env"])
+
+    def test_credential_helper_rejects_unlisted_or_slack_keys(self):
+        for values, allowlist in (
+            ({"AWS_SECRET_ACCESS_KEY": "x"}, ("OPENAI_API_KEY",)),
+            ({"SLACK_BOT_TOKEN": "x"}, ("SLACK_BOT_TOKEN",)),
+        ):
+            config = self.runtime.Config(
+                credential_command=("credential-helper",), credential_env_allowlist=allowlist
+            )
+            result = types.SimpleNamespace(returncode=0, stdout=json.dumps(values))
+            with mock.patch.object(
+                self.runtime, "_resolve_executable", return_value="/usr/bin/credential-helper"
+            ), mock.patch.object(self.runtime.subprocess, "run", return_value=result):
+                with self.assertRaises(self.runtime.NativeContinuationError):
+                    self.runtime._credential_env(self.bridge, config)
+
+    def test_missing_configured_executable_fails_closed(self):
+        with mock.patch.object(self.runtime.shutil, "which", return_value=None):
+            with self.assertRaisesRegex(self.runtime.NativeContinuationError, "executable is unavailable"):
+                self.runtime._resolve_executable("missing-agent-cli")
+
+    def test_slack_egress_redacts_high_confidence_credentials(self):
+        samples = (
+            "xox" + "b-1234567890-abcdefghijklmnop",
+            "xap" + "p-1-A1234567890-abcdefghijklmnop",
+            "gh" + "p_abcdefghijklmnopqrstuvwxyz",
+            "sk-abcdefghijklmnopqrstuvwxyz123456",
+            "AKIAIOSFODNN7EXAMPLE",
+            "-----BEGIN PRIVATE KEY-----\nsecret material\n-----END PRIVATE KEY-----",
+        )
+        redacted = self.runtime.redact_text("\n".join(samples))
+        for sample in samples:
+            self.assertNotIn(sample, redacted)
+        self.assertGreaterEqual(redacted.count("[REDACTED_"), len(samples))
+
+    def test_origin_is_sanitized_and_retained_at_maximum_message_size(self):
+        bridge = self.runtime.Bridge(
+            "brg_test", "zellij_pane",
+            {"session_name": "work`\nspoof", "pane_id": "7", "cwd": "/tmp/project`\nspoof"},
+            "U12345678", "T12345678", "C12345678", None, "key", "pending",
+        )
+        rendered = self.runtime.with_origin("x" * self.runtime.MAX_TEXT, bridge)
+        self.assertLessEqual(len(rendered), self.runtime.MAX_TEXT)
+        self.assertTrue(rendered.endswith("_"))
+        self.assertIn("_Origin: Zellij `workspoof` / pane `7` · `projectspoof`_", rendered)
+
+    def test_slack_transport_rejects_unapproved_api_methods(self):
+        with self.assertRaisesRegex(ValueError, "unsupported Slack API method"):
+            self.runtime._slack_call("hidden-token", "admin.users.list", {})
+
+    def test_zellij_identity_requires_allowlisted_live_agent_and_returns_only_hash(self):
+        panes = [{
+            "id": 7,
+            "is_plugin": False,
+            "exited": False,
+            "terminal_command": "node /opt/agents/codex --resume session-secret",
+        }]
+        completed = types.SimpleNamespace(stdout=json.dumps(panes))
+        with mock.patch.object(self.runtime, "_resolve_executable", return_value="/usr/bin/zellij"), mock.patch.object(
+            self.runtime.subprocess, "run", return_value=completed
+        ):
+            identity = self.runtime.zellij_pane_identity("work", "7", "/tmp/project")
+        self.assertEqual(identity["pane_agent"], "codex")
+        self.assertEqual(len(identity["pane_command_hash"]), 64)
+        self.assertNotIn("session-secret", json.dumps(identity))
+
+        panes[0]["terminal_command"] = "bash"
+        completed = types.SimpleNamespace(stdout=json.dumps(panes))
+        with mock.patch.object(self.runtime, "_resolve_executable", return_value="/usr/bin/zellij"), mock.patch.object(
+            self.runtime.subprocess, "run", return_value=completed
+        ):
+            with self.assertRaisesRegex(self.runtime.NativeContinuationError, "not running an allowlisted agent"):
+                self.runtime.zellij_pane_identity("work", "7")
+
+    def test_zellij_delivery_fails_closed_when_pane_process_changes(self):
+        bridge = self.runtime.Bridge(
+            "brg_test", "zellij_pane",
+            {
+                "session_name": "work", "pane_id": "7", "cwd": "/tmp/project",
+                "pane_agent": "codex", "pane_command_hash": "expected",
+            },
+            "U12345678", "T12345678", "C12345678", "123.456", "key", "active",
+        )
+        with mock.patch.object(
+            self.runtime,
+            "zellij_pane_identity",
+            return_value={"pane_command_hash": "different"},
+        ), mock.patch.object(self.runtime.subprocess, "run") as run:
+            with self.assertRaisesRegex(self.runtime.NativeContinuationError, "different process"):
+                self.runtime.deliver_zellij(bridge, "continue")
+        run.assert_not_called()
+
+
+class NotifierTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.home = pathlib.Path(self.temp.name)
+        data = self.home / "data" / "tether"
+        data.mkdir(parents=True)
+        shutil.copy2(RUNTIME_PATH, data / "bridge_runtime.py")
+        env = {
+            "HOME": str(self.home),
+            "HERMES_HOME": str(self.home / ".hermes"),
+            "XDG_DATA_HOME": str(self.home / "data"),
+            "XDG_CONFIG_HOME": str(self.home / "config"),
+        }
+        self.env_patch = mock.patch.dict(os.environ, env, clear=False)
+        self.env_patch.start()
+        sys.modules.pop("bridge_runtime", None)
+        spec = importlib.util.spec_from_file_location(f"notifier_test_{id(self)}", NOTIFIER_PATH)
+        self.notifier = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.notifier)
+
+    def tearDown(self):
+        self.env_patch.stop()
+        sys.modules.pop("bridge_runtime", None)
+        self.temp.cleanup()
+
+    def test_explicit_run_id_precedes_ambient_sessions(self):
+        args = types.SimpleNamespace(run_id="cron-2026", hermes_session_id=None)
+        with mock.patch.dict(os.environ, {
+            "CLAUDE_CODE_SESSION_ID": "claude-session",
+            "CODEX_THREAD_ID": "codex-session",
+        }, clear=False):
+            kind, source = self.notifier.detected_source(args)
+        self.assertEqual(kind, "headless_run")
+        self.assertEqual(source["run_id"], "cron-2026")
+
+    def test_native_session_keeps_zellij_metadata(self):
+        args = types.SimpleNamespace(run_id=None, hermes_session_id=None)
+        with mock.patch.dict(os.environ, {
+            "CLAUDE_CODE_SESSION_ID": "claude-session",
+            "ZELLIJ_SESSION_NAME": "work",
+            "ZELLIJ_PANE_ID": "7",
+        }, clear=True):
+            kind, source = self.notifier.detected_source(args)
+        self.assertEqual(kind, "claude_session")
+        self.assertEqual(source["zellij_session"], "work")
+        self.assertEqual(source["zellij_pane_id"], "7")
+
+    def test_zellij_only_source_captures_process_identity(self):
+        args = types.SimpleNamespace(run_id=None, hermes_session_id=None)
+        identity = {
+            "session_name": "work", "pane_id": "7", "cwd": "/tmp/project",
+            "pane_agent": "codex", "pane_command_hash": "abc123",
+        }
+        with mock.patch.dict(os.environ, {
+            "ZELLIJ_SESSION_NAME": "work",
+            "ZELLIJ_PANE_ID": "7",
+        }, clear=True), mock.patch.object(self.notifier, "zellij_pane_identity", return_value=identity) as capture:
+            kind, source = self.notifier.detected_source(args)
+        self.assertEqual(kind, "zellij_pane")
+        self.assertEqual(source["pane_command_hash"], "abc123")
+        capture.assert_called_once_with("work", "7", str(pathlib.Path.cwd()))
+
+    def test_noninteractive_setup_delegates_manifest_to_hermes(self):
+        args = types.SimpleNamespace(non_interactive=True, no_restart=False)
+        completed = types.SimpleNamespace(returncode=0)
+        with mock.patch.object(self.notifier.shutil, "which", return_value="/usr/bin/hermes"), mock.patch.object(
+            self.notifier.subprocess, "run", return_value=completed
+        ) as run:
+            self.assertEqual(self.notifier.run_setup(args), 0)
+        run.assert_called_once_with(
+            ["/usr/bin/hermes", "slack", "manifest", "--write"],
+            timeout=self.notifier.SERVICE_TIMEOUT_SECONDS,
+            text=True,
+        )
+
+    def test_interactive_setup_runs_hermes_onboarding_restart_and_live_doctor(self):
+        args = types.SimpleNamespace(non_interactive=False, no_restart=False)
+        completed = types.SimpleNamespace(returncode=0)
+        with mock.patch.object(self.notifier.shutil, "which", return_value="/usr/bin/hermes"), mock.patch.object(
+            self.notifier.subprocess, "run", return_value=completed
+        ) as run, mock.patch.object(self.notifier, "doctor", return_value=(True, ["ok live broker"])):
+            self.assertEqual(self.notifier.run_setup(args), 0)
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [["/usr/bin/hermes", "gateway", "setup"], ["/usr/bin/hermes", "gateway", "restart"]],
+        )
+        self.assertEqual(
+            [call.kwargs["timeout"] for call in run.call_args_list],
+            [self.notifier.SETUP_TIMEOUT_SECONDS, self.notifier.SERVICE_TIMEOUT_SECONDS],
+        )
+
+
+class PluginRoutingTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.home = pathlib.Path(self.temp.name)
+        self.runtime = load_runtime(self.home)
+        sys.modules["bridge_runtime"] = self.runtime
+        spec = importlib.util.spec_from_file_location(f"session_bridge_test_{id(self)}", PLUGIN_PATH)
+        self.plugin = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = self.plugin
+        spec.loader.exec_module(self.plugin)
+        self.plugin_module_name = spec.name
+        self.config = self.home / ".config" / "tether" / "config.toml"
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text('allowed_users = ["U12345678"]\n')
+        self.env_patch = mock.patch.dict(os.environ, {
+            "SLACK_ALLOWED_USERS": "", "GATEWAY_ALLOWED_USERS": "",
+        }, clear=False)
+        self.env_patch.start()
+
+    def tearDown(self):
+        self.env_patch.stop()
+        sys.modules.pop("bridge_runtime", None)
+        sys.modules.pop(self.plugin_module_name, None)
+        self.temp.cleanup()
+
+    def make_bridge(self, owner="U12345678"):
+        bridge = self.plugin.store.create({
+            "source_kind": "headless_run",
+            "source": {"run_id": "cron-1", "cwd": "/tmp/project"},
+            "owner_user_id": owner,
+            "team_id": "T12345678",
+            "channel_id": "C12345678",
+            "idempotency_key": "cron-1",
+        })
+        return self.plugin.store.bind(bridge.bridge_id, "123.456")
+
+    def test_authorization_fails_closed_and_honors_owner(self):
+        bridge = self.make_bridge()
+        self.assertTrue(self.plugin._authorized(bridge, "U12345678"))
+        self.assertFalse(self.plugin._authorized(bridge, "U99999999"))
+        self.config.write_text("allowed_users = []\n")
+        self.assertFalse(self.plugin._authorized(bridge, "U12345678"))
+
+    def test_authorization_reuses_hermes_allowlist(self):
+        self.config.write_text("allowed_users = []\n")
+        bridge = self.make_bridge(owner="*")
+        with mock.patch.dict(os.environ, {"SLACK_ALLOWED_USERS": "U12345678"}, clear=False):
+            self.assertTrue(self.plugin._authorized(bridge, "U12345678"))
+
+    def test_exact_thread_prefilter_marks_only_active_bridge(self):
+        self.make_bridge()
+        adapter = types.SimpleNamespace(_bot_message_ts=set(), _channel_team={"C12345678": "T12345678"})
+        self.assertTrue(self.plugin._mark_bridge_thread_before_slack_gate(adapter, {
+            "thread_ts": "123.456", "channel": "C12345678",
+        }))
+        self.assertIn("123.456", adapter._bot_message_ts)
+        self.assertFalse(self.plugin._mark_bridge_thread_before_slack_gate(adapter, {
+            "thread_ts": "999.999", "channel": "C12345678",
+        }))
+
+    def test_native_delta_drops_synthetic_thread_history(self):
+        text = "old transcript\n[End of thread context]\nplease continue"
+        self.assertEqual(self.plugin._reply_delta(text), "please continue")
+
+    def test_authorized_headless_reply_rewrites_into_durable_hermes_context(self):
+        self.make_bridge()
+
+        class Platform:
+            value = "slack"
+
+        platform = Platform()
+        source = types.SimpleNamespace(
+            platform=platform, thread_id="123.456", guild_id="T12345678",
+            chat_id="C12345678", user_id="U12345678", message_id="111.1",
+        )
+        event = types.SimpleNamespace(source=source, message_id="111.1", text="continue the run")
+        adapter = types.SimpleNamespace(_reacting_message_ids=set())
+        gateway = types.SimpleNamespace(adapters={platform: adapter})
+        result = self.plugin._pre_gateway_dispatch(event=event, gateway=gateway)
+        self.assertEqual(result["action"], "rewrite")
+        self.assertIn("Durable Hermes continuation", result["text"])
+        self.assertIn("continue the run", result["text"])
+
+    def test_restart_recovery_delivers_queued_reply_and_marks_it_complete(self):
+        bridge = self.make_bridge()
+        self.plugin.store.enqueue_event("111.1", bridge.bridge_id, "continue after restart")
+        replies = []
+
+        def broker_call(request):
+            replies.append(request["text"])
+            return {"ok": True}
+
+        with mock.patch.object(self.plugin, "broker_call", side_effect=broker_call), mock.patch.object(
+            self.plugin, "_run_recovered_event", return_value="finished after restart"
+        ):
+            self.plugin._recover_queued_events()
+
+        with self.plugin.store.connect() as database:
+            state = database.execute("SELECT state FROM bridge_events WHERE event_id='111.1'").fetchone()[0]
+        self.assertEqual(state, "delivered")
+        self.assertIn("finished after restart", replies)
+
+    def test_cancel_reply_discards_queued_work(self):
+        bridge = self.plugin.store.create({
+            "source_kind": "codex_session",
+            "source": {"session_id": "codex-1", "cwd": "/tmp/project"},
+            "owner_user_id": "U12345678",
+            "team_id": "T12345678",
+            "channel_id": "C12345678",
+            "idempotency_key": "codex-1",
+        })
+        bridge = self.plugin.store.bind(bridge.bridge_id, "456.789")
+        self.plugin.store.enqueue_event("111.1", bridge.bridge_id, "queued work")
+
+        class Platform:
+            value = "slack"
+
+        platform = Platform()
+        source = types.SimpleNamespace(
+            platform=platform, thread_id="456.789", guild_id="T12345678",
+            chat_id="C12345678", user_id="U12345678", message_id="111.2",
+        )
+        event = types.SimpleNamespace(source=source, message_id="111.2", text="stop")
+        sent = []
+
+        class Adapter:
+            _reacting_message_ids = set()
+
+            async def send(self, channel, text, metadata):
+                sent.append((channel, text, metadata))
+
+        gateway = types.SimpleNamespace(adapters={platform: Adapter()})
+
+        async def exercise():
+            result = self.plugin._pre_gateway_dispatch(event=event, gateway=gateway)
+            await asyncio.sleep(0)
+            return result
+
+        result = asyncio.run(exercise())
+        self.assertEqual(result["reason"], "tether-cancel")
+        self.assertIn("Cancelled 1 queued replies", sent[0][1])
+        with self.plugin.store.connect() as database:
+            state = database.execute("SELECT state FROM bridge_events WHERE event_id='111.1'").fetchone()[0]
+        self.assertEqual(state, "failed")
+
+
+class InstallerAndPackageTest(unittest.TestCase):
+    def run_installer(self, home, harness="both"):
+        env = {
+            **os.environ,
+            "HOME": str(home),
+            "CODEX_HOME": str(home / "codex"),
+            "CLAUDE_HOME": str(home / "claude"),
+            "HERMES_HOME": str(home / "hermes"),
+            "XDG_DATA_HOME": str(home / "data"),
+            "XDG_CONFIG_HOME": str(home / "config"),
+        }
+        return subprocess.run(
+            [str(INSTALL_PATH), f"--harness={harness}"], env=env,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+    def test_installer_supports_both_harnesses_and_preserves_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = pathlib.Path(tmp)
+            first = self.run_installer(home)
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            for harness in ("codex", "claude"):
+                self.assertTrue((home / harness / "skills" / "tether" / "SKILL.md").is_file())
+            self.assertTrue((home / "hermes" / "plugins" / "tether" / "__init__.py").is_file())
+            config = home / "config" / "tether" / "config.toml"
+            config.write_text('default_channel = "C12345678"\nallowed_users = ["U12345678"]\n')
+            config.chmod(0o600)
+            second = self.run_installer(home)
+            self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+            self.assertIn("C12345678", config.read_text(), "upgrades must preserve operator config")
+
+    def test_one_command_setup_installs_then_uses_hermes_onboarding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = pathlib.Path(tmp)
+            fake_bin = home / "fake-bin"
+            fake_bin.mkdir()
+            hermes = fake_bin / "hermes"
+            hermes.write_text("#!/bin/sh\nexit 0\n")
+            hermes.chmod(0o700)
+            env = {
+                **os.environ,
+                "HOME": str(home),
+                "CODEX_HOME": str(home / "codex"),
+                "CLAUDE_HOME": str(home / "claude"),
+                "HERMES_HOME": str(home / "hermes"),
+                "XDG_DATA_HOME": str(home / "data"),
+                "XDG_CONFIG_HOME": str(home / "config"),
+                "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+            }
+            result = subprocess.run(
+                ["node", str(ROOT / "bin" / "tether.js"), "setup", "--harness=both", "--non-interactive"],
+                env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue((home / "codex" / "skills" / "tether" / "SKILL.md").is_file())
+            self.assertTrue((home / "claude" / "skills" / "tether" / "SKILL.md").is_file())
+            self.assertIn("Slack manifest generated", result.stdout)
+
+    def test_public_tree_contains_no_known_private_identifiers_or_token_values(self):
+        private_digests = {
+            (12, "4e3c100b7e146ea64d5774c9fdddad6a9a3ec84bfd1c7b2ac8920f70f9f8ac64"),
+            (12, "d1f84d64ec000ce0626824ba6112ac1443d20362bfe9f628e445e2c5f1577ce7"),
+            (12, "a401343ad071c39758b906a27b1edbb3d4857b8ad4eaa6f1a37ae7ca3c7a8b83"),
+            (26, "2d276b2dbe1b68717dcc126768295b9e85562c397f2165ee44c1c7861871d6e3"),
+            (22, "3b627447db98828cf775837753f511df98a4c1717274f5d51815106189da5437"),
+        }
+        text = "\n".join(
+            path.read_text(errors="ignore")
+            for path in ROOT.rglob("*")
+            if path.is_file() and "__pycache__" not in path.parts
+        )
+        for length, digest in private_digests:
+            windows = (text[index:index + length] for index in range(max(0, len(text) - length + 1)))
+            self.assertFalse(any(hashlib.sha256(value.encode()).hexdigest() == digest for value in windows))
+        self.assertNotIn("xox" + "b-", text)
+        self.assertNotIn("xap" + "p-", text)
+
+    def test_skill_references_and_manifests_are_complete(self):
+        skill = ROOT / "skills" / "tether"
+        text = (skill / "SKILL.md").read_text()
+        self.assertIn("name: tether", text)
+        self.assertTrue((skill / "references" / "setup.md").is_file())
+        self.assertTrue((skill / "references" / "contract.md").is_file())
+        package = json.loads((ROOT / "package.json").read_text())
+        self.assertEqual(package["pi"]["skills"], ["./skills"])
+        for manifest in (ROOT / ".claude-plugin" / "plugin.json", ROOT / ".codex-plugin" / "plugin.json"):
+            self.assertEqual(json.loads(manifest.read_text())["name"], "tether")
+
+
+if __name__ == "__main__":
+    unittest.main()

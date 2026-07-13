@@ -1,0 +1,50 @@
+{
+  "name": "@parcha/tether",
+  "version": "0.1.0",
+  "description": "Slack threads that stay attached to Codex, Claude Code, Zellij, and headless agents through Hermes",
+  "bin": {
+    "tether": "bin/tether.js"
+  },
+  "files": [
+    ".agents/plugins/*.json",
+    ".claude-plugin/*.json",
+    ".codex-plugin/*.json",
+    "bin/*.js",
+    "runtime/bridge_runtime.py",
+    "runtime/config.example.toml",
+    "runtime/tether",
+    "runtime/plugin/__init__.py",
+    "skills/tether/",
+    "!skills/**/__pycache__/**",
+    "!skills/**/*.pyc",
+    "!runtime/**/__pycache__/**",
+    "!runtime/**/*.pyc",
+    "install.sh",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "python3 -m unittest discover -s tests -v && python3 -m py_compile runtime/bridge_runtime.py runtime/plugin/__init__.py skills/tether/scripts/tether_notify.py && python3 -m json.tool .claude-plugin/plugin.json >/dev/null && python3 -m json.tool .codex-plugin/plugin.json >/dev/null && python3 -m json.tool .agents/plugins/marketplace.json >/dev/null && node --check bin/tether.js",
+    "pack:check": "npm pack --dry-run"
+  },
+  "keywords": [
+    "claude-code",
+    "codex",
+    "hermes-agent",
+    "slack",
+    "zellij",
+    "agent-skills",
+    "pi-package"
+  ],
+  "pi": {
+    "skills": ["./skills"]
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/miguelrios/unc-skills.git",
+    "directory": "tether"
+  },
+  "author": "Parcha Labs (https://parcha.com)",
+  "license": "MIT",
+  "engines": {"node": ">=18"}
+}

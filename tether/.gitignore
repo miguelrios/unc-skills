@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.tgz
+.ruff_cache/
+.desloppify/
+config.toml
+bridges.db

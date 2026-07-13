@@ -1,0 +1,37 @@
+{
+  "name": "@parcha/desloppify-skill",
+  "version": "0.1.0",
+  "description": "Portable evidence-backed codebase cleanup with Peter O'Malley's official Desloppify engine",
+  "files": [
+    ".agents/plugins/*.json",
+    ".claude-plugin/*.json",
+    ".codex-plugin/*.json",
+    "skills/desloppify/",
+    "!skills/**/__pycache__/**",
+    "!skills/**/*.pyc",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "python3 -m unittest discover -s tests -v && python3 -m py_compile skills/desloppify/scripts/desloppify_portable.py && python3 -m json.tool .claude-plugin/plugin.json >/dev/null && python3 -m json.tool .codex-plugin/plugin.json >/dev/null && python3 -m json.tool .agents/plugins/marketplace.json >/dev/null && python3 scripts/check_package.py",
+    "pack:check": "python3 scripts/check_package.py"
+  },
+  "keywords": [
+    "agent-skills",
+    "claude-code",
+    "codex",
+    "pi-package",
+    "code-quality",
+    "technical-debt",
+    "desloppify"
+  ],
+  "pi": {"skills": ["./skills"]},
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/miguelrios/unc-skills.git",
+    "directory": "desloppify"
+  },
+  "author": "Parcha Labs (https://parcha.com)",
+  "license": "MIT",
+  "engines": {"node": ">=18"}
+}

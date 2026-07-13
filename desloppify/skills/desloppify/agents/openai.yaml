@@ -1,0 +1,4 @@
+interface:
+  display_name: "Desloppify"
+  short_description: "Turn code slop into evidence-backed cleanup"
+  default_prompt: "Use $desloppify to diagnose and systematically improve this codebase without gaming the score."

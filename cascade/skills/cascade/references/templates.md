@@ -10,7 +10,7 @@ Copy-paste skeletons for the three artifacts the skill produces, plus a condense
 
 ## Chain doc template
 
-`docs/LOOP_CHAIN_<YYYY-MM-DD>.md`
+`.cascade/LOOP_CHAIN_<YYYY-MM-DD>.md`
 
 ```markdown
 # The Loop Chain — <project/goal> (<date>)
@@ -72,7 +72,7 @@ exists, add a checked task table with the same dependency links to the chain doc
 
 ## EXIT.md template
 
-`docs/evidence/<loop-id>-<slug>/EXIT.md`
+`.cascade/evidence/<loop-id>-<slug>/EXIT.md`
 
 ```markdown
 # <Loop id> — <NAME> · EXIT (<date>)

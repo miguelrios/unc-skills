@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "description": "Portable Agent Skills for Claude Code, Codex, and pi",
+  "bin": {
+    "tether": "./tether/bin/tether.js"
+  },
   "scripts": {
     "test": "python3 -m unittest discover -s tests -v"
   },
@@ -17,7 +20,9 @@
       "./hands-free/skills",
       "./parable/skills",
       "./cascade/skills",
-      "./recall/skills"
+      "./recall/skills",
+      "./tether/skills",
+      "./desloppify/skills"
     ]
   },
   "license": "MIT"

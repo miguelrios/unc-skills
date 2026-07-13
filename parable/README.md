@@ -9,11 +9,44 @@
 
 **Multi-model coding orchestration for Claude Code, Codex, and pi.**
 
-It is Tuesday. You are pair-programming with Fable on a small task: extract a helper
-function and add a test. Three hundred lines later, the helper has its own module and two new
-dependencies. The model is pleased with itself.
+It is Tuesday. You ask Fable to extract a helper and add a test. Three hundred lines later, the
+helper has its own module and two new dependencies. The model is pleased with itself. You open
+the billing console.
 
-You open the billing console.
+Parable changes the execution model: Fable plans and routes the work; specialized executors do
+the implementation.
+
+```text
+Request
+   |
+   v
+Fable: split into tasks + write one plan.md per task
+   |
+   v
+Route each task to the best available executor:
++------------------+----------------------------------+
+| Claude subagents | Sonnet / Opus                    |
++------------------+----------------------------------+
+| Codex CLI        | GPT-5.5                          |
++------------------+----------------------------------+
+| Cursor CLI       | Composer 2.5 / Grok 4.5          |
++------------------+----------------------------------+
+| pi / API         | Kimi / MiniMax / DeepSeek        |
++------------------+----------------------------------+
+   |
+   v
+Executor sessions (parallel when tasks are independent)
+   |
+   v
+Shared worktree -> tests + independent review -> commit
+                       |
+                       +-- fail -> resume that task's executor
+```
+
+Each task gets its own `plan.md` and the best available executor for its requirements, marginal
+cost, and live subscription headroom. Independent tasks can run in parallel, but they converge
+on one worktree and one verification gate. Fable spends its context on decomposition, routing,
+and judgment—not routine implementation.
 
 ## Unscientific stats
 
@@ -42,15 +75,6 @@ one you run, becomes the **brain**: it writes a fully-specified `plan.md` for ea
 story), casts the cheapest capable **executor** model to perform it (the cast), checks the result
 with your own typecheck and tests before any model spends tokens on opinions, and hands the diff
 to a reviewer that is never the author.
-
-```
-you        →  "work through these 5 tasks"
-the brain  →  writes the story (plan.md), casts the scene
-the cast   →  implements headlessly (codex exec or Claude subagent)
-verify     →  your typecheck/tests: PASS or FAIL, not a vibe
-review     →  a different model, coverage-first rubric
-the brain  →  reads the evidence, commits, next story
-```
 
 The brain never implements — it knows what its own tokens cost.
 
@@ -84,6 +108,10 @@ Holds your entire repository in its head at once, for the refactors that touch e
 Collects shiny things from a different training run. Useful for gnarly debugging and adversarial
 review, because it reads your codebase as an outsider — and it rides your ChatGPT plan.
 
+**Cursor CLI** (Composer 2.5 or Grok 4.5)
+Runs the same precise `plan.md` headlessly. Composer is fast at implementation; Grok 4.5 can
+implement or provide cross-family review.
+
 Swap any of them or add your own; the cast list is yours.
 
 ## Three acts
@@ -98,8 +126,24 @@ and add a `codex-native` provider. GPT-5.5 joins for the hard scenes.
 plus an `[executors.*]` block per model. codex drives Responses-API providers (Fireworks,
 OpenRouter, your own LiteLLM proxy); a `type = "pi"` provider runs the
 [pi coding agent](https://github.com/earendil-works/pi) as a second harness and speaks plain
-chat-completions to any base URL, so chat-only providers need no bridge at all. See
-`skills/parable/references/providers.md` and `examples/`.
+chat-completions to any base URL, so chat-only providers need no bridge at all. A `type = "cursor"`
+provider sends the same `plan.md` through [Cursor CLI](https://cursor.com/docs/cli) to Composer
+2.5 or Grok 4.5 for implementation or review. See the provider
+[reference](skills/parable/references/providers.md), the complete
+[Cursor example](examples/parable.cursor.toml), and the other configs in `examples/`.
+
+Minimal Cursor configuration:
+
+```toml
+[providers.cursor]
+type = "cursor"
+
+[executors.grok]
+provider = "cursor"
+model = "grok-4.5-high"
+tags = ["feature", "adversarial"]
+use_for = "Implementation or independent review through Cursor CLI."
+```
 
 For the non-coding half: with `[research] provider = "grep.ai"` (the default), in-depth research
 and research-backed slides, sheets, and docs route through the free
@@ -165,6 +209,10 @@ codex plugin add parable@unc-skills
 # pi package (installs the complete unc-skills collection)
 pi install git:github.com/miguelrios/unc-skills
 
+# optional Cursor executor (then create/export CURSOR_API_KEY from your Cursor account)
+curl https://cursor.com/install -fsS | bash
+export CURSOR_API_KEY="..."
+
 # standalone Claude/manual installer (adds the skill + a starter config)
 npx @parcha/parable install
 npx @parcha/parable doctor
@@ -174,7 +222,8 @@ git clone https://github.com/miguelrios/unc-skills && cd unc-skills/parable && .
 ```
 
 Requirements: Claude Code, Codex, or pi as the orchestrating harness; Python 3.11+; codex CLI
-for codex-backed executors; pi CLI (node 22+) for pi-backed executors.
+for codex-backed executors; Cursor CLI plus `CURSOR_API_KEY` for Cursor-backed executors; pi CLI
+(node 22+) for pi-backed executors.
 
 Claude Code and Codex builds with native agent spawning can use Parable's zero-config subagent
 cast. Stock pi has no built-in subagents, so configure at least one Codex, pi, or Cursor executor
@@ -187,11 +236,12 @@ runtime difference.
   environment facts it can't derive on its own. Deliberately small; the method is the model's.
 - `skills/parable/scripts/parable.py`: the dispatcher, stdlib only, with `config`, `list`,
   `run`, `resume`, `status`, `verify`, and `review` subcommands. It runs codex and pi headlessly
-  with per-invocation provider injection (your `~/.codex/config.toml` and `~/.pi` are never
-  touched) and reports compact run summaries the brain can read for pennies.
+  with per-invocation provider injection, drives Cursor through `cursor-agent`, and reports
+  compact run summaries the brain can read for pennies. Your `~/.codex/config.toml` and `~/.pi`
+  are never touched.
 - `skills/parable/references/`: config schema, provider recipes, routing playbook, reviewer
   rubric, and a commented example config. `examples/` holds minimal Fireworks, OpenRouter,
-  LiteLLM, and pi-Fireworks casts.
+  LiteLLM, pi-Fireworks, and [Cursor](examples/parable.cursor.toml) casts.
 
 ## Credits
 

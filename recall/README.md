@@ -50,22 +50,6 @@ over the tailnet. `RECALL_MODE=shadow` compares central receipts while returning
 `RECALL_MODE=local` is an instant rollback that does not rewrite either store. Remote failures do
 not silently fall back to stale local results.
 
-## Receipts
-
-Measured on one development machine against 5,959 real transcripts and 2.5
-million indexed chunks:
-
-| Searcher | Recall@5 | MRR@10 | p95 latency |
-|---|---:|---:|---:|
-| recall | **0.63** | **0.55** | **0.16s** |
-| raw grep + mtime sorting | 0.57 | 0.53 | 2.9s |
-| previous prompt-only search | 0.23 | 0.21 | 15.7s |
-
-The retrieval eval contains 57 frozen, grep-verified known-answer queries and
-uses the same inputs and scorer for every searcher. Five real incidents where
-an agent previously thrashed for five to seven turns were also replayed; recall
-put the right session at rank one from a single search.
-
 The honest limit: no-answer detection is still lexical. A query about work that
 never happened can return a nearby session with similar words. That is why every
 result includes a `WHY` line and the skill tells the agent to inspect the
@@ -131,8 +115,8 @@ Codex transcripts; pi can run the search, but pi's own transcript format is not 
   match, and how to find, continue, repeat, or skill-ify prior work.
 - `skills/recall/scripts/recall-hook.sh` is an optional SessionStart hook. It is
   bounded, fail-open, and keeps the index fresh without a daemon or cron job.
-- `tests/` contains unit tests and the frozen retrieval eval, including a held-
-  out split for measuring ranking changes.
+- `tests/` contains unit and synthetic-fixture tests. Private transcript-derived
+  evaluation corpora are deliberately kept outside the repository.
 
 Everything stays on your machine. Secret-shaped lines are redacted during
 indexing, thinking blocks are not indexed, and the index directory is created

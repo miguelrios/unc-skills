@@ -1,0 +1,45 @@
+name: desloppify-ci
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "desloppify/**"
+      - "package.json"
+      - "README.md"
+      - ".agents/plugins/marketplace.json"
+      - ".claude-plugin/marketplace.json"
+      - "scripts/prove_portability.py"
+      - "tests/test_portability.py"
+      - ".github/workflows/desloppify-ci.yml"
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "desloppify/**"
+      - "package.json"
+      - "README.md"
+      - ".agents/plugins/marketplace.json"
+      - ".claude-plugin/marketplace.json"
+      - "scripts/prove_portability.py"
+      - "tests/test_portability.py"
+      - ".github/workflows/desloppify-ci.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: pip install bandit ruff
+      - run: ruff check desloppify/skills/desloppify/scripts desloppify/scripts desloppify/tests
+      - run: bandit -q -lll -r desloppify/skills/desloppify/scripts desloppify/scripts
+      - run: npm test
+      - run: npm test
+        working-directory: desloppify
+      - run: npm pack --dry-run
+        working-directory: desloppify

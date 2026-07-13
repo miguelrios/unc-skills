@@ -35,23 +35,28 @@ mostly-fixed budget, and the expensive failure is exhausting one while another s
 A cast can span three subscription pools — the Claude plan (subagent executors), a ChatGPT
 plan (`codex-native` executors), and a Cursor plan (`cursor` executors) — plus metered
 API-key providers (codex/pi) as an overflow valve. Marginal cost on the subscription pools is
-zero until their window/budget is spent, so routing is not about per-token price; it is about
+zero only while included capacity remains; Claude usage credits and ChatGPT credits can turn
+overflow into metered spend. Routing is therefore about
 **keeping every pool's headroom above water and never starving the pool that funds the current
 session**. Which pool that is depends on the harness running this skill.
 
 `scripts/parable-usage.sh` makes this measurable instead of reactive: it reads each pool's own
-usage endpoint — Claude's 5h/7d window %, ChatGPT's 5h/7d window %, Cursor's dollars left this
-cycle — for zero model tokens and no turn. Read it before a batch and whenever a pool feels
+usage endpoint — Claude's 5h/7d window % and current-period usage-credit meter, ChatGPT's 5h/7d
+window % and credit/overage state, Cursor's dollars left this cycle — for zero model tokens and
+no turn. Read it before a batch and whenever a pool feels
 tight, and route the next dispatch to the pool with the most room among the executors capable of
 the task. The routing chains in the config are **menus of capable peers, not priority ladders**:
 the config author writes which executors can do each task class; you pick among them by live
-headroom. Don't wait for a throttle error to learn a pool is empty — that error is the failure
+headroom. A Claude `extra=` value is the endpoint's cumulative current-period meter, not a
+weekly total; `daily`/`weekly` remain explicit nulls in JSON when Anthropic does not provide
+history. Don't wait for a throttle error to learn a pool is empty — that error is the failure
 this tool exists to prevent. The per-pool selection detail lives in `references/routing.md`.
 
 ## The tools
 
-- `scripts/parable-usage.sh [--all] [--json]` — live subscription headroom for every pool the
-  cast routes to (Claude plan window %, ChatGPT plan window %, Cursor dollars-left-this-cycle),
+- `scripts/parable-usage.sh [--all] [--json]` — live subscription headroom and billing state for
+  every pool the cast routes to (Claude plan window % plus usage credits, ChatGPT plan window %
+  plus credits/overage, Cursor dollars-left-this-cycle),
   read from each harness's own usage endpoint for zero model tokens and no turn. Read it BEFORE
   a batch and whenever a pool feels tight: this is the measured load-balancing signal, so you
   spread work by headroom instead of discovering a spent pool through a throttle error. A pool

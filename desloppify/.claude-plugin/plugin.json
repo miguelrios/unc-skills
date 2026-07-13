@@ -1,0 +1,10 @@
+{
+  "name": "desloppify",
+  "version": "0.1.0",
+  "description": "Turn whole-codebase slop into evidence-backed cleanup with the official Desloppify engine.",
+  "author": {"name": "Parcha Labs", "url": "https://parcha.com"},
+  "homepage": "https://github.com/miguelrios/unc-skills/tree/main/desloppify",
+  "repository": "https://github.com/miguelrios/unc-skills/tree/main/desloppify",
+  "license": "MIT",
+  "skills": "./skills/"
+}

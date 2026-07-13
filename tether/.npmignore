@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.tgz
+.ruff_cache/
+.desloppify/
+tests/

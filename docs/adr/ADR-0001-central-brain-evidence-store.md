@@ -20,7 +20,8 @@ as derived/index adapters or benchmark competitors. Neither becomes the raw sour
 
 ## Measured evidence
 
-Source: `docs/evidence/c0-backend-decision/scorecard.json` and the three backend traces.
+The comparison used a synthetic three-record collision corpus. Raw traces were intentionally
+kept out of the public repository; the table records the decision inputs only.
 
 | Backend spike | Receipt@1 | leaks | retry duplicates | round-trip/export | setup | retrieval p95 |
 |---|---:|---:|---:|---:|---:|---:|

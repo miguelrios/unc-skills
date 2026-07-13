@@ -11,7 +11,6 @@ import math
 import os
 import re
 import sqlite3
-import subprocess
 import sys
 import time
 import urllib.error
@@ -985,12 +984,6 @@ def doctor(args) -> int:
     print(f"{'WARN' if age is None or age > 48 else 'OK'} archives_manifest_age_hours={age:.1f}" if age is not None else "WARN archives_manifest_age_hours=missing")
     if conn is not None: conn.close()
     return 0
-
-
-def run_eval(args) -> int:
-    script = Path(__file__).resolve(); eval_script = script.parents[3] / "tests/eval/run_eval.py"
-    command = f"{sys.executable} {script} search --paths {{query}} --since {{since}} --until {{until}} --cwd {{cwd}} --harness {{harness}}"
-    return subprocess.call([sys.executable, str(eval_script), "--queries", str(eval_script.parent/"queries.jsonl"), "--split", args.split, "--searcher-cmd", command, "--out", args.out])
 
 
 def main(argv=None) -> int:
