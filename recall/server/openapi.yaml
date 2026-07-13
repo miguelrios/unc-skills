@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Recall BrainStore API
-  version: 0.2.0-c2
+  version: 0.3.0-c4
   license:
     name: MIT
     identifier: MIT
@@ -78,6 +78,55 @@ paths:
       responses:
         '200': {description: Sanitized event metadata and projected items}
         '404': {description: Receipt not found}
+        '401': {description: Unauthorized}
+  /v1/search:
+    post:
+      summary: Search authorized projected evidence with receipts and WHY legs
+      operationId: searchRecall
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query: {type: string, minLength: 1}
+                filters: {type: object}
+                limit: {type: integer, minimum: 1, maximum: 20, default: 10}
+      responses:
+        '200': {description: Ranked receipt-bearing results or an abstention reason}
+        '400': {description: Invalid query or filter}
+        '401': {description: Unauthorized}
+  /v1/show:
+    post:
+      summary: Read a bounded source-session window by path or receipt
+      operationId: showRecall
+      security:
+        - bearerAuth: []
+      responses:
+        '200': {description: Ordered sanitized chunks with receipts}
+        '404': {description: Source session not found}
+        '401': {description: Unauthorized}
+  /v1/related:
+    post:
+      summary: Find source sessions related by worktree and branch context
+      operationId: relatedRecall
+      security:
+        - bearerAuth: []
+      responses:
+        '200': {description: Ranked related sessions with provenance}
+        '401': {description: Unauthorized}
+  /v1/doctor:
+    get:
+      summary: Read caller-safe central-brain health without source content
+      operationId: doctorRecall
+      security:
+        - bearerAuth: []
+      responses:
+        '200': {description: Content-free source, projection, and freshness health}
         '401': {description: Unauthorized}
 components:
   securitySchemes:

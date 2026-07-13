@@ -9,7 +9,8 @@ from pathlib import Path
 SERVER = Path(__file__).resolve().parents[2] / "server"
 sys.path.insert(0, str(SERVER))
 
-from recall_server.projectors import advisory_lock_key, canonical_json, project, redact_text, validate_envelope
+from recall_server.projectors import advisory_lock_key, canonical_json, partial_lexical_probes, phrase_query_spec, preferred_phrase_probe, preferred_phrase_probes, project, redact_text, validate_envelope
+from recall_server.ranking import DEFAULT_SEARCH_DEADLINE_MS, evidence_rank_components, retrieval_leg_order, should_run_partial
 
 
 def envelope(**updates):
@@ -33,6 +34,10 @@ def envelope(**updates):
 
 
 class EnvelopeContractTest(unittest.TestCase):
+    def test_default_deadline_fits_below_tailnet_slo_with_client_headroom(self) -> None:
+        self.assertEqual(DEFAULT_SEARCH_DEADLINE_MS, 300)
+        self.assertLess(DEFAULT_SEARCH_DEADLINE_MS, 500)
+
     def test_advisory_lock_key_is_postgres_text_safe_and_boundary_preserving(self) -> None:
         key = advisory_lock_key("ab", "c")
         self.assertNotIn("\x00", key)
@@ -60,8 +65,114 @@ class EnvelopeContractTest(unittest.TestCase):
         items, _ = project(envelope(), 3)
         self.assertEqual(items[0]["receipt"], "recall://codex:laptop/session-1:turn-1?rev=3#item=0")
 
+    def test_projection_carries_shared_normalized_entities(self) -> None:
+        marker = "DEADBEEF-1234-1234-1234-123456789ABC"
+        items, _ = project(envelope(content={"role": "user", "text": f"/tmp/trace.json {marker} ConnectTimeout"}), 1)
+        self.assertIn({"kind": "file_path", "value": "/tmp/trace.json", "normalized": "/tmp/trace.json"}, items[0]["entities"])
+        self.assertIn({"kind": "uuid", "value": marker.lower(), "normalized": marker.lower()}, items[0]["entities"])
+        self.assertIn({"kind": "error", "value": "ConnectTimeout", "normalized": "connecttimeout"}, items[0]["entities"])
+
     def test_redaction_does_not_use_semantic_matching(self) -> None:
         self.assertEqual(redact_text("a harmless discussion about password rotation"), "a harmless discussion about password rotation")
+
+    def test_partial_probes_prefer_structural_anchors_and_are_bounded(self) -> None:
+        probes = partial_lexical_probes(
+            ["foreign-key", "violation", "check_result", "agent_instance_id"],
+            has_time_filter=False,
+        )
+        self.assertEqual(probes[0], ("agent_instance_id check_result", "pair", 2))
+        self.assertIn(("agent_instance_id", "anchor", 2), probes)
+        self.assertLessEqual(len(probes), 3)
+        self.assertEqual(
+            partial_lexical_probes(["greptile", "review", "passes"], has_time_filter=True)[-1],
+            ("greptile", "time-anchor", 1),
+        )
+
+    def test_compact_parser_phrase_is_preferred_over_the_full_question(self) -> None:
+        self.assertEqual(
+            preferred_phrase_probe([
+                "what was that 504 gateway timeout we hit from a tool call",
+                "timeout we hit from a tool", "504 gateway timeout",
+            ]),
+            "504 gateway timeout",
+        )
+
+        self.assertEqual(
+            preferred_phrase_probe([
+                "the sqlalchemy async greenlet_spawn has not been called error",
+                "greenlet_spawn has not been called",
+                "sqlalchemy async greenlet_spawn",
+                "async greenlet_spawn has",
+            ]),
+            "greenlet_spawn has not been called",
+        )
+        self.assertEqual(
+            preferred_phrase_probe([
+                "where we handled the httpx ConnectTimeout transient dispatch error",
+                "ConnectTimeout transient dispatch error",
+                "the httpx ConnectTimeout",
+                "transient dispatch error",
+            ]),
+            "ConnectTimeout transient dispatch error",
+        )
+        self.assertEqual(
+            preferred_phrase_probes([
+                "where we handled the httpx ConnectTimeout transient dispatch error",
+                "ConnectTimeout transient dispatch error",
+                "the httpx ConnectTimeout",
+                "transient dispatch error",
+            ]),
+            ["ConnectTimeout transient dispatch error", "transient dispatch error"],
+        )
+        self.assertEqual(
+            preferred_phrase_probe([
+                "the foreign-key violation on check_result for agent_instance_id",
+                "violation on check_result for agent_instance_id",
+                "the foreign-key violation",
+            ]),
+            "violation on check_result for agent_instance_id",
+        )
+
+    def test_identifier_plan_runs_exact_legs_before_any_phrase(self) -> None:
+        self.assertEqual(retrieval_leg_order(["api-prod-6fcdc84dd4-mmjpj"]), ("entity", "identifier"))
+        self.assertEqual(retrieval_leg_order([]), ("phrase", "entity", "partial", "all"))
+
+    def test_sparse_phrase_candidates_do_not_suppress_structural_fallback(self) -> None:
+        self.assertTrue(should_run_partial(candidate_count=1, result_limit=10))
+        self.assertFalse(should_run_partial(candidate_count=29, result_limit=10))
+
+    def test_phrase_fallbacks_share_one_bounded_database_leg(self) -> None:
+        self.assertEqual(
+            phrase_query_spec(["ConnectTimeout transient dispatch error", "transient dispatch error"]),
+            ('"ConnectTimeout transient dispatch error" OR "transient dispatch error"', "websearch_to_tsquery"),
+        )
+        self.assertEqual(phrase_query_spec(["504 gateway timeout"]), ("504 gateway timeout", "phraseto_tsquery"))
+
+    def test_rank_components_keep_identifier_phrase_and_error_evidence_distinct(self) -> None:
+        identifier = evidence_rank_components(
+            legs={"entity"}, surface="tool_output", lexical_rank=1.0,
+            matched_count=1, informative_count=8, has_identifier=True,
+            recency_factor=0.5,
+        )
+        phrase_command = evidence_rank_components(
+            legs={"phrase"}, surface="tool_input", lexical_rank=0.2,
+            matched_count=4, informative_count=6, has_identifier=False,
+            recency_factor=0.5,
+        )
+        phrase_echo = evidence_rank_components(
+            legs={"phrase"}, surface="tool_output", lexical_rank=0.8,
+            matched_count=4, informative_count=6, has_identifier=False,
+            recency_factor=0.5,
+        )
+        error_entity = evidence_rank_components(
+            legs={"entity"}, surface="tool_input", lexical_rank=1.0,
+            matched_count=1, informative_count=6, has_identifier=False,
+            recency_factor=1.0,
+        )
+        self.assertEqual(identifier["evidence_class"], "identifier")
+        self.assertGreater(tuple(identifier["rank_key"]), tuple(phrase_command["rank_key"]))
+        self.assertGreater(tuple(phrase_command["rank_key"]), tuple(phrase_echo["rank_key"]))
+        self.assertGreater(tuple(phrase_echo["rank_key"]), tuple(error_entity["rank_key"]))
 
 
 if __name__ == "__main__":

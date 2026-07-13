@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 import math
 import os
@@ -12,6 +14,8 @@ import sqlite3
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,6 +34,187 @@ STOPWORDS = frozenset("""the a an of in on we i was which that did do how what w
 and or not it its this those these from by at as is are were be been about into over after before
 one ones our my me you us your their them they he she his her can could would should will just
 than then if else""".split())
+REMOTE_READ_COMMANDS = frozenset({"search", "show", "related", "doctor"})
+
+
+class RemoteRecallError(RuntimeError):
+    pass
+
+
+def recall_mode() -> str:
+    configured = os.environ.get("RECALL_MODE")
+    if configured:
+        if configured not in {"local", "remote", "shadow"}:
+            raise ValueError("RECALL_MODE must be local, remote, or shadow")
+        return configured
+    return "remote" if os.environ.get("RECALL_URL") else "local"
+
+
+def remote_headers() -> dict[str, str]:
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    configured = os.environ.get("RECALL_TOKEN_FILE")
+    if not configured:
+        return headers
+    path = Path(configured).expanduser()
+    if path.stat().st_mode & 0o077:
+        raise RemoteRecallError("token file must have mode 0600")
+    try:
+        token = json.loads(path.read_text()).get("token")
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RemoteRecallError("token file is unreadable or invalid") from exc
+    if not isinstance(token, str) or not token:
+        raise RemoteRecallError("token file has no token")
+    headers["Authorization"] = "Bearer " + token
+    return headers
+
+
+def remote_request(method: str, path: str, body: dict | None = None) -> dict:
+    base = os.environ.get("RECALL_URL", "").rstrip("/")
+    if not base:
+        raise RemoteRecallError("RECALL_URL is required for remote mode")
+    data = None if body is None else json.dumps(body, sort_keys=True).encode()
+    request = urllib.request.Request(base + path, data=data, method=method, headers=remote_headers())
+    try:
+        with urllib.request.urlopen(request, timeout=float(os.environ.get("RECALL_TIMEOUT", "15"))) as response:
+            rendered = json.loads(response.read())
+            if not isinstance(rendered, dict):
+                raise RemoteRecallError("server returned a non-object response")
+            return rendered
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = json.loads(exc.read()).get("error", "HTTP error")
+        except (json.JSONDecodeError, AttributeError):
+            detail = "HTTP error"
+        raise RemoteRecallError(f"HTTP {exc.code}: {detail}") from exc
+    except (OSError, urllib.error.URLError, json.JSONDecodeError, ValueError) as exc:
+        raise RemoteRecallError(type(exc).__name__) from exc
+
+
+def remote_execute(args) -> tuple[str, dict]:
+    if args.command == "search":
+        filters = {
+            key: getattr(args, key)
+            for key in ("since", "until", "cwd", "branch", "harness")
+            if getattr(args, key) is not None
+        }
+        response = remote_request("POST", "/v1/search", {
+            "query": args.query, "filters": filters, "limit": args.limit,
+        })
+        results = response.get("results")
+        if not isinstance(results, list):
+            raise RemoteRecallError("search response has no results list")
+        lines = []
+        for rank, result in enumerate(results[:args.limit], 1):
+            if args.paths:
+                lines.append(str(result["path"]))
+                continue
+            terms = ",".join(str(value) for value in result.get("matched_terms", []))
+            legs = ",".join(sorted(str(value) for value in result.get("legs", [])))
+            snippet = re.sub(r"\s+", " ", str(result.get("text", "")))[:200]
+            lines.append(
+                f"{rank}. {result['path']}\n"
+                f"   {result.get('occurred_at') or '-'} cwd={result.get('cwd') or '-'} "
+                f"slot={result.get('slot') or '-'} branch={result.get('branch') or '-'}\n"
+                f"   [{result.get('surface') or '-'}] {snippet}\n"
+                f"   WHY: terms={terms}; legs={legs}; receipt={result.get('receipt') or '-'}"
+            )
+        receipt_results = []
+        for result in results:
+            receipt_result = {key: result.get(key) for key in ("path", "receipt", "legs")}
+            if isinstance(result.get("evidence"), dict):
+                receipt_result["evidence"] = result["evidence"]
+            receipt_results.append(receipt_result)
+        return (
+            "\n".join(lines) + ("\n" if lines else ""),
+            {"remote_results": receipt_results, "remote_diagnostics": response.get("diagnostics")},
+        )
+    if args.command == "show":
+        response = remote_request("POST", "/v1/show", {
+            "target": args.target, "around": args.around, "prompts": args.prompts, "tail": args.tail,
+        })
+        chunks = response.get("chunks")
+        if not isinstance(chunks, list):
+            raise RemoteRecallError("show response has no chunks list")
+        lines = [
+            f"[{chunk.get('occurred_at') or '-'}] {chunk.get('surface') or '-'}: {chunk.get('text') or ''}"
+            for chunk in chunks
+            if not args.prompts or chunk.get("surface") == "user"
+        ]
+        return ("\n".join(lines) + ("\n" if lines else ""), {"remote_chunks": chunks})
+    if args.command == "related":
+        response = remote_request("POST", "/v1/related", {
+            "cwd": args.cwd or str(Path.cwd()), "branch": args.branch, "limit": args.limit,
+            "mains_only": args.mains_only, "fast": args.fast,
+        })
+        results = response.get("results")
+        if not isinstance(results, list):
+            raise RemoteRecallError("related response has no results list")
+        lines = [
+            f"{result['path']}\toverlap={result.get('overlap', 0)}\t"
+            f"cwd={result.get('cwd') or '-'}\tbranch={result.get('branch') or '-'}"
+            for result in results[:args.limit]
+        ]
+        return ("\n".join(lines) + ("\n" if lines else ""), {"remote_results": results})
+    if args.command == "doctor":
+        response = remote_request("GET", "/v1/doctor")
+        fields = " ".join(f"{key}={response[key]}" for key in sorted(response) if key != "status")
+        return (f"OK remote status={response.get('status', 'unknown')} {fields}\n", {"remote_doctor": response})
+    raise RemoteRecallError("command has no remote transport")
+
+
+def append_private_jsonl(path: Path, entry: dict) -> None:
+    path = path.expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    os.fchmod(descriptor, 0o600)
+    with os.fdopen(descriptor, "a") as output:
+        output.write(json.dumps(entry, sort_keys=True) + "\n")
+
+
+def run_transport(args) -> int:
+    mode = recall_mode()
+    if args.command not in REMOTE_READ_COMMANDS or mode == "local":
+        return args.func(args)
+    if mode == "remote":
+        try:
+            output, metadata = remote_execute(args)
+        except RemoteRecallError as exc:
+            print(f"remote recall unavailable: {exc}", file=sys.stderr)
+            return 2
+        if args.command == "search" and os.environ.get("RECALL_REMOTE_TRACE"):
+            append_private_jsonl(Path(os.environ["RECALL_REMOTE_TRACE"]), {
+                "schema_version": 1, "observed_at": datetime.now(timezone.utc).isoformat(),
+                "command": "search", **metadata,
+            })
+        print(output, end="")
+        return 0
+
+    local_out, local_err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(local_out), contextlib.redirect_stderr(local_err):
+        local_code = args.func(args)
+    entry = {
+        "schema_version": 1,
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "command": args.command,
+        "local_exit": local_code,
+        "local_sha256": hashlib.sha256(local_out.getvalue().encode()).hexdigest(),
+    }
+    if args.command == "search" and args.paths:
+        entry["local_paths"] = [line for line in local_out.getvalue().splitlines() if line]
+    try:
+        remote_out, metadata = remote_execute(args)
+        entry.update(metadata)
+        entry["remote_sha256"] = hashlib.sha256(remote_out.encode()).hexdigest()
+        entry["diverged"] = remote_out != local_out.getvalue()
+    except RemoteRecallError as exc:
+        entry["remote_error"] = str(exc)
+        entry["diverged"] = True
+    log = Path(os.environ.get("RECALL_SHADOW_LOG", Path.home() / ".recall/shadow.jsonl")).expanduser()
+    append_private_jsonl(log, entry)
+    if local_err.getvalue():
+        print(local_err.getvalue(), end="", file=sys.stderr)
+    print(local_out.getvalue(), end="")
+    return local_code
 
 
 def paths() -> tuple[Path, Path, Path]:
@@ -149,8 +334,9 @@ def discover(root: Path, harness: str):
     return sorted(p for p in root.rglob("*.jsonl") if p.is_file())
 
 
-def add_entities(conn: sqlite3.Connection, chunk_id: int, text: str, extra: list[tuple[str, str]]) -> None:
-    found = set(extra)
+def extract_entities(text: str, extra: list[tuple[str, str]] | None = None) -> list[tuple[str, str]]:
+    """Return deterministic entities without binding projection semantics to SQLite."""
+    found = set(extra or [])
     found.update(("file_path", x) for x in PATH_RE.findall(text))
     found.update(("pr", x) for x in re.findall(r"#\d{3,5}\b", text))
     found.update(("ticket", x) for x in re.findall(r"\bPAR-\d+\b", text))
@@ -160,9 +346,13 @@ def add_entities(conn: sqlite3.Connection, chunk_id: int, text: str, extra: list
     # Full UUIDs are also indexed by their conventional eight-hex short form.
     found.update(("uuid", x[:8].lower()) for x in uuid_values if "-" in x)
     found.update(("skill", x) for x in re.findall(r"Launching skill:\s*(\w[\w-]*)", text))
-    found.update(("error", x) for x in re.findall(r"\b\w+(?:Error|Exception)\b", text))
+    found.update(("error", x) for x in re.findall(r"\b\w+(?:Error|Exception|Timeout)\b", text))
+    return sorted(found)
+
+
+def add_entities(conn: sqlite3.Connection, chunk_id: int, text: str, extra: list[tuple[str, str]]) -> None:
     conn.executemany("INSERT INTO entities(chunk_id,kind,value) VALUES (?,?,?)",
-                     [(chunk_id, kind, value) for kind, value in found])
+                     [(chunk_id, kind, value) for kind, value in extract_entities(text, extra)])
 
 
 def content_text(value) -> str:
@@ -740,7 +930,7 @@ def main(argv=None) -> int:
     p = sub.add_parser("doctor"); p.set_defaults(func=doctor)
     p = sub.add_parser("eval"); p.add_argument("--split", default="dev", choices=("dev","holdout")); p.add_argument("--out", default="recall-eval.json"); p.set_defaults(func=run_eval)
     args = ap.parse_args(argv)
-    try: return args.func(args)
+    try: return run_transport(args)
     except ValueError as exc: ap.error(str(exc))
 
 
