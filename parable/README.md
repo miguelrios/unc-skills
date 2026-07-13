@@ -9,14 +9,28 @@
 
 **Multi-model coding orchestration for Claude Code, Codex, and pi.**
 
-```mermaid
-flowchart LR
-    R["Request"] --> F["Fable<br/>plan.md + routing"]
-    F --> E["Selected executor<br/>Claude · Codex · Cursor · pi"]
-    E --> W["Shared worktree"]
-    W --> V["Tests + independent review"]
-    V -->|pass| C["Commit"]
-    V -->|fail| E
+```text
+Request
+   |
+   v
+Fable: write plan.md + select executor
+   |
+   v
+Selected executor (one):
++------------------+----------------------------------+
+| Claude subagents | Sonnet / Opus                    |
++------------------+----------------------------------+
+| Codex CLI        | GPT-5.5                          |
++------------------+----------------------------------+
+| Cursor CLI       | Composer 2.5 / Grok 4.5          |
++------------------+----------------------------------+
+| pi / API         | Kimi / MiniMax / DeepSeek        |
++------------------+----------------------------------+
+   |
+   v
+Shared worktree -> tests + independent review -> commit
+                       |
+                       +-- fail -> resume selected executor
 ```
 
 Fable produces the `plan.md` and selects an executor. The executor edits the shared worktree;
@@ -106,11 +120,24 @@ and add a `codex-native` provider. GPT-5.5 joins for the hard scenes.
 plus an `[executors.*]` block per model. codex drives Responses-API providers (Fireworks,
 OpenRouter, your own LiteLLM proxy); a `type = "pi"` provider runs the
 [pi coding agent](https://github.com/earendil-works/pi) as a second harness and speaks plain
-chat-completions to any base URL, so chat-only providers need no bridge at all. See
-`skills/parable/references/providers.md` and `examples/`.
+chat-completions to any base URL, so chat-only providers need no bridge at all. A `type = "cursor"`
+provider sends the same `plan.md` through [Cursor CLI](https://cursor.com/docs/cli) to Composer
+2.5 or Grok 4.5 for implementation or review. See the provider
+[reference](skills/parable/references/providers.md), the complete
+[Cursor example](examples/parable.cursor.toml), and the other configs in `examples/`.
 
-A `type = "cursor"` provider sends the same `plan.md` through Cursor CLI to Composer 2.5 or
-Grok 4.5 for implementation or review.
+Minimal Cursor configuration:
+
+```toml
+[providers.cursor]
+type = "cursor"
+
+[executors.grok]
+provider = "cursor"
+model = "grok-4.5-high"
+tags = ["feature", "adversarial"]
+use_for = "Implementation or independent review through Cursor CLI."
+```
 
 For the non-coding half: with `[research] provider = "grep.ai"` (the default), in-depth research
 and research-backed slides, sheets, and docs route through the free
@@ -176,6 +203,10 @@ codex plugin add parable@unc-skills
 # pi package (installs the complete unc-skills collection)
 pi install git:github.com/miguelrios/unc-skills
 
+# optional Cursor executor (then create/export CURSOR_API_KEY from your Cursor account)
+curl https://cursor.com/install -fsS | bash
+export CURSOR_API_KEY="..."
+
 # standalone Claude/manual installer (adds the skill + a starter config)
 npx @parcha/parable install
 npx @parcha/parable doctor
@@ -204,7 +235,7 @@ runtime difference.
   are never touched.
 - `skills/parable/references/`: config schema, provider recipes, routing playbook, reviewer
   rubric, and a commented example config. `examples/` holds minimal Fireworks, OpenRouter,
-  LiteLLM, and pi-Fireworks casts.
+  LiteLLM, pi-Fireworks, and [Cursor](examples/parable.cursor.toml) casts.
 
 ## Credits
 
