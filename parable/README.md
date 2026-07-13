@@ -13,10 +13,10 @@
 Request
    |
    v
-Fable: write plan.md + select executor
+Fable: split into tasks + write one plan.md per task
    |
    v
-Selected executor (one):
+Route each task to the best available executor:
 +------------------+----------------------------------+
 | Claude subagents | Sonnet / Opus                    |
 +------------------+----------------------------------+
@@ -28,13 +28,17 @@ Selected executor (one):
 +------------------+----------------------------------+
    |
    v
+Executor sessions (parallel when tasks are independent)
+   |
+   v
 Shared worktree -> tests + independent review -> commit
                        |
-                       +-- fail -> resume selected executor
+                       +-- fail -> resume that task's executor
 ```
 
-Fable produces the `plan.md` and selects an executor. The executor edits the shared worktree;
-tests and a non-author model gate the result.
+Fable decomposes the request, writes a `plan.md` for each task, and routes each task by fit,
+marginal cost, and live subscription headroom. The executors edit the shared worktree; tests and
+a non-author model gate the combined result.
 
 It is Tuesday. You are pair-programming with Fable on a small task: extract a helper
 function and add a test. Three hundred lines later, the helper has its own module and two new
