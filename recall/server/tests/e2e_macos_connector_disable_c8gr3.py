@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import plistlib
+import re
 import shutil
 import subprocess
 import time
@@ -32,11 +33,22 @@ def service_present() -> bool:
     ).returncode == 0
 
 
-def wait_until(operation, *, timeout: float = 30) -> None:
+def launch_pid() -> int | None:
+    completed = subprocess.run(
+        ["launchctl", "print", target()], text=True, capture_output=True,
+    )
+    if completed.returncode:
+        return None
+    matched = re.search(r"(?m)^\s*pid = (\d+)$", completed.stdout)
+    return int(matched.group(1)) if matched else None
+
+
+def wait_until(operation, *, timeout: float = 30):
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if operation():
-            return
+        value = operation()
+        if value:
+            return value
         time.sleep(0.1)
     raise AssertionError("bounded launchd condition did not converge")
 
@@ -101,6 +113,14 @@ def main() -> None:
         wait_until(state_path.is_file)
         plist = plistlib.loads(plist_path.read_bytes())
         assert plist["Label"] == LABEL
+        first_pid = wait_until(launch_pid)
+        subprocess.run(["launchctl", "kill", "SIGHUP", target()], check=True)
+        wait_until(lambda: launch_pid() == first_pid)
+        subprocess.run(["launchctl", "kill", "SIGKILL", target()], check=True)
+        second_pid = wait_until(
+            lambda: value if (value := launch_pid()) and value != first_pid else None,
+        )
+        assert second_pid != first_pid
 
         disabled = subprocess.run([
             str(args.bundle_root / "install.sh"),
@@ -115,6 +135,30 @@ def main() -> None:
             "plist_absent": not plist_path.exists(),
             "state_retained": state_path.is_file(),
         }
+        assert all(facts.values())
+
+        subprocess.run([
+            str(args.bundle_root / "install.sh"),
+            "--prefix", str(prefix),
+            "--launch-agents", str(launch_agents),
+            "--connector-supervisor-config", str(config_path),
+        ], check=True, text=True, capture_output=True)
+        wait_until(service_present)
+        wait_until(state_path.is_file)
+        subprocess.run([
+            str(args.bundle_root / "uninstall.sh"),
+            "--prefix", str(prefix),
+            "--launch-agents", str(launch_agents),
+        ], check=True, text=True, capture_output=True)
+        installed = False
+        facts.update({
+            "hup_preserved_process": True,
+            "keepalive_restarted_process": True,
+            "reenable_loaded": True,
+            "uninstall_service_absent": not service_present(),
+            "uninstall_plist_absent": not plist_path.exists(),
+            "uninstall_prefix_absent": not prefix.exists(),
+        })
         print(json.dumps(facts, sort_keys=True))
         assert all(facts.values())
     finally:
