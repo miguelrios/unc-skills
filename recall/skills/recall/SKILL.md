@@ -77,6 +77,17 @@ not delete central memory. Use `--export-inbox` during Mac package installation
 to opt into scheduled sync, and `--disable-export-inbox` to unload that agent
 without destroying its recoverable catalog/spool.
 
+## Deliberate capture from any MCP host
+
+Prefer the packaged `recall_capture` MCP tool when the user wants an agent to
+remember a selected decision, result, or external finding. Capture one concise
+evidence object with a truthful `origin`, timestamp, title/body, tags, and a
+non-secret provenance URI. Return its canonical receipt. Do not capture whole
+transcripts, hidden reasoning, ambient context, secrets, or third-party results
+the user did not select. The MCP process—not the model—owns the source-scoped
+credential and privacy policy. Use `recall_forget` only with the exact receipt;
+never approximate identity from search text.
+
 ## First: pick the outcome
 
 1. **Find / verify** — answer "did we…", "which session…", "how did we…".

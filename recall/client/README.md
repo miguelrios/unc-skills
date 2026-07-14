@@ -126,3 +126,28 @@ and discovers no plugins automatically. A connector must be explicitly installed
 and constructed. It owns only source fetching; the shared runner owns privacy,
 durable ACK recovery, cursor commits, tombstones, and content-free health state.
 See `connectors/README.md` before adding a source.
+
+## Deliberate agent capture over MCP
+
+The bundled stdio MCP server lets Codex, Claude Code, ChatGPT/Cowork, or another
+MCP host deliberately save one selected evidence item without giving the model a
+Brain credential. Preview a config object; Recall does not edit harness config:
+
+```bash
+recall-brain mcp-config-preview \
+  --endpoint https://brain.example.ts.net \
+  --source-id capture:mac:my-mac \
+  --visibility private \
+  --keychain-service ai.parcha.recall \
+  --keychain-account capture:mac:my-mac \
+  --privacy-mode scrub
+```
+
+Review the JSON and install it through the host's normal MCP settings. The
+process resolves Keychain only after launch; stdout carries newline-delimited
+MCP JSON-RPC and never logs arguments. The tools are `recall_capture`,
+`recall_forget`, and content-free `recall_doctor`. Capture retries are
+content-identity stable and return the same receipt. `shared` visibility is
+available only when explicitly selected in the process config, never in a tool
+call. The current stable MCP revision is `2025-11-25`, with negotiation support
+for `2025-06-18` clients.

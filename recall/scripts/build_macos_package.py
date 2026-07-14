@@ -150,6 +150,8 @@ def application_payloads(source_root: Path, runtime_lock_data: bytes) -> dict[st
     mappings = {
         source_root / "client" / "mac.py": "lib/client/mac.py",
         source_root / "client" / "cli.py": "lib/client/cli.py",
+        source_root / "client" / "capture.py": "lib/client/capture.py",
+        source_root / "client" / "mcp.py": "lib/client/mcp.py",
         source_root / "client" / "__init__.py": "lib/client/__init__.py",
         source_root / "collector" / "collector.py": "lib/collector/collector.py",
         source_root / "collector" / "__init__.py": "lib/collector/__init__.py",

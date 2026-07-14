@@ -159,6 +159,8 @@ class MacPackageTest(unittest.TestCase):
         self.assertIn("lib/connectors/sdk.py", packaged_paths)
         self.assertIn("lib/connectors/__init__.py", packaged_paths)
         self.assertIn("lib/connectors/export_inbox.py", packaged_paths)
+        self.assertIn("lib/client/capture.py", packaged_paths)
+        self.assertIn("lib/client/mcp.py", packaged_paths)
 
         wrapper = (package / "bin" / "recall-brain").read_text()
         self.assertIn('exec "$HERE/runtime/bin/python3" -m client.cli', wrapper)
