@@ -162,3 +162,34 @@ The scheduler core never reads the wall clock or sleeps: hosts inject time and
 wait/wake events. Private schedule configuration and service launch wiring are
 separate deployment concerns; the supervisor does not discover plugins or
 execute arbitrary commands.
+
+## Private connector host
+
+`connectors.host` is the closed deployment layer for the bundled export-inbox
+and Grep AI pull connectors. It reads one explicitly selected regular mode-0600
+JSON file from a mode-0700 directory. The file contains source-specific paths
+and authority *references*; inline tokens/API keys, command arrays, import
+strings, plugins, relative paths, shared visibility, duplicate source/job/state
+ownership, and Brain/Grep authority aliasing are rejected.
+
+Preview validates only the config schema and renders aggregate counts. It does
+not dereference authority, open an inbox/report, construct a connector, create
+state, or call a network:
+
+```bash
+recall-brain connector-supervisor-config-preview --config "$PRIVATE/host.json"
+recall-brain connector-supervisor-run --config "$PRIVATE/host.json" \
+  --state "$STATE/connector-supervisor.db" --once
+```
+
+Without `--once`, the host runs bounded supervisor cycles. TERM/INT wake and
+stop it; HUP wakes the current cycle and reloads the private config between
+cycles. Only the closed factory may construct `ExportInboxConnector`,
+`GrepAIConnector`, `BrainClient`, `PrivacyPolicy`, and `ConnectorRunner`.
+
+The macOS installer accepts `--connector-supervisor-config FILE` to install the
+fixed `ai.parcha.recall.connector-supervisor` LaunchAgent. The plist passes the
+config path, content-free supervisor state path, bundled interpreter, and fixed
+module/subcommand—never authority values or source content. Use
+`--disable-connector-supervisor` to unload/remove only that agent while keeping
+recoverable config, connector spools, and scheduler state.

@@ -71,6 +71,16 @@ job key, connector/source identity, path, cursor, command, credential, exception
 or content. The supervisor schedules only explicitly constructed registered pull
 connectors; it does not discover plugins or own connector configuration.
 
+For a deliberately configured Mac service, keep the closed two-source host JSON
+in a mode-0700 directory as a mode-0600 regular file. Validate it with
+`connector-supervisor-config-preview --config <file>`; this reads no authority
+or source content. Install it with `--connector-supervisor-config <file>` or run
+one bounded cycle with `connector-supervisor-run --config <file> --state
+<private-db> --once`. Config may contain only file/Keychain references—never
+credential values—and Brain/Grep authority references must be distinct. Use
+`--disable-connector-supervisor` to unload the agent without deleting its
+recoverable private state.
+
 When the packaged Brain client is available, offer its opt-in pre-ingest privacy
 policy for transcript/export/memory writes: `off` preserves compatibility,
 `scrub` retains safe context, and `drop` omits the classified record before spool

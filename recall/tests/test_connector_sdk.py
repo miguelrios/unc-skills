@@ -116,6 +116,12 @@ class ConnectorRunnerTest(unittest.TestCase):
             privacy=privacy or PrivacyPolicy(mode="off"), enabled=enabled,
         )
 
+    def spool_bytes(self) -> bytes:
+        return b"".join(
+            path.read_bytes() for path in self.spool.parent.glob(self.spool.name + "*")
+            if path.is_file()
+        )
+
     def test_cursor_commits_only_after_brain_ack_and_replay_is_idempotent(self) -> None:
         connector = SyntheticConnector({
             None: ConnectorPage(records=(record("one", "safe one"),), next_cursor="page-1", has_more=True),
@@ -137,6 +143,26 @@ class ConnectorRunnerTest(unittest.TestCase):
         self.assertEqual(connector.pulls, [None])
         recovered.run_once()
         self.assertEqual(connector.pulls, [None, "page-1"])
+        recovered.close()
+
+    def test_pending_payload_is_durable_but_acknowledged_bytes_are_purged(self) -> None:
+        marker = "synthetic-ack-purge-marker-91"
+        connector = SyntheticConnector({
+            None: ConnectorPage(
+                records=(record("purge-one", marker),), next_cursor="purged", has_more=False,
+            ),
+        })
+        brain = FakeBrain(); brain.fail_after_commit = True
+        runner = self.runner(connector, brain)
+        with self.assertRaisesRegex(ConnectorRunError, "brain_unavailable"):
+            runner.run_once()
+        self.assertIn(marker.encode(), self.spool_bytes())
+        runner.close()
+
+        recovered = self.runner(connector, brain)
+        self.assertEqual(recovered.run_once()["replayed"], 1)
+        self.assertNotIn(marker.encode(), self.spool_bytes())
+        self.assertTrue(recovered.doctor()["checkpointed"])
         recovered.close()
 
     def test_drop_and_scrub_happen_before_spool_and_network(self) -> None:
