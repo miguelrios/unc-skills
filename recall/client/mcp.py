@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, TextIO
 
-from client.capture import CaptureContractError, validate_capture
+from client.capture import CaptureContractError, ORIGIN, validate_capture
 
 
 PROTOCOL_VERSION = "2025-11-25"
@@ -22,12 +22,11 @@ class McpProtocolError(ValueError):
 CAPTURE_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["schema_version", "title", "body", "origin", "occurred_at", "provenance"],
+    "required": ["schema_version", "title", "body", "occurred_at", "provenance"],
     "properties": {
         "schema_version": {"const": 1},
         "title": {"type": "string", "minLength": 1, "maxLength": 500},
         "body": {"type": "string", "minLength": 1, "maxLength": 1000000},
-        "origin": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{1,63}$"},
         "occurred_at": {"type": "string", "format": "date-time"},
         "tags": {"type": "array", "maxItems": 20, "uniqueItems": True, "items": {"type": "string"}},
         "provenance": {
@@ -68,8 +67,11 @@ def _result(value: dict[str, Any]) -> dict[str, Any]:
 
 
 class McpServer:
-    def __init__(self, backend):
+    def __init__(self, backend, *, capture_origin: str):
+        if not isinstance(capture_origin, str) or not ORIGIN.fullmatch(capture_origin):
+            raise CaptureContractError("capture origin is invalid")
         self.backend = backend
+        self.capture_origin = capture_origin
 
     def handle(self, request: Any) -> dict[str, Any] | None:
         if not isinstance(request, dict) or request.get("jsonrpc") != "2.0":
@@ -105,7 +107,11 @@ class McpServer:
         arguments = params["arguments"]
         try:
             if name == "recall_capture":
-                value = self.backend.capture(validate_capture(arguments))
+                if not isinstance(arguments, dict) or "origin" in arguments:
+                    raise CaptureContractError("capture schema is invalid")
+                value = self.backend.capture(validate_capture({
+                    **arguments, "origin": self.capture_origin,
+                }))
             elif name == "recall_forget":
                 if not isinstance(arguments, dict) or set(arguments) != {"receipt"} or not isinstance(arguments["receipt"], str):
                     raise CaptureContractError("forget schema is invalid")

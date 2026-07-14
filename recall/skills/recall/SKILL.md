@@ -112,12 +112,16 @@ without destroying its recoverable catalog/spool.
 
 Prefer the packaged `recall_capture` MCP tool when the user wants an agent to
 remember a selected decision, result, or external finding. Capture one concise
-evidence object with a truthful `origin`, timestamp, title/body, tags, and a
-non-secret provenance URI. Return its canonical receipt. Do not capture whole
+evidence object with a timestamp, title/body, tags, and a non-secret provenance
+URI; the host configuration supplies the truthful, fixed origin. Return its
+canonical receipt. Do not capture whole
 transcripts, hidden reasoning, ambient context, secrets, or third-party results
-the user did not select. The MCP process—not the model—owns the source-scoped
-credential and privacy policy. Use `recall_forget` only with the exact receipt;
-never approximate identity from search text.
+the user did not select. The MCP process—not the model—owns origin, the
+source-scoped credential, and privacy policy. Use one source profile per host;
+never reuse another host's authority or try to send `origin` in the tool call.
+Use `recall_forget` only with the exact receipt; never approximate identity from
+search text. ChatGPT needs a remote MCP or Secure MCP Tunnel adapter rather than
+the local stdio configuration.
 
 ## First: pick the outcome
 
