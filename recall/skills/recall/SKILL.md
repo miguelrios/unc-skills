@@ -188,11 +188,13 @@ python3 scripts/recall.py session-export --target <exact-path-or-receipt> --limi
 python3 scripts/recall.py session-export --cursor <opaque-next-cursor> --limit 1000
 ```
 
-Each JSON page contains stable evidence IDs, redacted text and digests, native session/parent
-identity, projection/privacy versions, a boundary receipt, a content-free page receipt, and
-`complete` plus `next_cursor`. Consume pages in sequence and accept completeness only on the final
-page. Local cursors are stored owner-private under `~/.recall`; central cursors are random,
-source-authorized server state. Neither cursor encodes transcript text or a path.
+Each JSON page contains stable evidence IDs, redacted text and digests, sanitized typed entities
+(including native tool identity when observed), native session identity, projection/privacy
+versions, a boundary receipt, a content-free page receipt, and `complete` plus `next_cursor`.
+Consume pages in sequence and accept immutable-snapshot completeness only on the final page; inspect
+`source_snapshot_stable` before claiming a live source did not advance. Local cursors are stored
+owner-private under `~/.recall`; central cursors are random, source-authorized server state. Neither
+cursor encodes transcript text or a path.
 
 `--current` resolves Codex only through exact `CODEX_THREAD_ID`, and Claude through exact
 `CLAUDE_SESSION_ID` when the harness exposes it. Otherwise it fails closed with content-free ranked

@@ -27,6 +27,10 @@ python3 scripts/recap.py collect --current --output ~/.recap/current.json
 python3 scripts/recap.py collect --session <exact-session-path> --output ~/.recap/prior.json
 ```
 
+Repeat `--repo <worktree>` when the session touched more than one repository or when a deleted
+worktree cannot be derived from current session metadata. These are verification candidates, not
+claims that the session changed them.
+
 The output file is owner-only and may contain redacted session text. Do not put it in a repository,
 test artifact, Slack message, or public evidence directory. The command prints only a content-free
 receipt. If Recall is installed somewhere unusual, pass `--recall-script` or set `RECALL_SCRIPT`.
@@ -53,6 +57,18 @@ The transcript can establish that a command was attempted and what output was ob
 state can establish what exists now. Neither alone proves that the session caused a change. Say
 "the session edited" only when event evidence supports it; otherwise say "the current worktree
 contains" or "git now shows".
+
+The manifest enforces that distinction:
+
+- `git.session_observed` contains event-linked mutations, git commands, reported commit IDs,
+  branch-switch attempts, verification commands, and repository candidates.
+- `git.session_end` is explicitly unknown unless session evidence proves an end-state fact.
+- `git.verified_now` contains bounded read-only snapshots taken during Recap. Every snapshot is
+  labeled `verified_now_only`; never back-attribute its diff to the session.
+
+Tool-input/result pairing is labeled `order_inferred` until the native source proves a call ID. A
+missing worktree, detached branch, absent upstream, expired reflog, timeout, or bounded-output cutoff
+is a limitation, not an empty result.
 
 Tests count as run only when an observed command and result support the claim. Distinguish passed,
 failed, retried, discussed-only, and unverifiable-now. Never convert a proposed test into a run.

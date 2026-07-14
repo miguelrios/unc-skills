@@ -15,8 +15,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from git_provenance import collect_git_provenance, validate_git_provenance
 
-SCHEMA_VERSION = "recap.manifest.v0.2"
+
+SCHEMA_VERSION = "recap.manifest.v0.3"
 UUID_RE = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
 SECRET_PATTERNS = (
     re.compile(
@@ -75,6 +77,28 @@ def sanitize(text: str) -> tuple[str, int]:
         else:
             safe_lines.append(part)
     return "".join(safe_lines), redactions
+
+
+def sanitize_structure(value: Any) -> tuple[Any, int]:
+    if isinstance(value, str):
+        return sanitize(value)
+    if isinstance(value, list):
+        result = []
+        count = 0
+        for item in value:
+            safe, redactions = sanitize_structure(item)
+            result.append(safe)
+            count += redactions
+        return result, count
+    if isinstance(value, dict):
+        result = {}
+        count = 0
+        for key, item in value.items():
+            safe, redactions = sanitize_structure(item)
+            result[key] = safe
+            count += redactions
+        return result, count
+    return value, 0
 
 
 def session_id_from_path(path: Path) -> str:
@@ -188,45 +212,6 @@ def recall_session_pages(script: Path, *, current: bool, session: str | None) ->
     raise RecapError("Recall session export exceeded the page safety bound")
 
 
-def run_git(repo: Path, args: list[str], timeout: float = 8.0) -> tuple[int, str]:
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(repo), *args], text=True, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, timeout=timeout, check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return 124, ""
-    return result.returncode, result.stdout.rstrip("\n")
-
-
-def git_snapshot(cwd: str | None) -> dict[str, Any]:
-    if not cwd:
-        return {"available": False, "reason": "session has no cwd metadata"}
-    code, root_text = run_git(Path(cwd), ["rev-parse", "--show-toplevel"])
-    if code != 0 or not root_text:
-        return {"available": False, "reason": "session cwd is not an accessible git worktree"}
-    root = Path(root_text)
-    _, head = run_git(root, ["rev-parse", "HEAD"])
-    _, branch = run_git(root, ["branch", "--show-current"])
-    status_code, status = run_git(root, ["status", "--porcelain=v1", "--untracked-files=all"])
-    changed = []
-    if status_code == 0:
-        for line in status.splitlines():
-            if len(line) >= 4:
-                value = line[3:]
-                changed.append(value.split(" -> ", 1)[-1])
-    return {
-        "available": True,
-        "repo_root": str(root),
-        "head": head or None,
-        "branch": branch or None,
-        "status_porcelain": status.splitlines(),
-        "changed_paths": sorted(set(changed)),
-        "snapshot_at": utc_now(),
-        "attribution": "current_state_only",
-    }
-
-
 def private_write(path: Path, value: dict[str, Any]) -> None:
     path = path.expanduser()
     if path.is_symlink():
@@ -269,7 +254,7 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
             redaction_count += redactions
             if sha256_bytes(safe_text.encode()) != item.get("text_sha256"):
                 raise RecapError("Recall evidence digest changed after redaction")
-            events.append({
+            event = {
                 "ordinal": item["sequence"],
                 "event_id": item["evidence_id"],
                 "event_native_id": item["event_native_id"],
@@ -280,12 +265,23 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
                 "text": safe_text,
                 "text_sha256": item["text_sha256"],
                 "receipt": item.get("receipt"),
-            })
+            }
+            if isinstance(item.get("entities"), list) and item["entities"]:
+                event["entities"] = item["entities"]
+            if item.get("possibly_truncated"):
+                event["possibly_truncated"] = True
+            events.append(event)
     metadata = session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
     stable_value = session.get("source_snapshot_stable")
     source_stable = stable_value if isinstance(stable_value, bool) else None
     source_partial = bool(session.get("source_partial_record", False))
     final_page = pages[-1]["page"]
+    git_provenance, git_redactions = sanitize_structure(collect_git_provenance(
+        events,
+        metadata,
+        ([str(args.repo)] if isinstance(args.repo, (str, Path)) else list(args.repo or [])),
+    ))
+    redaction_count += git_redactions
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": utc_now(),
@@ -322,7 +318,7 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
             "duplicate_event_ids": 0,
             "semantic_accounting": "not_performed",
         },
-        "git": git_snapshot(args.repo or metadata.get("cwd")),
+        "git": git_provenance,
         "events": events,
     }
     return manifest
@@ -355,6 +351,14 @@ def validate_manifest(value: dict[str, Any]) -> dict[str, Any]:
         text_hash = sha256_bytes(text.encode())
         if event.get("text_sha256") != text_hash:
             errors.append(f"event {ordinal} text digest mismatch")
+        entities = event.get("entities", [])
+        if not isinstance(entities, list) or any(
+            not isinstance(entity, dict)
+            or not isinstance(entity.get("kind"), str)
+            or not isinstance(entity.get("value"), str)
+            for entity in entities
+        ):
+            errors.append(f"event {ordinal} entities are invalid")
         expected_id = "rse_" + sha256_bytes(
             f"{source_id}\0{native_id}\0{event.get('event_native_id')}\0{event.get('item_ordinal')}\0{text_hash}".encode()
         )
@@ -363,6 +367,7 @@ def validate_manifest(value: dict[str, Any]) -> dict[str, Any]:
     coverage = value.get("coverage", {})
     if coverage.get("observed_events") != len(events) or coverage.get("manifest_events") != len(events):
         errors.append("coverage counts do not match events")
+    errors.extend(validate_git_provenance(value.get("git"), set(event_ids)))
     return {
         "valid": not errors,
         "errors": errors,
@@ -415,7 +420,10 @@ def parser() -> argparse.ArgumentParser:
     target.add_argument("--current", action="store_true")
     target.add_argument("--session")
     collect_parser.add_argument("--output", required=True)
-    collect_parser.add_argument("--repo", help="explicit repository/worktree to snapshot")
+    collect_parser.add_argument(
+        "--repo", action="append",
+        help="explicit repository/worktree to verify now; repeat for multiple repositories",
+    )
     collect_parser.add_argument("--recall-script")
     collect_parser.set_defaults(func=command_collect)
     validate_parser = commands.add_parser("validate", help="validate structural completeness")

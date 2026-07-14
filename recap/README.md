@@ -29,5 +29,10 @@ In Codex, use `$recap` or ask “recap this session.” For an older run, use Re
 exact session first, then ask Recap to explain it. Long sessions stay readable: the default answer
 is concise, while exhaustive evidence lives in an owner-private ledger.
 
+For sessions spanning multiple repositories, repeat `--repo` when collecting the private manifest.
+Recap keeps event-observed actions, the usually unknown historical session end, and read-only git
+state verified now as separate evidence surfaces, so a pre-existing branch diff is never presented
+as work performed by the selected agent.
+
 Recap never calls a model provider itself, never dumps private transcripts into a repository, and
 never labels a session complete until every exported page has been consumed.

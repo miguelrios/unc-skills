@@ -43,6 +43,18 @@ Only join them into a causal claim when evidence connects them. Dirty state that
 session, edits by another worktree, amended/rebased commits, and reverted changes require explicit
 qualification. Missing repositories or expired history are coverage limits, not empty results.
 
+The machine schema keeps these facts in three non-overlapping objects:
+
+- `session_observed`: exact event IDs for attempted mutations, git commands, branch switches,
+  reported commits, tests/checks, and their direct or order-inferred results;
+- `session_end`: historical state, defaulting to explicitly unknown; and
+- `verified_now`: current read-only repository snapshots labeled `verified_now_only`.
+
+Repository candidates come from Recall cwd metadata, structured tool workdirs, event-linked file
+mutations, and explicit repeated `--repo` arguments. Git probes are fixed argv—not transcript
+commands—run without a shell, optional locks, terminal prompts, filesystem monitors, or unbounded
+time/output. A current dirty path is never promoted into `session_observed` merely because it exists.
+
 ## Verification
 
 Classify tests and checks as `passed`, `failed`, `retried`, `discussed_only`, or

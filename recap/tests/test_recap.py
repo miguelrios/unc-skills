@@ -2,6 +2,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +12,7 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "skills/recap/scripts/recap.py"
 RECALL = ROOT.parent / "recall/skills/recall/scripts/recall.py"
+sys.path.insert(0, str(SCRIPT.parent))
 
 
 def load_recap():
@@ -89,6 +91,18 @@ class RecapCollectorTest(unittest.TestCase):
             self.assertFalse(result["valid"])
             self.assertIn("event 1 text digest mismatch", result["errors"])
 
+    def test_validation_detects_git_boundary_and_evidence_tampering(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            session = Path(temporary) / "session.jsonl"
+            write_session(session)
+            manifest = self.recap.collect(self.args(session))
+            manifest["git"]["session_observed"]["file_mutations"] = [{
+                "event_id": "invented", "result": None,
+            }]
+            result = self.recap.validate_manifest(manifest)
+            self.assertFalse(result["valid"])
+            self.assertIn("git file_mutations references unknown event", result["errors"])
+
     def test_defense_in_depth_redacts_private_key_blocks(self):
         private_block = (
             "-----BEGIN " + "PRIVATE KEY-----\n" + ("Q" * 256)
@@ -99,6 +113,16 @@ class RecapCollectorTest(unittest.TestCase):
         self.assertNotIn("Q" * 64, safe)
         self.assertIn("before", safe)
         self.assertIn("after", safe)
+
+    def test_nested_git_metadata_redaction_never_preserves_credential_values(self):
+        secret = "Z" * 40
+        safe, count = self.recap.sanitize_structure({
+            "commits": [{"subject": "api_key=" + secret}],
+            "argv": ["git", "show", "token=" + secret],
+        })
+        self.assertEqual(count, 2)
+        self.assertNotIn(secret, json.dumps(safe))
+        self.assertEqual(safe["commits"][0]["subject"], "[redacted-secret-line]")
 
     def test_private_write_uses_0600_and_rejects_symlink(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -136,10 +160,54 @@ class RecapCollectorTest(unittest.TestCase):
             subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
             subprocess.run(["git", "-C", str(repo), "commit", "-qm", "base"], check=True)
             (repo / "new.txt").write_text("new\n")
-            snapshot = self.recap.git_snapshot(str(repo))
+            provenance = self.recap.collect_git_provenance([], {}, [str(repo)])
+            snapshot = provenance["verified_now"]["repositories"][0]
             self.assertTrue(snapshot["available"])
-            self.assertEqual(snapshot["attribution"], "current_state_only")
+            self.assertEqual(snapshot["attribution"], "verified_now_only")
             self.assertIn("new.txt", snapshot["changed_paths"])
+            self.assertEqual(
+                provenance["session_end"]["state"], "unknown_unless_explicitly_observed",
+            )
+
+    def test_public_recall_entities_drive_observed_mutation_without_attributing_current_diff(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.name", "Fixture"], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.email", "recap@example.invalid"], check=True)
+            (repo / "base.txt").write_text("base\n")
+            subprocess.run(["git", "-C", str(repo), "add", "base.txt"], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-qm", "base"], check=True)
+            session = root / "session.jsonl"
+            session.write_text("\n".join([
+                json.dumps({
+                    "type": "user", "timestamp": "2026-07-14T00:00:00Z",
+                    "cwd": str(repo), "message": {"content": "make the change"},
+                }),
+                json.dumps({
+                    "type": "assistant", "timestamp": "2026-07-14T00:00:01Z",
+                    "cwd": str(repo), "message": {"content": [{
+                        "type": "tool_use", "name": "apply_patch",
+                        "input": {"patch": "*** Begin Patch\n*** Add File: src/new.py\n+VALUE = 1\n*** End Patch"},
+                    }]},
+                }),
+                json.dumps({
+                    "type": "user", "timestamp": "2026-07-14T00:00:02Z",
+                    "cwd": str(repo), "message": {"content": [{
+                        "type": "tool_result", "content": json.dumps({"exit_code": 0}),
+                    }]},
+                }),
+            ]) + "\n")
+            manifest = self.recap.collect(self.args(session, repo=repo))
+            mutations = manifest["git"]["session_observed"]["file_mutations"]
+            self.assertEqual([item["path"] for item in mutations], [str((repo / "src/new.py").resolve())])
+            self.assertEqual(mutations[0]["result"]["status"], "passed")
+            self.assertEqual(
+                manifest["git"]["verified_now"]["repositories"][0]["attribution"],
+                "verified_now_only",
+            )
 
     def test_current_codex_identity_requires_one_exact_file(self):
         with tempfile.TemporaryDirectory() as temporary:

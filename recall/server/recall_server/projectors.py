@@ -82,10 +82,11 @@ def item_receipt(source_id: str, native_id: str, revision: int, ordinal: int) ->
 
 
 def projected_entities(engine, text: str, extra: list[tuple[str, str]] | None = None) -> list[dict]:
-    return [
-        {"kind": kind, "value": value, "normalized": value.casefold()}
-        for kind, value in engine.extract_entities(text, extra)
-    ]
+    values = []
+    for kind, value in engine.extract_entities(text, extra):
+        safe_value = redact_text(str(value))
+        values.append({"kind": kind, "value": safe_value, "normalized": safe_value.casefold()})
+    return values
 
 
 def partial_lexical_probes(informative: list[str], *, has_time_filter: bool) -> list[tuple[str, str, int]]:

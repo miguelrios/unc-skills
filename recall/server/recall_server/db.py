@@ -869,12 +869,23 @@ class BrainStore:
             ).fetchall()
             has_more = len(rows) > limit
             page_rows = rows[:limit]
+            entities_by_item: dict[int, list[dict[str, str]]] = {}
+            if page_rows:
+                entity_rows = conn.execute(
+                    """SELECT item_id,kind,value FROM entities
+                       WHERE item_id=ANY(%s) ORDER BY item_id,kind,value""",
+                    ([row["id"] for row in page_rows],),
+                ).fetchall()
+                for entity in entity_rows:
+                    entities_by_item.setdefault(entity["item_id"], []).append({
+                        "kind": entity["kind"], "value": entity["value"],
+                    })
             items = []
             for index, row in enumerate(page_rows, after_sequence):
                 evidence_id, text_sha = self._session_evidence_id(
                     source_id, session_id, row["event_native_id"], row["ordinal"], row["text_redacted"],
                 )
-                items.append({
+                item = {
                     "sequence": index,
                     "evidence_id": evidence_id,
                     "event_native_id": row["event_native_id"],
@@ -886,7 +897,14 @@ class BrainStore:
                     "text_sha256": text_sha,
                     "receipt": row["receipt"],
                     "projector_version": row["projector_version"],
-                })
+                }
+                if entities_by_item.get(row["id"]):
+                    item["entities"] = entities_by_item[row["id"]]
+                if row["surface"] in {"tool_input", "tool_output"} and len(row["text_redacted"]) >= (
+                    2048 if row["surface"] == "tool_input" else 4096
+                ):
+                    item["possibly_truncated"] = True
+                items.append(item)
             next_cursor = None
             if has_more:
                 last = page_rows[-1]
