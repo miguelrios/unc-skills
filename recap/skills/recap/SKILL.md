@@ -126,6 +126,38 @@ Both commands print content-free receipts. A missing event, reused event ID, ove
 invented evidence ID, out-of-bounds range, or stale ledger hash fails closed. Fix the private draft;
 never weaken the validator or silently fall back to plausible prose.
 
+## Synthesize two views
+
+After accounting seals, write a private `recap.synthesis-draft.v1` JSON object from the bounded
+packets. Story groups every accounted claim exactly once into a causal narrative. Timeline groups
+every significant claim event exactly once into non-overlapping chronological entries; a thematic
+claim may therefore appear in more than one timeline entry. The two views must not use the same
+event partition. Keep changes, verification, failures/recoveries, final state, and open work as
+focused projections of those claims.
+
+Every renderable item carries:
+
+- a unique `id`, concise `summary`, and (except the headline) `title`;
+- `accounting_claim_ids` and the exact supporting `evidence_ids`;
+- one source label: `session_observed`, `agent_report`, `verified_now`, or `inference`;
+- a non-empty `caveat` for inference; or exact `git_evidence` for verified-now facts.
+
+Read `references/synthesis-contract.md` for the closed JSON shape, verification fields, current-git
+references, and a complete example. Validate before rendering:
+
+```bash
+python3 scripts/recap.py validate-synthesis \
+  ~/.recap/current.json ~/.recap/accounting.json ~/.recap/synthesis.json
+python3 scripts/recap.py render-synthesis \
+  ~/.recap/current.json ~/.recap/accounting.json ~/.recap/synthesis.json \
+  --output ~/.recap/recap.md
+```
+
+The commands print content-free receipts; rendered prose remains owner-private until you answer the
+user. If validation fails, use the private errors to repair the draft at most twice. After two
+failed repairs, stop and say an authoritative recap could not be validated. Never emit a plausible
+fallback. The renderer also fails closed above 2,500 words.
+
 ## Answer shape
 
 Default to a readable recap under 2,500 words:
@@ -141,6 +173,8 @@ Default to a readable recap under 2,500 words:
 
 For very long sessions, keep the prose concise and offer or create a separate owner-private ledger.
 Evidence references should use stable event ordinals/IDs from the manifest, not copied private text.
+Use the validated render as the factual spine of the answer; adapt its tone without removing source
+qualifiers, uncertainty, or coverage limits.
 
 ## Safety
 

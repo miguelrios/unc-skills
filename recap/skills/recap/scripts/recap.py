@@ -28,6 +28,7 @@ from git_provenance import (
     git_referenced_event_ids,
     validate_git_provenance,
 )
+from synthesis import render_markdown, validate_synthesis
 
 
 SCHEMA_VERSION = "recap.manifest.v0.4"
@@ -227,6 +228,29 @@ def private_write(path: Path, value: dict[str, Any]) -> None:
         with os.fdopen(descriptor, "w") as output:
             json.dump(value, output, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             output.write("\n")
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def private_write_text(path: Path, value: str) -> None:
+    path = path.expanduser()
+    if path.is_symlink():
+        raise RecapError("refusing to write through a symlink")
+    path = path.resolve()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if path.parent.stat().st_mode & 0o077:
+        raise RecapError("output directory must have mode 0700")
+    temporary = path.with_name("." + path.name + ".tmp-" + str(os.getpid()))
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w") as output:
+            output.write(value)
+            if not value.endswith("\n"):
+                output.write("\n")
         os.replace(temporary, path)
         os.chmod(path, 0o600)
     finally:
@@ -507,6 +531,44 @@ def command_validate_accounting(args: argparse.Namespace) -> int:
     return 0 if validation["valid"] else 2
 
 
+def _synthesis_inputs(args: argparse.Namespace):
+    _, manifest = _load_private_json(args.manifest, label="manifest")
+    _, accounting = _load_private_json(args.accounting, label="accounting")
+    _, draft = _load_private_json(args.draft, label="synthesis draft")
+    if not validate_manifest(manifest)["valid"]:
+        raise RecapError("manifest failed validation")
+    return manifest, accounting, draft
+
+
+def synthesis_receipt(validation: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": "recap.synthesis-receipt.v1",
+        "draft_sha256": validation.get("draft_sha256"),
+        "item_count": validation.get("item_count", 0),
+        "claim_count": validation.get("claim_count", 0),
+        "low_signal_group_count": validation.get("low_signal_group_count", 0),
+        "valid": bool(validation.get("valid")),
+        "error_count": len(validation.get("errors", [])),
+    }
+
+
+def command_validate_synthesis(args: argparse.Namespace) -> int:
+    manifest, accounting, draft = _synthesis_inputs(args)
+    validation = validate_synthesis(manifest, accounting, draft)
+    print(json.dumps(synthesis_receipt(validation), sort_keys=True))
+    return 0 if validation["valid"] else 2
+
+
+def command_render_synthesis(args: argparse.Namespace) -> int:
+    manifest, accounting, draft = _synthesis_inputs(args)
+    rendered, receipt = render_markdown(manifest, accounting, draft)
+    output = private_output_path(args.output, label="render output")
+    private_write_text(output, rendered)
+    receipt["output_mode"] = oct(output.stat().st_mode & 0o777)
+    print(json.dumps(receipt, sort_keys=True))
+    return 0
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     commands = root.add_subparsers(dest="command", required=True)
@@ -543,6 +605,21 @@ def parser() -> argparse.ArgumentParser:
     accounting_parser.add_argument("manifest")
     accounting_parser.add_argument("accounting")
     accounting_parser.set_defaults(func=command_validate_accounting)
+    synthesis_parser = commands.add_parser(
+        "validate-synthesis", help="validate a host-agent-authored recap draft",
+    )
+    synthesis_parser.add_argument("manifest")
+    synthesis_parser.add_argument("accounting")
+    synthesis_parser.add_argument("draft")
+    synthesis_parser.set_defaults(func=command_validate_synthesis)
+    render_parser = commands.add_parser(
+        "render-synthesis", help="render a validated recap to an owner-private file",
+    )
+    render_parser.add_argument("manifest")
+    render_parser.add_argument("accounting")
+    render_parser.add_argument("draft")
+    render_parser.add_argument("--output", required=True)
+    render_parser.set_defaults(func=command_render_synthesis)
     return root
 
 
