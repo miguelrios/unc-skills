@@ -1,0 +1,12 @@
+{"category":"credential","id":"credential-assignment","input":{"text":"deploy with api_key=synthetic-secret-canary-41 and keep this instruction"},"safe_text":"deploy with  and keep this instruction","sensitive":true}
+{"category":"credential","id":"bearer-header","input":{"tool":{"headers":{"Authorization":"Bearer synthetic-access-canary-42"},"status":"retry"}},"safe_text":"retry","sensitive":true}
+{"category":"email","id":"email","input":{"text":"contact alex@example.invalid about the cobalt release"},"safe_text":"contact  about the cobalt release","sensitive":true}
+{"category":"phone","id":"phone","input":{"text":"call +1 202-555-0104 after the deploy"},"safe_text":"call  after the deploy","sensitive":true}
+{"category":"government_id","id":"ssn","input":{"text":"synthetic SSN 000-00-0000 belongs only in this eval"},"safe_text":"synthetic SSN  belongs only in this eval","sensitive":true}
+{"category":"financial_id","id":"payment-card","input":{"text":"test card 4111 1111 1111 1111 must be removed"},"safe_text":"test card  must be removed","sensitive":true}
+{"category":"medical_id","id":"medical-record","input":{"text":"MRN: SYNTHETIC-482901; follow-up is Tuesday"},"safe_text":"MRN: ; follow-up is Tuesday","sensitive":true}
+{"category":"postal_address","id":"postal-address","input":{"text":"Address: 123 Example Street, Testville, CA 00000\nbring the blue folder"},"safe_text":"Address: \nbring the blue folder","sensitive":true}
+{"category":"contextual_name","id":"contextual-name","input":{"text":"The patient is Ada Example and the appointment is confirmed"},"safe_text":"The patient is  and the appointment is confirmed","sensitive":true,"judge_spans":[{"category":"contextual_name","end":26,"start":15}]}
+{"category":"benign","id":"token-count","input":{"text":"the tokenizer counted 2048 tokens and returned normally"},"safe_text":"the tokenizer counted 2048 tokens and returned normally","sensitive":false}
+{"category":"benign","id":"phone-version","input":{"text":"upgrade package 202.555.0104-beta after review"},"safe_text":"upgrade package 202.555.0104-beta after review","sensitive":false}
+{"category":"benign","id":"example-name","input":{"text":"Ada is the name of a programming language"},"safe_text":"Ada is the name of a programming language","sensitive":false}

@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from .collector import Collector
+from privacy.policy import AgenticJudge, PrivacyPolicy, load_scoped_virtual_key
 
 
 def token_from_file(path: str) -> str:
@@ -37,15 +38,30 @@ def main() -> None:
     parser.add_argument("--shard-count", type=int, default=1)
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--receipt")
+    parser.add_argument("--privacy-mode", choices=("off", "scrub", "drop"), default=os.environ.get("RECALL_PRIVACY_MODE", "off"))
+    parser.add_argument("--privacy-judge-base-url", default=os.environ.get("RECALL_PRIVACY_JUDGE_BASE_URL"))
+    parser.add_argument("--privacy-judge-key-file", default=os.environ.get("RECALL_PRIVACY_JUDGE_KEY_FILE"))
+    parser.add_argument("--privacy-judge-model", default=os.environ.get("RECALL_PRIVACY_JUDGE_MODEL"))
+    parser.add_argument("--privacy-judge-failure", choices=("drop", "ignore"), default="drop")
     args = parser.parse_args()
     if args.command in {"flush", "run", "watch"} and (not args.endpoint or not args.token_file):
         parser.error("--endpoint and --token-file are required for network commands")
+    judge_values = (args.privacy_judge_base_url, args.privacy_judge_key_file, args.privacy_judge_model)
+    if any(judge_values) and not all(judge_values):
+        parser.error("privacy judge requires base URL, private virtual-key file, and model")
+    judge = AgenticJudge(
+        base_url=args.privacy_judge_base_url,
+        virtual_key=load_scoped_virtual_key(Path(args.privacy_judge_key_file)),
+        model=args.privacy_judge_model,
+    ) if all(judge_values) else None
+    privacy = PrivacyPolicy(mode=args.privacy_mode, judge=judge, judge_failure=args.privacy_judge_failure)
     collector = Collector(
         root=Path(args.root), harness=args.harness, source_id=args.source_id,
         spool_path=Path(args.spool), endpoint=args.endpoint or "http://127.0.0.1:1",
         token=token_from_file(args.token_file) if args.token_file else "unused",
         principal_id=args.principal_id,
         visibility=args.visibility,
+        privacy=privacy,
     )
     if args.shard_count < 1 or not 0 <= args.shard_index < args.shard_count:
         parser.error("shard index must be within shard count")

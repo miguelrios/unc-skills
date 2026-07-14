@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import contextlib
 import io
 import json
 import os
@@ -9,8 +10,10 @@ import unittest
 import zipfile
 from pathlib import Path
 from unittest import mock
+from client import cli as client_cli
 
 from client.mac import ExportImporter, MemoryClient, PrivacyError, dry_run_manifest
+from privacy.policy import PrivacyPolicy
 
 
 class DryRunPrivacyTest(unittest.TestCase):
@@ -183,6 +186,142 @@ class ExplicitMemoryTest(unittest.TestCase):
         for request in requests:
             self.assertNotIn(b"C5_TOKEN_CANARY_DO_NOT_RENDER", request.data)
             self.assertEqual(request.get_header("Authorization"), "Bearer C5_TOKEN_CANARY_DO_NOT_RENDER")
+
+    def test_memory_drop_makes_no_request_and_scrub_removes_canary(self) -> None:
+        canary = "synthetic-memory-secret-canary-93"
+        dropped = MemoryClient(
+            endpoint="https://brain.example.ts.net", token="synthetic-token",
+            source_id="memory:mac:test", privacy=PrivacyPolicy(mode="drop"),
+        )
+        with mock.patch("urllib.request.urlopen") as opened:
+            result = dropped.put(f"api_key={canary}")
+        opened.assert_not_called()
+        self.assertEqual(result["privacy"]["action"], "drop")
+        self.assertNotIn(canary, json.dumps(result))
+
+        scrubbed = MemoryClient(
+            endpoint="https://brain.example.ts.net", token="synthetic-token",
+            source_id="memory:mac:test", privacy=PrivacyPolicy(mode="scrub"),
+        )
+        requests = []
+
+        def open_request(request, **_kwargs):
+            requests.append(request)
+            event = json.loads(request.data)["events"][0]
+            return FakeResponse(201, {"status": "committed", "receipts": [f"recall://{event['source_id']}/{event['native_id']}?rev=1"]})
+
+        with mock.patch("urllib.request.urlopen", side_effect=open_request):
+            result = scrubbed.put(f"keep context api_key={canary} after")
+        self.assertEqual(result["privacy"]["action"], "scrub")
+        self.assertNotIn(canary, requests[0].data.decode())
+        self.assertIn("keep context", requests[0].data.decode())
+
+    def test_delete_bypasses_context_judge_failure(self) -> None:
+        def unavailable(_text: str) -> list[dict]:
+            raise OSError("synthetic judge outage")
+
+        client = MemoryClient(
+            endpoint="https://brain.example.ts.net", token="synthetic-token",
+            source_id="memory:mac:test",
+            privacy=PrivacyPolicy(mode="scrub", judge=unavailable, judge_failure="drop"),
+        )
+        requests = []
+
+        def open_request(request, **_kwargs):
+            requests.append(request)
+            event = json.loads(request.data)["events"][0]
+            return FakeResponse(201, {"status": "committed", "receipts": [f"recall://{event['source_id']}/{event['native_id']}?rev=2"]})
+
+        with mock.patch("urllib.request.urlopen", side_effect=open_request):
+            result = client.delete("recall://memory:mac:test/memory-synthetic?rev=1")
+        self.assertEqual(result["kind"], "tombstone")
+        self.assertEqual(len(requests), 1)
+
+    def test_delete_many_batches_canonical_tombstones(self) -> None:
+        client = MemoryClient(
+            endpoint="https://brain.example.ts.net", token="synthetic-token",
+            source_id="memory:mac:test", privacy=PrivacyPolicy(mode="scrub"),
+        )
+        requests = []
+
+        def open_request(request, **_kwargs):
+            requests.append(request)
+            events = json.loads(request.data)["events"]
+            return FakeResponse(201, {
+                "status": "committed",
+                "receipts": [f"recall://{event['source_id']}/{event['native_id']}?rev=2" for event in events],
+            })
+
+        receipts = [
+            "recall://memory:mac:test/memory-one?rev=1",
+            "recall://memory:mac:test/memory-two?rev=1",
+        ]
+        with mock.patch("urllib.request.urlopen", side_effect=open_request):
+            result = client.delete_many(receipts)
+        self.assertEqual(result["kind"], "tombstones")
+        self.assertEqual(len(requests), 1)
+        events = json.loads(requests[0].data)["events"]
+        self.assertEqual([event["kind"] for event in events], ["tombstone", "tombstone"])
+        self.assertEqual([event["content"]["deleted_receipt"] for event in events], receipts)
+
+
+class ExportPrivacyTest(unittest.TestCase):
+    def test_export_drop_and_scrub_share_policy_before_network(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            canary = "synthetic-export-secret-canary-94"
+            source = root / "export.jsonl"
+            source.write_text(json.dumps({"text": f"api_key={canary}"}) + "\n" + json.dumps({"text": "safe export neighbor"}) + "\n")
+            dropped = ExportImporter(
+                source_id="export:mac:test", principal_id="owner", visibility="private",
+                privacy=PrivacyPolicy(mode="drop"),
+            ).inventory([source])
+            self.assertEqual(len(dropped["records"]), 1)
+            self.assertEqual(dropped["privacy"]["actions"], {"drop": 1, "keep": 1})
+            self.assertNotIn(canary, json.dumps(dropped))
+
+            scrubbed = ExportImporter(
+                source_id="export:mac:test", principal_id="owner", visibility="private",
+                privacy=PrivacyPolicy(mode="scrub"),
+            ).inventory([source])
+            self.assertEqual(len(scrubbed["records"]), 2)
+            self.assertEqual(scrubbed["privacy"]["actions"], {"keep": 1, "scrub": 1})
+            self.assertNotIn(canary, json.dumps(scrubbed))
+
+    def test_all_dropped_export_makes_no_request(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            canary = "synthetic-export-all-drop-canary-97"
+            source = Path(temporary) / "export.json"
+            source.write_text(json.dumps({"text": f"api_key={canary}"}))
+            policy = PrivacyPolicy(mode="drop")
+            importer = ExportImporter(
+                source_id="export:mac:test", principal_id="owner",
+                visibility="private", privacy=policy,
+            )
+            client = MemoryClient(
+                endpoint="https://brain.example.ts.net", token="synthetic-token",
+                source_id="export:mac:test", privacy=policy,
+            )
+            with mock.patch("urllib.request.urlopen") as opened:
+                result = importer.import_with(client, [source])
+            opened.assert_not_called()
+            self.assertEqual(result["acknowledgement"]["status"], "privacy_filtered")
+            self.assertNotIn(canary, json.dumps(result))
+
+
+class PrivacyPreviewTest(unittest.TestCase):
+    def test_preview_prints_only_content_free_receipt(self) -> None:
+        canary = "synthetic-preview-canary-98"
+        output = io.StringIO()
+        with mock.patch("sys.argv", ["recall-brain", "privacy-preview", "--privacy-mode", "scrub"]), \
+             mock.patch("sys.stdin", io.StringIO(f"api_key={canary}")), \
+             contextlib.redirect_stdout(output), \
+             mock.patch("urllib.request.urlopen") as opened:
+            client_cli.main()
+        opened.assert_not_called()
+        receipt = json.loads(output.getvalue())
+        self.assertEqual(receipt["action"], "scrub")
+        self.assertNotIn(canary, output.getvalue())
 
 
 if __name__ == "__main__":

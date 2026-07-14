@@ -11,6 +11,7 @@ SOURCES=""
 CLAUDE_ROOT="$HOME/.claude/projects"
 CODEX_ROOT="$HOME/.codex/sessions"
 NO_LOAD=0
+PRIVACY_MODE="off"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -23,8 +24,9 @@ while [ "$#" -gt 0 ]; do
     --sources) SOURCES=$2; shift 2 ;;
     --claude-root) CLAUDE_ROOT=$2; shift 2 ;;
     --codex-root) CODEX_ROOT=$2; shift 2 ;;
+    --privacy-mode) PRIVACY_MODE=$2; shift 2 ;;
     --no-load) NO_LOAD=1; shift ;;
-    *) echo "usage: install.sh --endpoint URL --host-id ID --keychain-service SERVICE --visibility private|shared --sources claude,codex [--claude-root PATH] [--codex-root PATH] [--prefix PATH] [--launch-agents PATH] [--no-load]" >&2; exit 2 ;;
+    *) echo "usage: install.sh --endpoint URL --host-id ID --keychain-service SERVICE --visibility private|shared --sources claude,codex [--privacy-mode off|scrub|drop] [--claude-root PATH] [--codex-root PATH] [--prefix PATH] [--launch-agents PATH] [--no-load]" >&2; exit 2 ;;
   esac
 done
 
@@ -32,6 +34,7 @@ case "$ENDPOINT" in https://*) ;; *) echo "endpoint must use https" >&2; exit 2 
 case "$HOST_ID" in ""|*[!A-Za-z0-9_.-]*) echo "invalid host id" >&2; exit 2 ;; esac
 [ -n "$KEYCHAIN_SERVICE" ] || { echo "keychain service is required" >&2; exit 2; }
 case "$VISIBILITY" in private|shared) ;; *) echo "visibility must be private or shared" >&2; exit 2 ;; esac
+case "$PRIVACY_MODE" in off|scrub|drop) ;; *) echo "privacy mode must be off, scrub, or drop" >&2; exit 2 ;; esac
 case ",$SOURCES," in
   *,claude,*|*,codex,*) ;;
   *) echo "sources must select claude, codex, or claude,codex" >&2; exit 2 ;;
@@ -43,9 +46,10 @@ done
 
 SOURCE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 mkdir -p "$PREFIX" "$PREFIX/bin" "$PREFIX/lib" "$PREFIX/state" "$LAUNCH_AGENTS"
-rm -rf "$PREFIX/lib/client" "$PREFIX/lib/collector" "$PREFIX/runtime"
+rm -rf "$PREFIX/lib/client" "$PREFIX/lib/collector" "$PREFIX/lib/privacy" "$PREFIX/runtime"
 cp -R "$SOURCE/lib/client" "$PREFIX/lib/client"
 cp -R "$SOURCE/lib/collector" "$PREFIX/lib/collector"
+cp -R "$SOURCE/lib/privacy" "$PREFIX/lib/privacy"
 cp -R "$SOURCE/runtime" "$PREFIX/runtime"
 cp "$SOURCE/bin/recall-brain" "$PREFIX/bin/recall-brain"
 cp "$SOURCE/RUNTIME_LOCK.json" "$PREFIX/RUNTIME_LOCK.json"
@@ -92,11 +96,11 @@ write_plist() {
   if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
     launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
   fi
-  "$RUNTIME" - "$PLIST" "$LABEL" "$RUNTIME" "$PREFIX/lib" "$ENDPOINT" "$SOURCE_ID" "$HARNESS" "$ROOT" "$PREFIX/state/$HARNESS.db" "$KEYCHAIN_SERVICE" "$VISIBILITY" <<'PY'
+  "$RUNTIME" - "$PLIST" "$LABEL" "$RUNTIME" "$PREFIX/lib" "$ENDPOINT" "$SOURCE_ID" "$HARNESS" "$ROOT" "$PREFIX/state/$HARNESS.db" "$KEYCHAIN_SERVICE" "$VISIBILITY" "$PRIVACY_MODE" <<'PY'
 import plistlib
 import sys
 
-path, label, program, pythonpath, endpoint, source_id, harness, root, spool, service, visibility = sys.argv[1:]
+path, label, program, pythonpath, endpoint, source_id, harness, root, spool, service, visibility, privacy_mode = sys.argv[1:]
 value = {
     "Label": label,
     "ProgramArguments": [
@@ -105,6 +109,7 @@ value = {
         "--visibility", visibility, "--harness", harness,
         "--root", root, "--spool", spool,
         "--keychain-service", service, "--keychain-account", source_id,
+        "--privacy-mode", privacy_mode,
     ],
     "EnvironmentVariables": {
         "PYTHONPATH": pythonpath,
@@ -128,5 +133,5 @@ PY
 case ",$SOURCES," in *,claude,*) write_plist claude "$CLAUDE_ROOT" ;; esac
 case ",$SOURCES," in *,codex,*) write_plist codex "$CODEX_ROOT" ;; esac
 echo "installed Recall Brain Mac client in $PREFIX"
-echo "selected sources: $SOURCES; visibility: $VISIBILITY"
+echo "selected sources: $SOURCES; visibility: $VISIBILITY; privacy: $PRIVACY_MODE"
 echo "Keychain accounts use each selected source id as the account"
