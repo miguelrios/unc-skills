@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "corpus": "corpus.jsonl",
+  "corpus_sha256": "e1c534ed607c16a9a3ac7fe12dfcf55c3fc478839ff91d896cdc3b3699db16c5",
+  "cases": 7,
+  "thresholds": {
+    "valid_acceptance": 1.0,
+    "invalid_acceptance": 0.0,
+    "credential_reads_preview": 0,
+    "source_reads_preview": 0,
+    "network_requests_preview": 0,
+    "writes_preview": 0,
+    "private_content_fields_status": 0,
+    "inferred_tombstones": 0
+  }
+}

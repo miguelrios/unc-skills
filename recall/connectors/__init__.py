@@ -9,6 +9,7 @@ from .sdk import (
     ConnectorRunner,
 )
 from .export_inbox import ExportInboxConnector, ExportInboxError
+from .registry import ConnectorDefinition, ConnectorRegistryError, REGISTRY
 
 __all__ = [
     "ConnectorContractError",
@@ -19,4 +20,7 @@ __all__ = [
     "ConnectorRunner",
     "ExportInboxConnector",
     "ExportInboxError",
+    "ConnectorDefinition",
+    "ConnectorRegistryError",
+    "REGISTRY",
 ]
