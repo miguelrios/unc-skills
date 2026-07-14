@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 from client.mac import (
@@ -28,6 +29,11 @@ from connectors.registry import (
     validate_policy,
 )
 from connectors.sdk import ConnectorRunner
+from connectors.supervisor import (
+    SupervisorContractError,
+    aggregate_supervisor_status,
+    preview_supervisor_policy,
+)
 from privacy.policy import AgenticJudge, PrivacyPolicy, load_scoped_virtual_key
 
 
@@ -124,6 +130,10 @@ def parser() -> argparse.ArgumentParser:
     registry_status.add_argument("--privacy-mode", choices=("off", "scrub", "drop"), required=True)
     registry_status.add_argument("--authority", choices=("brain", "source"), action="append", default=[])
     registry_status.add_argument("--spool")
+    commands.add_parser("connector-supervisor-preview")
+    supervisor_status = commands.add_parser("connector-supervisor-status")
+    supervisor_status.add_argument("--state", required=True)
+    supervisor_status.add_argument("--now", type=float)
     dry = commands.add_parser("dry-run")
     dry.add_argument("--visibility", choices=("private", "shared"), required=True)
     dry.add_argument("--claude-root")
@@ -224,6 +234,18 @@ def main() -> None:
                 set(args.authority), Path(args.spool) if args.spool else None,
             )
         except ConnectorRegistryError as error:
+            raise SystemExit(str(error)) from None
+        print(json.dumps(result, sort_keys=True))
+        return
+    if args.command == "connector-supervisor-preview":
+        print(json.dumps(preview_supervisor_policy(), sort_keys=True))
+        return
+    if args.command == "connector-supervisor-status":
+        try:
+            result = aggregate_supervisor_status(
+                Path(args.state), now=time.time() if args.now is None else args.now,
+            )
+        except SupervisorContractError as error:
             raise SystemExit(str(error)) from None
         print(json.dumps(result, sort_keys=True))
         return

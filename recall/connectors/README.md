@@ -131,3 +131,31 @@ recall-brain connector-registry-status \
 
 Status never syncs, repairs, advances a cursor, opens source material, or emits
 the spool path, source identity, cursor, authority reference, or private content.
+
+## Resumable connector supervision
+
+`connectors.supervisor` decides only when an explicitly constructed pull
+connector runner may execute. Schedules use an opaque random job key, injected
+clock and jitter, bounded cadence/backoff/rate-limit/lease values, atomic leases,
+and an explicit repair generation. Connector credentials, source IDs, command
+arguments, paths, cursors, and content are not schedule fields and never enter
+the supervisor database.
+
+Authority and contract failures park a job until its generation changes or the
+running process receives an explicit wake. Transient failures back off; rate
+limit hints are capped; success resets failures. A due job still runs when
+another job fails. Expired leases are recoverable after process death, while an
+active lease cannot be acquired by another supervisor.
+
+Preview is static. Status opens the mode-0600 state database read-only and emits
+only aggregate counts and stable outcome classes:
+
+```bash
+recall-brain connector-supervisor-preview
+recall-brain connector-supervisor-status --state "$STATE/supervisor.db"
+```
+
+The scheduler core never reads the wall clock or sleeps: hosts inject time and
+wait/wake events. Private schedule configuration and service launch wiring are
+separate deployment concerns; the supervisor does not discover plugins or
+execute arbitrary commands.

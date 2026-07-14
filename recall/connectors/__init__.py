@@ -10,6 +10,13 @@ from .sdk import (
 )
 from .export_inbox import ExportInboxConnector, ExportInboxError
 from .registry import ConnectorDefinition, ConnectorRegistryError, REGISTRY
+from .supervisor import (
+    ConnectorSupervisor,
+    ScheduleDefinition,
+    ScheduledJob,
+    SupervisorContractError,
+    SupervisorStore,
+)
 
 __all__ = [
     "ConnectorContractError",
@@ -23,4 +30,9 @@ __all__ = [
     "ConnectorDefinition",
     "ConnectorRegistryError",
     "REGISTRY",
+    "ConnectorSupervisor",
+    "ScheduleDefinition",
+    "ScheduledJob",
+    "SupervisorContractError",
+    "SupervisorStore",
 ]

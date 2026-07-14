@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from client import cli as client_cli
 from connectors.sdk import ConnectorContractError, ConnectorRunError
 from connectors.supervisor import (
     ConnectorSupervisor,
@@ -75,10 +76,10 @@ class FrozenSupervisorContractTest(unittest.TestCase):
             store.reconcile(item, now=10)
             with self.assertRaisesRegex(SupervisorContractError, "generation_required"):
                 store.reconcile(schedule(interval_seconds=101), now=11)
-            with self.assertRaisesRegex(SupervisorContractError, "stale_generation"):
-                store.reconcile(schedule(generation=0), now=11)
             changed = schedule(generation=2, interval_seconds=101)
             store.reconcile(changed, now=11)
+            with self.assertRaisesRegex(SupervisorContractError, "stale_generation"):
+                store.reconcile(schedule(generation=1), now=11)
             state = store.snapshot(KEY_A)
             self.assertEqual((state["generation"], state["due_at"], state["failures"]), (2, 11.0, 0))
             store.close()
@@ -206,6 +207,36 @@ class SupervisorWaitAndStatusTest(unittest.TestCase):
             self.assertEqual(supervisor.run_loop((job,), clock=clock.now, wake_event=wake, stop_event=stop, max_wait_seconds=30), 0)
             store.close()
 
+    def test_run_loop_wake_interrupts_wait_and_makes_job_due(self) -> None:
+        class Clock:
+            value = 0.0
+            def now(self): return self.value
+
+        class Stop:
+            def is_set(self): return False
+
+        class Wake:
+            def __init__(self): self.calls = 0
+            def wait(self, timeout):
+                self.calls += 1
+                return self.calls == 1
+            def clear(self): return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SupervisorStore(Path(directory) / "state.db")
+            supervisor = ConnectorSupervisor(store, jitter=lambda *_: 0)
+            calls: list[int] = []
+            job = ScheduledJob(
+                schedule(interval_seconds=100, jitter_seconds=0),
+                lambda: calls.append(1) or {"status": "committed"},
+            )
+            cycles = supervisor.run_loop(
+                (job,), clock=Clock().now, wake_event=Wake(), stop_event=Stop(),
+                max_wait_seconds=30, max_cycles=2,
+            )
+            self.assertEqual((cycles, calls), (2, [1, 1]))
+            store.close()
+
     def test_private_state_permissions_symlink_rejection_and_content_free_read_only_status(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -234,6 +265,11 @@ class SupervisorWaitAndStatusTest(unittest.TestCase):
             with self.assertRaisesRegex(SupervisorContractError, "unsafe_state_file"):
                 SupervisorStore(link)
 
+            broken = root / "broken.db"
+            broken.symlink_to(root / "missing-target.db")
+            with self.assertRaisesRegex(SupervisorContractError, "unsafe_state_file"):
+                SupervisorStore(broken)
+
     def test_preview_is_static_and_zero_io(self) -> None:
         with mock.patch("sqlite3.connect") as connect, \
              mock.patch("pathlib.Path.open") as file_open, \
@@ -244,6 +280,37 @@ class SupervisorWaitAndStatusTest(unittest.TestCase):
         self.assertEqual(value["source_reads"], 0)
         self.assertEqual(value["network_requests"], 0)
         self.assertEqual(value["writes"], 0)
+
+    def test_preview_and_status_cli_are_content_free_and_status_is_read_only(self) -> None:
+        import io
+        with mock.patch("sys.argv", ["recall-brain", "connector-supervisor-preview"]), \
+             mock.patch("sys.stdout", io.StringIO()) as output, \
+             mock.patch("client.cli.load_file_token") as token, \
+             mock.patch("client.cli.load_private_api_key") as source_key, \
+             mock.patch("urllib.request.urlopen") as network:
+            client_cli.main()
+        token.assert_not_called(); source_key.assert_not_called(); network.assert_not_called()
+        self.assertEqual(json.loads(output.getvalue())["writes"], 0)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.db"
+            store = SupervisorStore(path)
+            ConnectorSupervisor(store, jitter=lambda *_: 0).tick((
+                ScheduledJob(schedule(), lambda: {"status": "committed"}),
+            ), now=0)
+            store.close()
+            before = hashlib.sha256(path.read_bytes()).hexdigest()
+            arguments = [
+                "recall-brain", "connector-supervisor-status",
+                "--state", str(path), "--now", "1",
+            ]
+            with mock.patch("sys.argv", arguments), mock.patch("sys.stdout", io.StringIO()) as output:
+                client_cli.main()
+            after = hashlib.sha256(path.read_bytes()).hexdigest()
+            self.assertEqual(before, after)
+            rendered = output.getvalue()
+            self.assertNotIn(KEY_A, rendered)
+            self.assertNotIn(str(path), rendered)
 
 
 if __name__ == "__main__":
