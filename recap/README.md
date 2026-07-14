@@ -26,10 +26,12 @@ against those sessions but its own transcript format is not yet indexed by Recal
 ```
 
 In Codex, use `$recap` or ask “recap this session.” For an older run, use Recall to identify the
-exact session first, then ask Recap to explain it. Long sessions stay readable: the default answer
-is concise, while exhaustive evidence lives in owner-private streaming ledgers. The host agent reads
-bounded, content-addressed packets and seals every event to either a supported claim or an explicit
-low-signal group before calling the recap exhaustive.
+exact session first, then ask Recap to explain it. Add `--include-children` to follow only proven
+native subagent edges and `--chain` to follow only explicit Codex fork/continuation edges. Each
+boundary remains separate; missing or ambiguous relationships fail closed. Long sessions stay
+readable: the default answer is concise, while exhaustive evidence lives in owner-private streaming
+ledgers. The host agent reads bounded, content-addressed packets and seals every event to either a
+supported claim or an explicit low-signal group before calling the recap exhaustive.
 
 For sessions spanning multiple repositories, repeat `--repo` when collecting the private manifest.
 Recap keeps event-observed actions, the usually unknown historical session end, and read-only git
@@ -38,3 +40,10 @@ as work performed by the selected agent.
 
 Recap never calls a model provider itself, never dumps private transcripts into a repository, and
 never labels a session complete until every exported page has been consumed.
+
+## Inspiration
+
+Recap's two-view comprehension model—human-readable story plus chronological timeline—was inspired
+by [truizlop/ndrstnd](https://github.com/truizlop/ndrstnd). Recap is an independent implementation
+for coding-agent session evidence, with exact boundary validation, git corroboration, privacy gates,
+and exhaustive accounting.

@@ -27,6 +27,24 @@ python3 scripts/recap.py collect --current --output ~/.recap/current.json
 python3 scripts/recap.py collect --session <exact-session-path> --output ~/.recap/prior.json
 ```
 
+For an exact main session plus its native subagents, its explicit Codex fork/continuation chain, or
+both, collect a boundary set. Recap asks Recall to prove native relationships and keeps every
+transcript in its own manifest and ordinal space:
+
+```bash
+python3 scripts/recap.py collect-set --current --include-children --output ~/.recap/with-children.json
+python3 scripts/recap.py collect-set --session <exact-path> --chain --output ~/.recap/chain.json
+python3 scripts/recap.py collect-set --session <exact-path> --chain --include-children \
+  --output ~/.recap/full-run.json
+python3 scripts/recap.py validate-set ~/.recap/full-run.json
+```
+
+`child` means an exact Claude sidechain/agent relationship or Codex parent thread ID. `continuation`
+means an explicit native fork link; temporal adjacency and similar working directories never count.
+If a requested ancestor, child identity, or fork is missing or ambiguous, collection fails closed.
+Local relationship discovery requires native transcripts on this machine; remote-only Recall does
+not currently expose this graph.
+
 Repeat `--repo <worktree>` when the session touched more than one repository or when a deleted
 worktree cannot be derived from current session metadata. These are verification candidates, not
 claims that the session changed them.
@@ -54,6 +72,11 @@ content-addressed cache keys; a live append changes only the unfinished tail pac
 
 Read `references/truth-contract.md` when handling child sessions, live/partial sessions, multiple
 repositories, ambiguous git attribution, or exhaustive-ledger requests.
+
+For a boundary set, perform accounting and synthesis independently for each member manifest. Then
+write the cross-boundary handoff from the set's labeled `child` and `continuation` edges. Never merge
+event ordinals, silently promote a child report to main-session observation, or imply that a fork is
+the same native session.
 
 ## Reconstruct, do not critique
 

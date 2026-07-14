@@ -291,6 +291,73 @@ class RecapCollectorTest(unittest.TestCase):
                     else:
                         os.environ[key] = value
 
+    def test_collect_set_keeps_claude_main_and_child_boundaries_separate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            main = root / "project" / "main.jsonl"
+            child = root / "project" / "subagents" / "child.jsonl"
+            main.parent.mkdir(parents=True)
+            child.parent.mkdir(parents=True)
+            main.write_text(json.dumps({
+                "sessionId": "main-native", "type": "user", "timestamp": "2026-07-14T00:00:00Z",
+                "message": {"content": "main event"},
+            }) + "\n")
+            child.write_text(json.dumps({
+                "sessionId": "main-native", "agentId": "child-native", "isSidechain": True,
+                "type": "assistant", "timestamp": "2026-07-14T00:00:01Z",
+                "message": {"content": "child event"},
+            }) + "\n")
+            os.environ["RECALL_CLAUDE_ROOT"] = str(root)
+            os.environ["RECALL_CODEX_ROOT"] = str(root / "codex")
+            os.environ["RECALL_SESSION_CURSOR_DB"] = str(root / "state/session-cursors.db")
+            os.environ["RECALL_EXPORT_SOURCE_ID"] = "claude:test:recap-set"
+            output = root / "private" / "set.json"
+            args = SimpleNamespace(
+                current=False, session=str(main), output=str(output), repo=None,
+                recall_script=str(RECALL), include_children=True, chain=False,
+            )
+            self.assertEqual(self.recap.command_collect_set(args), 0)
+            boundary_set = json.loads(output.read_text())
+            validation = self.recap.validate_boundary_set(boundary_set)
+            self.assertTrue(validation["valid"], validation["errors"])
+            self.assertEqual(validation["member_count"], 2)
+            self.assertEqual(validation["event_count"], 2)
+            self.assertEqual({member["node_id"] for member in boundary_set["members"]},
+                             {"main-native", "child-native"})
+            paths = [Path(member["manifest_path"]) for member in boundary_set["members"]]
+            self.assertEqual(len(set(paths)), 2)
+            self.assertTrue(all(path.stat().st_mode & 0o777 == 0o600 for path in paths))
+
+    def test_boundary_set_validation_detects_member_cross_substitution(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session = root / "session.jsonl"
+            write_session(session)
+            args = self.args(session)
+            manifest = self.recap.collect(args)
+            manifest["scope"]["relationship_node_id"] = "one"
+            member_path = root / "private" / "member.json"
+            self.recap.private_write(member_path, manifest)
+            validation = self.recap.validate_manifest(manifest)
+            value = {
+                "schema_version": self.recap.BOUNDARY_SET_SCHEMA_VERSION,
+                "selected_node_id": "one",
+                "requested": {"include_children": True, "chain": False},
+                "members": [{
+                    "node_id": "one", "manifest_path": str(member_path),
+                    "manifest_sha256": "0" * 64,
+                    "boundary_receipt": manifest["scope"]["boundary_receipt"],
+                    "session_path_sha256": self.recap.sha256_bytes(
+                        manifest["scope"]["session_path"].encode()
+                    ),
+                    "event_count": validation["event_count"],
+                }],
+                "edges": [],
+            }
+            result = self.recap.validate_boundary_set(value)
+            self.assertFalse(result["valid"])
+            self.assertIn("member manifest digest mismatch", result["errors"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -32,6 +32,7 @@ from synthesis import render_markdown, validate_synthesis
 
 
 SCHEMA_VERSION = "recap.manifest.v0.4"
+BOUNDARY_SET_SCHEMA_VERSION = "recap.boundary-set.v1"
 UUID_RE = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
 SECRET_PATTERNS = (
     re.compile(
@@ -144,6 +145,7 @@ def recall_candidates(explicit: str | None) -> list[Path]:
     repo_root = Path(__file__).resolve().parents[4]
     candidates.extend([
         repo_root / "recall/skills/recall/scripts/recall.py",
+        Path.home() / ".claude/skills/recall/scripts/recall.py",
         Path.home() / ".codex/skills/recall/scripts/recall.py",
         Path.home() / ".agents/skills/recall/scripts/recall.py",
     ])
@@ -210,6 +212,35 @@ def recall_session_pages(script: Path, *, current: bool, session: str | None):
         if not isinstance(cursor, str) or not cursor:
             raise RecapError("incomplete Recall page has no cursor")
     raise RecapError("Recall session export exceeded the page safety bound")
+
+
+def recall_session_relations(
+    script: Path, *, current: bool, session: str | None,
+    include_children: bool, chain: bool,
+) -> dict[str, Any]:
+    command = [sys.executable, str(script), "session-relations"]
+    command.append("--current" if current else "--target")
+    if not current:
+        command.append(str(session))
+    if include_children:
+        command.append("--include-children")
+    if chain:
+        command.append("--chain")
+    result = subprocess.run(
+        command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=60, check=False,
+    )
+    try:
+        graph = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RecapError("Recall session relationship discovery returned invalid JSON") from exc
+    if graph.get("schema_version") != "recall.session-relations.v1":
+        raise RecapError("Recall session relationship schema is unsupported")
+    if result.returncode != 0 or not graph.get("graph_complete"):
+        raise RecapError("Recall could not prove a complete requested session relationship graph")
+    if not isinstance(graph.get("nodes"), list) or not graph["nodes"]:
+        raise RecapError("Recall session relationship graph has no nodes")
+    return graph
 
 
 def private_write(path: Path, value: dict[str, Any]) -> None:
@@ -463,6 +494,174 @@ def command_collect(args: argparse.Namespace) -> int:
     return 0 if receipt["valid"] else 2
 
 
+def _boundary_directory(output: Path) -> Path:
+    directory = output.with_name(output.name + ".boundaries")
+    if directory.is_symlink():
+        raise RecapError("boundary directory must not be a symlink")
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if directory.stat().st_mode & 0o077:
+        raise RecapError("boundary directory must have mode 0700")
+    return directory.resolve()
+
+
+def validate_boundary_set(value: dict[str, Any]) -> dict[str, Any]:
+    errors = []
+    if value.get("schema_version") != BOUNDARY_SET_SCHEMA_VERSION:
+        errors.append("unsupported schema_version")
+    members = value.get("members")
+    if not isinstance(members, list) or not members:
+        errors.append("members must be a non-empty list")
+        members = []
+    selected = value.get("selected_node_id")
+    requested = value.get("requested")
+    if not isinstance(requested, dict) or set(requested) != {"include_children", "chain"} or not all(
+        isinstance(requested.get(key), bool) for key in ("include_children", "chain")
+    ) or not any(requested.values()):
+        errors.append("requested modes must be closed booleans with at least one enabled")
+    node_ids = [member.get("node_id") for member in members if isinstance(member, dict)]
+    if not isinstance(selected, str) or node_ids.count(selected) != 1:
+        errors.append("selected node must occur exactly once")
+    if len(node_ids) != len(set(node_ids)) or any(not isinstance(item, str) for item in node_ids):
+        errors.append("member node identities must be unique strings")
+    event_count = 0
+    for member in members:
+        if not isinstance(member, dict):
+            errors.append("member must be an object")
+            continue
+        try:
+            path = Path(member["manifest_path"])
+            if path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o077:
+                raise ValueError
+            manifest = json.loads(path.read_text())
+        except (KeyError, OSError, ValueError, json.JSONDecodeError):
+            errors.append("member manifest must be an owner-private regular JSON file")
+            continue
+        validation = validate_manifest(manifest)
+        if not validation["valid"]:
+            errors.append("member manifest failed validation")
+        if validation["manifest_sha256"] != member.get("manifest_sha256"):
+            errors.append("member manifest digest mismatch")
+        if manifest.get("scope", {}).get("boundary_receipt") != member.get("boundary_receipt"):
+            errors.append("member boundary receipt mismatch")
+        if manifest.get("scope", {}).get("relationship_node_id") != member.get("node_id"):
+            errors.append("member relationship identity mismatch")
+        session_path = manifest.get("scope", {}).get("session_path")
+        if not isinstance(session_path, str) or sha256_bytes(session_path.encode()) != member.get("session_path_sha256"):
+            errors.append("member session path binding mismatch")
+        if validation["event_count"] != member.get("event_count"):
+            errors.append("member event count mismatch")
+        event_count += validation["event_count"]
+    edges = value.get("edges")
+    if not isinstance(edges, list):
+        errors.append("edges must be a list")
+        edges = []
+    valid_ids = set(node_ids)
+    seen_edges = set()
+    for edge in edges:
+        if not isinstance(edge, dict):
+            errors.append("edge must be an object")
+            continue
+        identity = (edge.get("type"), edge.get("from"), edge.get("to"))
+        if identity in seen_edges:
+            errors.append("duplicate relationship edge")
+        seen_edges.add(identity)
+        if edge.get("type") not in {"child", "continuation"}:
+            errors.append("unsupported relationship edge type")
+        if edge.get("from") not in valid_ids or edge.get("to") not in valid_ids:
+            errors.append("relationship edge references an unknown member")
+    if isinstance(selected, str) and selected in valid_ids:
+        adjacency = {node_id: set() for node_id in valid_ids}
+        for edge_type, source, target in seen_edges:
+            if source in valid_ids and target in valid_ids:
+                adjacency[source].add(target)
+                adjacency[target].add(source)
+        reached, queue = {selected}, [selected]
+        while queue:
+            for neighbor in adjacency[queue.pop(0)] - reached:
+                reached.add(neighbor)
+                queue.append(neighbor)
+        if reached != valid_ids:
+            errors.append("boundary set contains a member disconnected from the selected node")
+    digest = sha256_bytes(json.dumps(value, sort_keys=True, separators=(",", ":")).encode())
+    return {
+        "valid": not errors, "errors": errors, "member_count": len(members),
+        "event_count": event_count, "boundary_set_sha256": digest,
+    }
+
+
+def command_collect_set(args: argparse.Namespace) -> int:
+    if not args.include_children and not args.chain:
+        raise RecapError("collect-set requires --include-children, --chain, or both")
+    started = time.monotonic()
+    recall_path = find_recall_script(args.recall_script)
+    session_target = None if args.current else str(Path(args.session).expanduser().resolve())
+    graph = recall_session_relations(
+        recall_path, current=args.current, session=session_target,
+        include_children=args.include_children, chain=args.chain,
+    )
+    output = private_output_path(args.output, label="boundary-set output")
+    directory = _boundary_directory(output)
+    members = []
+    for index, node in enumerate(graph["nodes"]):
+        node_id = node.get("node_id")
+        path = node.get("path")
+        if not isinstance(node_id, str) or not isinstance(path, str):
+            raise RecapError("Recall relationship node omitted exact identity or path")
+        member_path = directory / f"{index:04d}-{sha256_bytes(node_id.encode())[:16]}.json"
+        member_args = argparse.Namespace(
+            current=False, session=path, output=str(member_path), repo=args.repo,
+            recall_script=str(recall_path),
+        )
+        manifest = collect(member_args)
+        manifest["scope"]["relationship_node_id"] = node_id
+        private_write(member_path, manifest)
+        validation = validate_manifest(manifest)
+        if not validation["valid"]:
+            raise RecapError("collected boundary manifest failed validation")
+        members.append({
+            "node_id": node_id,
+            "harness": node.get("harness"),
+            "kind": node.get("kind"),
+            "parent_id": node.get("parent_id"),
+            "forked_from_id": node.get("forked_from_id"),
+            "selection_reasons": node.get("selection_reasons"),
+            "graph_depth": node.get("graph_depth"),
+            "manifest_path": str(member_path),
+            "manifest_sha256": validation["manifest_sha256"],
+            "boundary_receipt": manifest["scope"].get("boundary_receipt"),
+            "session_path_sha256": sha256_bytes(str(path).encode()),
+            "event_count": validation["event_count"],
+        })
+    value = {
+        "schema_version": BOUNDARY_SET_SCHEMA_VERSION,
+        "selected_node_id": graph["selected_node_id"],
+        "requested": graph["requested"],
+        "members": members,
+        "edges": graph["edges"],
+    }
+    validation = validate_boundary_set(value)
+    if not validation["valid"]:
+        raise RecapError("boundary set failed validation")
+    private_write(output, value)
+    print(json.dumps({
+        "schema_version": "recap.boundary-set-receipt.v1",
+        "boundary_set_sha256": validation["boundary_set_sha256"],
+        "member_count": validation["member_count"],
+        "event_count": validation["event_count"],
+        "valid": True,
+        "duration_ms": round((time.monotonic() - started) * 1000, 3),
+        "output_mode": oct(output.stat().st_mode & 0o777),
+    }, sort_keys=True))
+    return 0
+
+
+def command_validate_set(args: argparse.Namespace) -> int:
+    _, value = _load_private_json(args.boundary_set, label="boundary set")
+    validation = validate_boundary_set(value)
+    print(json.dumps(validation, sort_keys=True))
+    return 0 if validation["valid"] else 2
+
+
 def command_validate(args: argparse.Namespace) -> int:
     path = Path(args.manifest).expanduser()
     value = json.loads(path.read_text())
@@ -583,9 +782,24 @@ def parser() -> argparse.ArgumentParser:
     )
     collect_parser.add_argument("--recall-script")
     collect_parser.set_defaults(func=command_collect)
+    set_parser = commands.add_parser(
+        "collect-set", help="collect exact child and continuation boundaries separately",
+    )
+    target = set_parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("--current", action="store_true")
+    target.add_argument("--session")
+    set_parser.add_argument("--include-children", action="store_true")
+    set_parser.add_argument("--chain", action="store_true")
+    set_parser.add_argument("--output", required=True)
+    set_parser.add_argument("--repo", action="append")
+    set_parser.add_argument("--recall-script")
+    set_parser.set_defaults(func=command_collect_set)
     validate_parser = commands.add_parser("validate", help="validate structural completeness")
     validate_parser.add_argument("manifest")
     validate_parser.set_defaults(func=command_validate)
+    set_validate_parser = commands.add_parser("validate-set", help="validate a private boundary set")
+    set_validate_parser.add_argument("boundary_set")
+    set_validate_parser.set_defaults(func=command_validate_set)
     packet_parser = commands.add_parser(
         "packet", help="print one bounded redacted packet from a private manifest",
     )

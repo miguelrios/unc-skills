@@ -203,6 +203,19 @@ sessions are separate boundaries by default. For local/central evidence-ID parit
 the source ID; a standalone local export uses `RECALL_EXPORT_SOURCE_ID` when configured and an
 explicit `local:<harness>` source otherwise.
 
+To resolve a local native relationship graph for Recap without reading transcript prose, use:
+
+```bash
+python3 scripts/recall.py session-relations --current --include-children
+python3 scripts/recall.py session-relations --target <exact-path> --chain
+python3 scripts/recall.py session-relations --target <exact-path> --chain --include-children
+```
+
+The closed `recall.session-relations.v1` JSON uses Claude `sessionId`/`agentId` sidechain metadata
+and Codex `parent_thread_id`/`forked_from_id` metadata. It excludes merely adjacent or similar
+sessions and fails when a requested native link is missing or ambiguous. This command is local-only
+until the central Recall service implements the same graph contract.
+
 ## Related work (no query needed)
 
 ```bash
