@@ -16,6 +16,8 @@ from client.mac import (
     store_keychain_token,
 )
 from collector.collector import Collector
+from client.capture import CaptureClient
+from client.mcp import McpServer, serve as serve_mcp
 from connectors.export_inbox import ExportInboxConnector
 from connectors.sdk import ConnectorRunner
 from privacy.policy import AgenticJudge, PrivacyPolicy, load_scoped_virtual_key
@@ -39,6 +41,14 @@ def _connection(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--source-id", required=True)
     parser.add_argument("--principal-id", default="owner")
     parser.add_argument("--visibility", choices=("private", "shared"), required=True)
+    _auth(parser)
+
+
+def _mcp_connection(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--endpoint", required=True)
+    parser.add_argument("--source-id", required=True)
+    parser.add_argument("--principal-id", default="owner")
+    parser.add_argument("--visibility", choices=("private", "shared"), default="private")
     _auth(parser)
 
 
@@ -118,6 +128,15 @@ def parser() -> argparse.ArgumentParser:
     _export_inbox(inbox_sync)
     inbox_sync.add_argument("--spool", required=True)
 
+    mcp_preview = commands.add_parser("mcp-config-preview")
+    _mcp_connection(mcp_preview)
+    _privacy(mcp_preview)
+    mcp_preview.add_argument("--executable", default="recall-brain")
+
+    mcp_serve = commands.add_parser("mcp-serve")
+    _mcp_connection(mcp_serve)
+    _privacy(mcp_serve)
+
     delete = commands.add_parser("delete")
     _connection(delete)
     delete.add_argument("receipt")
@@ -175,6 +194,33 @@ def main() -> None:
             connector.close()
         print(json.dumps(result, sort_keys=True))
         return
+    if args.command == "mcp-config-preview":
+        if args.keychain_service and not args.keychain_account:
+            raise SystemExit("--keychain-account is required with --keychain-service")
+        auth = ["--token-file", args.token_file] if args.token_file else [
+            "--keychain-service", args.keychain_service,
+            "--keychain-account", args.keychain_account,
+        ]
+        command_args = [
+            "mcp-serve", "--endpoint", args.endpoint,
+            "--source-id", args.source_id, "--principal-id", args.principal_id,
+            "--visibility", args.visibility, *auth,
+            "--privacy-mode", args.privacy_mode,
+            "--privacy-judge-failure", args.privacy_judge_failure,
+        ]
+        if args.privacy_judge_base_url:
+            command_args.extend([
+                "--privacy-judge-base-url", args.privacy_judge_base_url,
+                "--privacy-judge-key-file", args.privacy_judge_key_file,
+                "--privacy-judge-model", args.privacy_judge_model,
+            ])
+        result = {
+            "schema_version": 1, "mode": "mcp-config-preview",
+            "network_requests": 0, "writes": 0,
+            "mcpServers": {"recall": {"command": args.executable, "args": command_args}},
+        }
+        print(json.dumps(result, sort_keys=True))
+        return
 
     if args.keychain_service and not args.keychain_account:
         raise SystemExit("--keychain-account is required with --keychain-service")
@@ -186,7 +232,11 @@ def main() -> None:
         "principal_id": args.principal_id,
         "visibility": args.visibility,
     }
-    privacy = _privacy_policy(args) if args.command in {"collect", "export", "put", "export-inbox-sync"} else PrivacyPolicy(mode="off")
+    privacy = _privacy_policy(args) if args.command in {"collect", "export", "put", "export-inbox-sync", "mcp-serve"} else PrivacyPolicy(mode="off")
+    if args.command == "mcp-serve":
+        backend = CaptureClient(**common, privacy=privacy)
+        serve_mcp(McpServer(backend), sys.stdin, sys.stdout, sys.stderr)
+        return
     if args.command == "collect":
         collector = Collector(
             root=Path(args.root), harness=args.harness, source_id=args.source_id,
