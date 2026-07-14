@@ -237,6 +237,33 @@ class ExplicitMemoryTest(unittest.TestCase):
         self.assertEqual(result["kind"], "tombstone")
         self.assertEqual(len(requests), 1)
 
+    def test_delete_many_batches_canonical_tombstones(self) -> None:
+        client = MemoryClient(
+            endpoint="https://brain.example.ts.net", token="synthetic-token",
+            source_id="memory:mac:test", privacy=PrivacyPolicy(mode="scrub"),
+        )
+        requests = []
+
+        def open_request(request, **_kwargs):
+            requests.append(request)
+            events = json.loads(request.data)["events"]
+            return FakeResponse(201, {
+                "status": "committed",
+                "receipts": [f"recall://{event['source_id']}/{event['native_id']}?rev=2" for event in events],
+            })
+
+        receipts = [
+            "recall://memory:mac:test/memory-one?rev=1",
+            "recall://memory:mac:test/memory-two?rev=1",
+        ]
+        with mock.patch("urllib.request.urlopen", side_effect=open_request):
+            result = client.delete_many(receipts)
+        self.assertEqual(result["kind"], "tombstones")
+        self.assertEqual(len(requests), 1)
+        events = json.loads(requests[0].data)["events"]
+        self.assertEqual([event["kind"] for event in events], ["tombstone", "tombstone"])
+        self.assertEqual([event["content"]["deleted_receipt"] for event in events], receipts)
+
 
 class ExportPrivacyTest(unittest.TestCase):
     def test_export_drop_and_scrub_share_policy_before_network(self) -> None:

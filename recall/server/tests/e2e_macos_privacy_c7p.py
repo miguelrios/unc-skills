@@ -33,8 +33,9 @@ def assert_not_found(client: BrainClient, canary: str) -> None:
 
 
 def delete_all(client: MemoryClient, receipts: list[str]) -> None:
-    for receipt in receipts:
-        client.delete(receipt)
+    if receipts:
+        result = client.delete_many(receipts)
+        assert len(result["acknowledgement"]["receipts"]) == len(receipts)
 
 
 def main() -> None:
@@ -99,8 +100,8 @@ def main() -> None:
                 assert scan["records_queued"] == expected
                 assert scan["privacy"]["actions"] == {mode: 1, "keep": 1}
                 assert collector_canary.encode() not in spool.read_bytes()
-                failed = offline.flush()
-                assert failed["acked"] == 0 and failed["errors"] > 0
+                assert offline.doctor()["pending"] == expected
+                assert offline.doctor()["committed_files"] == 0
             finally:
                 offline.close()
 

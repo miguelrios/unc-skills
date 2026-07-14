@@ -360,6 +360,35 @@ class MemoryClient(BrainClient):
         return result
 
     def delete(self, receipt: str) -> dict:
+        result = self.delete_many([receipt])
+        return {
+            "kind": "tombstone",
+            "native_id": result["native_ids"][0],
+            "receipt": result["acknowledgement"]["receipts"][0],
+            "acknowledgement": result["acknowledgement"],
+        }
+
+    def delete_many(self, receipts: list[str]) -> dict:
+        if not receipts:
+            raise ValueError("cannot delete an empty receipt list")
+        events = []
+        native_ids = []
+        for receipt in receipts:
+            native_id, event_part = self._delete_target(receipt)
+            native_ids.append(native_id)
+            events.append(_envelope(
+                source_id=self.source_id,
+                native_id=native_id,
+                kind="tombstone",
+                content={"target_native_id": native_id, "deleted_receipt": event_part},
+                principal_id=self.principal_id,
+                visibility=self.visibility,
+                provenance={"uri": "manual://recall_delete"},
+            ))
+        acknowledgement = self.ingest(events)
+        return {"kind": "tombstones", "native_ids": native_ids, "acknowledgement": acknowledgement}
+
+    def _delete_target(self, receipt: str) -> tuple[str, str]:
         event_part = receipt.split("#", 1)[0]
         try:
             base, revision = event_part.rsplit("?rev=", 1)
@@ -373,17 +402,7 @@ class MemoryClient(BrainClient):
             raise ValueError("invalid receipt") from exc
         if source_id != self.source_id:
             raise PrivacyError("receipt source does not match client source")
-        event = _envelope(
-            source_id=self.source_id,
-            native_id=native_id,
-            kind="tombstone",
-            content={"target_native_id": native_id, "deleted_receipt": event_part},
-            principal_id=self.principal_id,
-            visibility=self.visibility,
-            provenance={"uri": "manual://recall_delete"},
-        )
-        acknowledgement = self.ingest([event])
-        return {"kind": "tombstone", "native_id": native_id, "receipt": acknowledgement["receipts"][0], "acknowledgement": acknowledgement}
+        return native_id, event_part
 
 
 def _safe_member(info: zipfile.ZipInfo) -> PurePosixPath:
