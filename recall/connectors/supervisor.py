@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import quote
 
-from connectors.registry import ConnectorRegistryError, definition as registry_definition
+from connectors.registry import REGISTRY, ConnectorRegistryError, definition as registry_definition
 from connectors.sdk import ConnectorContractError, ConnectorRunError
 
 
@@ -126,11 +126,13 @@ def _safe_parent(path: Path, *, create: bool) -> None:
         info = parent.lstat()
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
             raise SupervisorContractError("unsafe_state_parent")
+        if info.st_mode & 0o077:
+            raise SupervisorContractError("unsafe_state_parent_permissions")
     elif create:
         parent.mkdir(parents=True, mode=0o700)
     else:
         raise SupervisorContractError("state_unavailable")
-    if create:
+    if create and parent.stat().st_mode & 0o777 != 0o700:
         os.chmod(parent, 0o700)
 
 
@@ -149,12 +151,44 @@ def _safe_state_file(path: Path, *, must_exist: bool) -> None:
         raise SupervisorContractError("unsafe_state_permissions")
 
 
+def _validate_state_schema(path: Path) -> None:
+    """Validate an existing file without creating tables or changing bytes."""
+    uri = f"file:{quote(str(path.resolve()))}?mode=ro&immutable=1"
+    db = None
+    try:
+        db = sqlite3.connect(uri, uri=True)
+        version = db.execute(
+            "SELECT value FROM supervisor_meta WHERE key='schema_version'"
+        ).fetchone()
+        tables = {
+            row[0] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        columns = tuple(row[1] for row in db.execute("PRAGMA table_info(supervisor_jobs)"))
+    except sqlite3.Error as error:
+        raise SupervisorContractError("state_invalid") from error
+    finally:
+        if db is not None:
+            db.close()
+    expected_columns = (
+        "job_key", "connector_id", "generation", "policy_digest", "enabled", "state",
+        "due_at", "lease_until", "lease_token", "failures", "last_outcome", "updated_at",
+    )
+    if version != (str(SUPERVISOR_SCHEMA_VERSION),) or tables != {
+        "supervisor_meta", "supervisor_jobs",
+    } or columns != expected_columns:
+        raise SupervisorContractError("state_invalid")
+
+
 class SupervisorStore:
     """Durable leases and timing facts. No source/config/content values are stored."""
 
     def __init__(self, path: Path):
         self.path = Path(path)
         _safe_state_file(self.path, must_exist=False)
+        if self.path.exists():
+            _validate_state_schema(self.path)
         self.db = sqlite3.connect(self.path, timeout=5.0, isolation_level=None)
         os.chmod(self.path, 0o600)
         self.db.row_factory = sqlite3.Row
@@ -207,6 +241,15 @@ class SupervisorStore:
             row = self.db.execute(
                 "SELECT * FROM supervisor_jobs WHERE job_key=?", (item.job_key,)
             ).fetchone()
+            changed = bool(row and (
+                item.generation != row["generation"]
+                or digest != row["policy_digest"]
+                or int(item.enabled) != row["enabled"]
+            ))
+            active = bool(row and row["state"] == "leased" and
+                          row["lease_until"] is not None and row["lease_until"] > now)
+            if changed and active:
+                raise SupervisorContractError("job_active")
             if row is None:
                 state = "ready" if item.enabled else "disabled"
                 due = now if item.enabled else None
@@ -265,6 +308,9 @@ class SupervisorStore:
             row = self.db.execute(
                 "SELECT * FROM supervisor_jobs WHERE job_key=?", (item.job_key,)
             ).fetchone()
+            if row and (row["generation"] != item.generation or
+                        row["policy_digest"] != item.policy_digest()):
+                raise SupervisorContractError("schedule_mismatch")
             eligible = bool(row and row["enabled"] and (
                 (row["state"] == "ready" and row["due_at"] is not None and row["due_at"] <= now)
                 or (row["state"] == "leased" and row["lease_until"] is not None and row["lease_until"] <= now)
@@ -293,7 +339,10 @@ class SupervisorStore:
             row = self.db.execute(
                 "SELECT * FROM supervisor_jobs WHERE job_key=?", (item.job_key,)
             ).fetchone()
-            if row is None or row["state"] != "leased" or row["lease_token"] != lease_token:
+            if (row is None or row["state"] != "leased" or row["lease_token"] != lease_token
+                    or row["lease_until"] is None or row["lease_until"] <= now
+                    or row["generation"] != item.generation
+                    or row["policy_digest"] != item.policy_digest()):
                 raise SupervisorContractError("lease_lost")
             failures = int(row["failures"])
             if outcome == "success":
@@ -327,9 +376,11 @@ class SupervisorStore:
         self._begin()
         try:
             row = self.db.execute(
-                "SELECT enabled FROM supervisor_jobs WHERE job_key=?", (item.job_key,)
+                "SELECT enabled,state,lease_until FROM supervisor_jobs WHERE job_key=?", (item.job_key,)
             ).fetchone()
-            if row and row["enabled"]:
+            active = bool(row and row["state"] == "leased" and
+                          row["lease_until"] is not None and row["lease_until"] > now)
+            if row and row["enabled"] and not active:
                 self.db.execute("""
                     UPDATE supervisor_jobs SET state='ready',due_at=?,lease_until=NULL,
                       lease_token=NULL,updated_at=? WHERE job_key=?
@@ -480,7 +531,7 @@ def preview_supervisor_policy() -> dict[str, Any]:
     return {
         "schema_version": 1,
         "mode": "connector-supervisor-preview",
-        "registered_pull_connectors": 2,
+        "registered_pull_connectors": sum(item.mode == "pull" for item in REGISTRY),
         "clock": "injected",
         "retry_outcomes": ["authority", "contract", "rate_limited", "success", "transient"],
         "limits_seconds": {
@@ -497,6 +548,7 @@ def aggregate_supervisor_status(path: Path, *, now: int | float) -> dict[str, An
     path = Path(path)
     _safe_state_file(path, must_exist=True)
     uri = f"file:{quote(str(path.resolve()))}?mode=ro&immutable=1"
+    db = None
     try:
         db = sqlite3.connect(uri, uri=True)
         db.row_factory = sqlite3.Row
@@ -504,14 +556,16 @@ def aggregate_supervisor_status(path: Path, *, now: int | float) -> dict[str, An
             "SELECT value FROM supervisor_meta WHERE key='schema_version'"
         ).fetchone()
         rows = db.execute("""
-            SELECT enabled,state,due_at,lease_until,last_outcome FROM supervisor_jobs
+            SELECT enabled,state,due_at,lease_until,lease_token,last_outcome FROM supervisor_jobs
         """).fetchall()
-        db.close()
     except sqlite3.Error as error:
         raise SupervisorContractError("state_invalid") from error
+    finally:
+        if db is not None:
+            db.close()
     if schema is None or schema["value"] != "1":
         raise SupervisorContractError("state_invalid")
-    if any(row["state"] not in STATES or row["last_outcome"] not in OUTCOMES for row in rows):
+    if any(not _valid_status_row(row) for row in rows):
         raise SupervisorContractError("state_invalid")
     enabled = sum(int(row["enabled"]) for row in rows)
     due = sum(int(row["enabled"] and row["state"] == "ready" and
@@ -531,3 +585,30 @@ def aggregate_supervisor_status(path: Path, *, now: int | float) -> dict[str, An
         "parked": sum(row["state"] == "parked" for row in rows),
         "outcomes": outcomes,
     }
+
+
+def _valid_status_row(row: sqlite3.Row) -> bool:
+    if row["enabled"] not in {0, 1} or row["state"] not in STATES or row["last_outcome"] not in OUTCOMES:
+        return False
+    due = row["due_at"]
+    lease = row["lease_until"]
+    if due is not None:
+        try:
+            _finite_time(due)
+        except SupervisorContractError:
+            return False
+    if lease is not None:
+        try:
+            _finite_time(lease)
+        except SupervisorContractError:
+            return False
+    token = row["lease_token"]
+    if token is not None and (not isinstance(token, str) or not JOB_KEY.fullmatch(token)):
+        return False
+    if row["state"] == "ready":
+        return row["enabled"] == 1 and due is not None and lease is None and token is None
+    if row["state"] == "leased":
+        return row["enabled"] == 1 and due is None and lease is not None and token is not None
+    if row["state"] == "parked":
+        return row["enabled"] == 1 and due is None and lease is None and token is None
+    return row["enabled"] == 0 and due is None and lease is None and token is None

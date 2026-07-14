@@ -159,6 +159,29 @@ class SupervisorSchedulingTest(unittest.TestCase):
         with self.assertRaisesRegex(SupervisorContractError, "lease_lost"):
             self.store.complete(item, "a" * 64, now=21, outcome="success", retry_after=None, jitter=0)
 
+    def test_wake_and_generation_change_cannot_cancel_an_active_lease(self) -> None:
+        item = schedule(lease_seconds=20)
+        self.store.reconcile(item, now=0)
+        token = self.store.acquire(item, now=0, lease_token="a" * 64)
+        self.store.wake(item, now=1)
+        leased = self.store.snapshot(KEY_A)
+        self.assertEqual((leased["state"], leased["lease_token"]), ("leased", token))
+        with self.assertRaisesRegex(SupervisorContractError, "job_active"):
+            self.store.reconcile(schedule(generation=2), now=1)
+        still_leased = self.store.snapshot(KEY_A)
+        self.assertEqual((still_leased["state"], still_leased["lease_token"]), ("leased", token))
+        self.store.reconcile(schedule(generation=2), now=20)
+        repaired = self.store.snapshot(KEY_A)
+        self.assertEqual((repaired["state"], repaired["lease_token"], repaired["generation"]),
+                         ("ready", None, 2))
+
+    def test_expired_owner_cannot_complete_without_reacquiring(self) -> None:
+        item = schedule(lease_seconds=20)
+        self.store.reconcile(item, now=0)
+        token = self.store.acquire(item, now=0, lease_token="a" * 64)
+        with self.assertRaisesRegex(SupervisorContractError, "lease_lost"):
+            self.store.complete(item, token, now=20, outcome="success", retry_after=None, jitter=0)
+
     def test_one_failure_never_blocks_another_due_job_and_unknown_text_is_not_stored(self) -> None:
         jobs = (
             ScheduledJob(schedule(KEY_A), lambda: (_ for _ in ()).throw(RuntimeError("secret payload canary"))),
@@ -269,6 +292,40 @@ class SupervisorWaitAndStatusTest(unittest.TestCase):
             broken.symlink_to(root / "missing-target.db")
             with self.assertRaisesRegex(SupervisorContractError, "unsafe_state_file"):
                 SupervisorStore(broken)
+
+    def test_existing_parent_permissions_are_never_mutated_and_invalid_db_is_immutable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            public = root / "public"
+            public.mkdir(); os.chmod(public, 0o755)
+            with self.assertRaisesRegex(SupervisorContractError, "unsafe_state_parent_permissions"):
+                SupervisorStore(public / "state.db")
+            self.assertEqual(public.stat().st_mode & 0o777, 0o755)
+
+            invalid = root / "invalid.db"
+            connection = sqlite3.connect(invalid)
+            connection.execute("CREATE TABLE unrelated(value TEXT)")
+            connection.commit(); connection.close(); os.chmod(invalid, 0o600)
+            before = invalid.read_bytes()
+            with self.assertRaisesRegex(SupervisorContractError, "state_invalid"):
+                SupervisorStore(invalid)
+            self.assertEqual(invalid.read_bytes(), before)
+
+    def test_status_rejects_malformed_timing_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.db"
+            store = SupervisorStore(path)
+            ConnectorSupervisor(store, jitter=lambda *_: 0).tick((
+                ScheduledJob(schedule(), lambda: {"status": "committed"}),
+            ), now=0)
+            store.close()
+            connection = sqlite3.connect(path)
+            connection.execute("UPDATE supervisor_jobs SET due_at='private-timing-value'")
+            connection.commit(); connection.close()
+            before = path.read_bytes()
+            with self.assertRaisesRegex(SupervisorContractError, "state_invalid"):
+                aggregate_supervisor_status(path, now=1)
+            self.assertEqual(path.read_bytes(), before)
 
     def test_preview_is_static_and_zero_io(self) -> None:
         with mock.patch("sqlite3.connect") as connect, \
