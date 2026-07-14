@@ -53,6 +53,8 @@ def main() -> None:
             CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
             CREATE TABLE pages(id INTEGER PRIMARY KEY);
             CREATE TABLE outbox(id INTEGER PRIMARY KEY);
+            INSERT INTO meta VALUES ('connector_id','grep.ai');
+            INSERT INTO meta VALUES ('source_id','synthetic:c8e');
             INSERT INTO meta VALUES ('committed_cursor','synthetic-private-cursor');
         """)
         connection.commit(); connection.close()
@@ -74,7 +76,7 @@ def main() -> None:
         ])
         disabled = run_json([
             str(wrapper), "connector-registry-status",
-            "--connector-id", "chatgpt.export_inbox", "--privacy-mode", "drop",
+            "--connector-id", "openai.export-inbox", "--privacy-mode", "drop",
         ])
         missing = run_json([
             str(wrapper), "connector-registry-status",

@@ -345,7 +345,7 @@ def main() -> None:
         )
     elif args.command == "export-inbox-sync":
         _registry_policy(
-            "chatgpt.export_inbox", visibility=args.visibility,
+            "openai.export-inbox", visibility=args.visibility,
             privacy_mode=args.privacy_mode, authorities={"brain"},
         )
     elif args.command == "grep-ai-sync":

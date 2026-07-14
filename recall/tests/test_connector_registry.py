@@ -48,7 +48,7 @@ class FrozenRegistryTest(unittest.TestCase):
 
     def test_builtin_registry_is_exact_immutable_and_no_discovery(self):
         self.assertEqual(tuple(item.connector_id for item in REGISTRY), (
-            "recall.capture", "chatgpt.export_inbox", "grep.ai",
+            "recall.capture", "openai.export-inbox", "grep.ai",
         ))
         self.assertEqual(definition("grep.ai").authority_slots, ("brain", "source"))
         with self.assertRaises(ConnectorRegistryError):
@@ -61,10 +61,14 @@ class FrozenRegistryTest(unittest.TestCase):
         value["schema_version"] = True
         with self.assertRaises(ConnectorRegistryError):
             ConnectorDefinition.from_mapping(value)
+        value = REGISTRY[2].to_public()
+        value["authority_slots"] = ["source", "brain"]
+        with self.assertRaisesRegex(ConnectorRegistryError, "noncanonical_authority_slots"):
+            ConnectorDefinition.from_mapping(value)
 
     def test_policy_is_registry_driven_and_deletion_is_always_explicit(self):
         validate_policy("recall.capture", visibility="shared", privacy_mode="off", authorities={"brain"})
-        validate_policy("chatgpt.export_inbox", visibility="private", privacy_mode="scrub", authorities={"brain"})
+        validate_policy("openai.export-inbox", visibility="private", privacy_mode="scrub", authorities={"brain"})
         validate_policy("grep.ai", visibility="private", privacy_mode="drop", authorities={"brain", "source"})
         for connector_id, visibility, privacy, authorities in (
             ("grep.ai", "shared", "drop", {"brain", "source"}),
@@ -103,6 +107,8 @@ class RegistryPreviewAndStatusTest(unittest.TestCase):
                 CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
                 CREATE TABLE pages(id INTEGER PRIMARY KEY);
                 CREATE TABLE outbox(id INTEGER PRIMARY KEY);
+                INSERT INTO meta VALUES ('connector_id','grep.ai');
+                INSERT INTO meta VALUES ('source_id','synthetic:c8e');
                 INSERT INTO meta VALUES ('committed_cursor','private-cursor-never-render');
                 INSERT INTO meta VALUES ('last_error_code','connector_rate_limited');
                 INSERT INTO pages VALUES (1);
@@ -130,6 +136,13 @@ class RegistryPreviewAndStatusTest(unittest.TestCase):
             connection.execute("UPDATE meta SET value='private_secret_code' WHERE key='last_error_code'")
             connection.commit(); connection.close()
             with self.assertRaisesRegex(ConnectorRegistryError, "local_state_invalid"):
+                aggregate_status("grep.ai", True, "drop", {"brain", "source"}, spool)
+
+            connection = sqlite3.connect(spool)
+            connection.execute("UPDATE meta SET value='connector_rate_limited' WHERE key='last_error_code'")
+            connection.execute("UPDATE meta SET value='openai.export-inbox' WHERE key='connector_id'")
+            connection.commit(); connection.close()
+            with self.assertRaisesRegex(ConnectorRegistryError, "local_state_identity_mismatch"):
                 aggregate_status("grep.ai", True, "drop", {"brain", "source"}, spool)
 
     def test_status_distinguishes_disabled_missing_state_authority_and_ready(self):

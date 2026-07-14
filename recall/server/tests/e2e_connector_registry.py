@@ -21,12 +21,12 @@ def main() -> None:
         raise RuntimeError("RECALL_DATABASE_URL is required")
     policies = {
         "recall.capture": ("private", "scrub", {"brain"}),
-        "chatgpt.export_inbox": ("private", "drop", {"brain"}),
+        "openai.export-inbox": ("private", "drop", {"brain"}),
         "grep.ai": ("private", "drop", {"brain", "source"}),
     }
     tests = {
         "recall.capture": "e2e_capture_mcp.py",
-        "chatgpt.export_inbox": "e2e_export_inbox.py",
+        "openai.export-inbox": "e2e_export_inbox.py",
         "grep.ai": "e2e_grep_ai.py",
     }
     results = {}

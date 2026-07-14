@@ -49,6 +49,8 @@ def _closed_tuple(value: Any, label: str, allowed: set[str]) -> tuple[str, ...]:
         raise ConnectorRegistryError(f"invalid_{label}")
     if len(result) != len(set(result)):
         raise ConnectorRegistryError(f"duplicate_{label}")
+    if result != tuple(sorted(result)):
+        raise ConnectorRegistryError(f"noncanonical_{label}")
     return result
 
 
@@ -117,7 +119,7 @@ REGISTRY = (
         "checkpoint": "none", "deletion": "explicit_receipt",
     }),
     ConnectorDefinition.from_mapping({
-        "schema_version": 1, "connector_id": "chatgpt.export_inbox", "command": "export-inbox-sync",
+        "schema_version": 1, "connector_id": "openai.export-inbox", "command": "export-inbox-sync",
         "mode": "pull", "authority_slots": ["brain"],
         "visibility_modes": ["private"], "privacy_modes": ["drop", "off", "scrub"],
         "checkpoint": "ack_cursor", "deletion": "explicit_export_reference",
@@ -226,7 +228,8 @@ def aggregate_status(connector_id: str, enabled: bool, privacy_mode: str,
             if not {"meta", "pages", "outbox"}.issubset(tables):
                 raise ConnectorRegistryError("local_state_invalid")
             metadata = dict(connection.execute(
-                "SELECT key,value FROM meta WHERE key IN ('committed_cursor','last_error_code')"
+                "SELECT key,value FROM meta WHERE key IN "
+                "('connector_id','source_id','committed_cursor','last_error_code')"
             ))
             pending_pages = connection.execute("SELECT count(*) FROM pages").fetchone()[0]
             pending = connection.execute("SELECT count(*) FROM outbox").fetchone()[0]
@@ -237,6 +240,8 @@ def aggregate_status(connector_id: str, enabled: bool, privacy_mode: str,
     except (OSError, sqlite3.Error):
         return {**result, "health": "local_state_unavailable"}
     error_code = metadata.get("last_error_code")
+    if metadata.get("connector_id") != item.connector_id or not metadata.get("source_id"):
+        raise ConnectorRegistryError("local_state_identity_mismatch")
     if error_code is not None and error_code not in RUNTIME_ERROR_CODES:
         raise ConnectorRegistryError("local_state_invalid")
     result.update({
