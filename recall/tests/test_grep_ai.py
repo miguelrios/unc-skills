@@ -13,7 +13,11 @@ from connectors.grep_ai import (
     GrepAIConnector,
     GrepAIResponse,
     GrepAIUpstreamError,
+    KNOWN_STATUSES,
     MAX_RESPONSE_BYTES,
+    NONTERMINAL,
+    TERMINAL_MEMORY,
+    TERMINAL_NO_MEMORY,
     decode_cursor,
     load_private_api_key,
 )
@@ -102,7 +106,7 @@ class GrepAIFrozenEvalTest(unittest.TestCase):
             projected += len(page.records) if is_completed else 0
             is_nonterminal = row["case"] in {
                 "failed-not-memory", "nonterminal-not-memory", "all-nonmemory-statuses",
-                "official-planning-statuses",
+                "official-planning-statuses", "observed-paused-status",
             }
             nonterminal += int(is_nonterminal)
             nonterminal_projected += len(page.records) if is_nonterminal else 0
@@ -151,6 +155,21 @@ class GrepAIFrozenEvalTest(unittest.TestCase):
         self.assertEqual(record.occurred_at, "1970-01-01T00:00:00Z")
         self.assertEqual(record.content["report_markdown"], "")
         self.assertEqual(record.content["question"], "Synthetic minimal completed research")
+
+    def test_status_partition_is_closed_and_behavioral(self):
+        self.assertEqual(TERMINAL_MEMORY, {"complete", "completed"})
+        self.assertEqual(
+            NONTERMINAL,
+            {"queued", "moderation", "planning", "running", "paused"},
+        )
+        self.assertEqual(
+            TERMINAL_NO_MEMORY,
+            {"failed", "blocked", "cancelled", "canceled"},
+        )
+        partitions = (TERMINAL_MEMORY, NONTERMINAL, TERMINAL_NO_MEMORY)
+        self.assertTrue(all(left.isdisjoint(right) for index, left in enumerate(partitions)
+                            for right in partitions[index + 1:]))
+        self.assertEqual(KNOWN_STATUSES, set().union(*partitions))
 
 
 class GrepAICursorTest(unittest.TestCase):
@@ -210,6 +229,21 @@ class GrepAICursorTest(unittest.TestCase):
         self.assertIn(
             "grep-ai-" + hashlib.sha256(pending["job_id"].encode()).hexdigest()[:48],
             {record.native_id for record in second.records},
+        )
+
+    def test_paused_job_stays_ahead_of_checkpoint_without_detail_fetch(self):
+        rows = {row["case"]: row for row in map(json.loads, CORPUS.read_text().splitlines())}
+        paused = rows["observed-paused-status"]["list"]["items"][0]
+        settled = json.loads(json.dumps(rows["failed-not-memory"]["list"]["items"][0]))
+        transport = FakeTransport(pages={None: {
+            "items": [paused, settled], "next_cursor": None, "has_more": False,
+        }})
+        page = connector(transport).pull(None)
+        self.assertEqual(page.records, ())
+        self.assertEqual(len(transport.requests), 1)
+        self.assertEqual(
+            decode_cursor(page.next_cursor)["watermark"],
+            hashlib.sha256(settled["job_id"].encode()).hexdigest(),
         )
 
     def test_lost_ack_replays_without_api_refetch_or_raw_spool(self):
