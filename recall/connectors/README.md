@@ -102,3 +102,32 @@ Completed reports cross the shared privacy boundary before SQLite or Brain.
 Failed, blocked, cancelled, queued, and running jobs advance inventory without
 becoming memories. List absence, 404, retention, and authorization failure never
 infer deletion—forget an imported result explicitly with its Brain receipt.
+
+## Declarative registry and content-free status
+
+`connectors.registry` is the closed inventory for Recall's installed input
+surfaces. It declares command, push/pull mode, exact authority slots, allowed
+visibility/privacy modes, checkpoint behavior, and explicit deletion semantics
+for deliberate capture, the ChatGPT/Cowork export inbox, and Grep AI. It is an
+immutable tuple in the package—not an entry-point or working-directory plugin
+loader.
+
+Preview is static and performs zero credential/source reads, writes, imports,
+or network calls:
+
+```bash
+recall-brain connector-registry-preview
+```
+
+Status accepts only authority-presence flags and an optional local spool. The
+spool is opened read-only and immutable; output is limited to health, counts,
+checkpoint presence, privacy policy, and a whitelisted stable error code:
+
+```bash
+recall-brain connector-registry-status \
+  --connector-id grep.ai --enabled --privacy-mode drop \
+  --authority brain --authority source --spool "$STATE/grep-ai.db"
+```
+
+Status never syncs, repairs, advances a cursor, opens source material, or emits
+the spool path, source identity, cursor, authority reference, or private content.

@@ -20,6 +20,13 @@ from client.capture import CaptureClient
 from client.mcp import McpServer, serve as serve_mcp
 from connectors.export_inbox import ExportInboxConnector
 from connectors.grep_ai import GrepAIConnector, load_private_api_key, validate_api_key
+from connectors.registry import (
+    REGISTRY,
+    ConnectorRegistryError,
+    aggregate_status,
+    preview as registry_preview,
+    validate_policy,
+)
 from connectors.sdk import ConnectorRunner
 from privacy.policy import AgenticJudge, PrivacyPolicy, load_scoped_virtual_key
 
@@ -96,9 +103,27 @@ def _privacy_policy(args) -> PrivacyPolicy:
     return PrivacyPolicy(mode=args.privacy_mode, judge=judge, judge_failure=args.privacy_judge_failure)
 
 
+def _registry_policy(connector_id: str, *, visibility: str, privacy_mode: str,
+                     authorities: set[str]) -> None:
+    try:
+        validate_policy(
+            connector_id, visibility=visibility,
+            privacy_mode=privacy_mode, authorities=authorities,
+        )
+    except ConnectorRegistryError as error:
+        raise SystemExit(str(error)) from None
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description="Consent-first Recall Brain client")
     commands = root.add_subparsers(dest="command", required=True)
+    commands.add_parser("connector-registry-preview")
+    registry_status = commands.add_parser("connector-registry-status")
+    registry_status.add_argument("--connector-id", choices=tuple(item.connector_id for item in REGISTRY), required=True)
+    registry_status.add_argument("--enabled", action="store_true")
+    registry_status.add_argument("--privacy-mode", choices=("off", "scrub", "drop"), required=True)
+    registry_status.add_argument("--authority", choices=("brain", "source"), action="append", default=[])
+    registry_status.add_argument("--spool")
     dry = commands.add_parser("dry-run")
     dry.add_argument("--visibility", choices=("private", "shared"), required=True)
     dry.add_argument("--claude-root")
@@ -187,6 +212,21 @@ def parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = parser().parse_args()
+    if args.command == "connector-registry-preview":
+        print(json.dumps(registry_preview(), sort_keys=True))
+        return
+    if args.command == "connector-registry-status":
+        if len(args.authority) != len(set(args.authority)):
+            raise SystemExit("duplicate_authority_slots")
+        try:
+            result = aggregate_status(
+                args.connector_id, args.enabled, args.privacy_mode,
+                set(args.authority), Path(args.spool) if args.spool else None,
+            )
+        except ConnectorRegistryError as error:
+            raise SystemExit(str(error)) from None
+        print(json.dumps(result, sort_keys=True))
+        return
     if args.command == "dry-run":
         selections = []
         if args.claude_root:
@@ -225,6 +265,10 @@ def main() -> None:
         print(json.dumps(result, sort_keys=True))
         return
     if args.command == "mcp-config-preview":
+        _registry_policy(
+            "recall.capture", visibility=args.visibility,
+            privacy_mode=args.privacy_mode, authorities={"brain"},
+        )
         if args.keychain_service and not args.keychain_account:
             raise SystemExit("--keychain-account is required with --keychain-service")
         auth = ["--token-file", args.token_file] if args.token_file else [
@@ -252,6 +296,10 @@ def main() -> None:
         print(json.dumps(result, sort_keys=True))
         return
     if args.command == "grep-ai-config-preview":
+        _registry_policy(
+            "grep.ai", visibility="private",
+            privacy_mode=args.privacy_mode, authorities={"brain", "source"},
+        )
         if args.keychain_service and not args.keychain_account:
             raise SystemExit("--keychain-account is required with --keychain-service")
         if args.grep_keychain_service and not args.grep_keychain_account:
@@ -290,6 +338,21 @@ def main() -> None:
         raise SystemExit("--keychain-account is required with --keychain-service")
     if getattr(args, "grep_keychain_service", None) and not args.grep_keychain_account:
         raise SystemExit("--grep-keychain-account is required with --grep-keychain-service")
+    if args.command == "mcp-serve":
+        _registry_policy(
+            "recall.capture", visibility=args.visibility,
+            privacy_mode=args.privacy_mode, authorities={"brain"},
+        )
+    elif args.command == "export-inbox-sync":
+        _registry_policy(
+            "openai.export-inbox", visibility=args.visibility,
+            privacy_mode=args.privacy_mode, authorities={"brain"},
+        )
+    elif args.command == "grep-ai-sync":
+        _registry_policy(
+            "grep.ai", visibility="private",
+            privacy_mode=args.privacy_mode, authorities={"brain", "source"},
+        )
     token = _token(args)
     common = {
         "endpoint": args.endpoint,
@@ -322,8 +385,6 @@ def main() -> None:
         else:
             result = importer.import_with(BrainClient(**common, privacy=privacy), [Path(value) for value in args.inputs])
     elif args.command == "export-inbox-sync":
-        if args.visibility != "private":
-            raise SystemExit("export inbox visibility must be private")
         connector = ExportInboxConnector(
             inbox=Path(args.inbox), catalog_path=Path(args.catalog),
             source_id=args.source_id, privacy_mode=args.privacy_mode,

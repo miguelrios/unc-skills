@@ -57,6 +57,13 @@ then `grep-ai-sync`; Grep `research:read` authority and Brain source authority
 must use separate Keychain or mode-0600 references. The connector never creates
 jobs or infers deletion from list absence. Use the returned Brain receipt for an
 explicit `delete`.
+
+Use `connector-registry-preview` for the static, content-free inventory of
+capture, export inbox, and Grep AI trust boundaries. Use
+`connector-registry-status` with authority-presence flags and an optional spool
+to inspect only bounded health/count/checkpoint facts. Neither command reads
+credential values or source content, and status never syncs or repairs state.
+
 When the packaged Brain client is available, offer its opt-in pre-ingest privacy
 policy for transcript/export/memory writes: `off` preserves compatibility,
 `scrub` retains safe context, and `drop` omits the classified record before spool
