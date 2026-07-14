@@ -778,11 +778,29 @@ class PluginRoutingTest(unittest.TestCase):
                 self.events.append(event)
 
         adapter = Adapter()
-        recovered = asyncio.run(self.plugin._poll_recent_replies(adapter))
-        recovered_again = asyncio.run(self.plugin._poll_recent_replies(adapter))
+        with mock.patch.dict(os.environ, {"TETHER_ALLOWED_BOT_USERS": "UPEER"}, clear=False):
+            recovered = asyncio.run(self.plugin._poll_recent_replies(adapter))
+            recovered_again = asyncio.run(self.plugin._poll_recent_replies(adapter))
         self.assertEqual(recovered, 2)
         self.assertEqual(recovered_again, 0)
         self.assertEqual(adapter.events[0]["ts"], "111.1")
+
+    def test_peer_bot_requires_explicit_tether_allowlist(self):
+        adapter = types.SimpleNamespace(
+            _bot_user_id="ULOCAL",
+            _team_bot_user_ids={"T12345678": "ULOCAL"},
+            config=types.SimpleNamespace(extra={"allow_bots": "all"}),
+        )
+        event = {
+            "text": "general bot chatter",
+            "bot_id": "BPEER",
+            "user": "UPEER",
+            "subtype": "bot_message",
+        }
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(self.plugin._allows_bot_message(adapter, event, "T12345678"))
+        with mock.patch.dict(os.environ, {"TETHER_ALLOWED_BOT_USERS": "UOTHER,UPEER"}, clear=True):
+            self.assertTrue(self.plugin._allows_bot_message(adapter, event, "T12345678"))
 
     def test_peer_bot_in_bound_thread_stays_with_hermes(self):
         self.make_bridge()
@@ -989,7 +1007,11 @@ class InstallerAndPackageTest(unittest.TestCase):
         package = json.loads((ROOT / "package.json").read_text())
         self.assertEqual(package["pi"]["skills"], ["./skills"])
         for manifest in (ROOT / ".claude-plugin" / "plugin.json", ROOT / ".codex-plugin" / "plugin.json"):
-            self.assertEqual(json.loads(manifest.read_text())["name"], "tether")
+            payload = json.loads(manifest.read_text())
+            self.assertEqual(payload["name"], "tether")
+            self.assertEqual(payload["version"], package["version"])
+        plugin_manifest = (ROOT / "runtime" / "plugin" / "plugin.yaml").read_text()
+        self.assertIn(f"version: {package['version']}", plugin_manifest)
 
 
 if __name__ == "__main__":

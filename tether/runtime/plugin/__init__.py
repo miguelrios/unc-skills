@@ -52,7 +52,7 @@ class PluginState:
     recovery_worker_started: bool = False
     reply_poller: asyncio.Task | None = None
     poll_cursor: int = 0
-    joined_channels: set[str] = field(default_factory=set)
+    joined_channels: set[tuple[str, str]] = field(default_factory=set)
     slack_transport_connected: bool | None = None
     last_inbound_at: float | None = None
     last_poll_at: float | None = None
@@ -118,6 +118,14 @@ def _is_bot_message(event: dict[str, Any]) -> bool:
     return bool(event.get("bot_id")) or event.get("subtype") == "bot_message"
 
 
+def _allowed_peer_bot_users() -> set[str]:
+    return {
+        value.strip()
+        for value in os.getenv("TETHER_ALLOWED_BOT_USERS", "").split(",")
+        if value.strip()
+    }
+
+
 def _is_silence_control_output(value: Any) -> bool:
     if not isinstance(value, str):
         return False
@@ -125,6 +133,9 @@ def _is_silence_control_output(value: Any) -> bool:
 
 
 def _allows_bot_message(adapter, event: dict[str, Any], team_id: str = "") -> bool:
+    user_id = str(event.get("user") or "")
+    if user_id not in _allowed_peer_bot_users():
+        return False
     mode = str(
         getattr(getattr(adapter, "config", None), "extra", {}).get("allow_bots")
         or os.getenv("SLACK_ALLOW_BOTS", "none")
@@ -191,6 +202,8 @@ def _install_slack_bridge_prefilter():
         try:
             bridge = _bridge_for_slack_event(self, event)
             if bridge is not None:
+                if _is_bot_message(event) and not _allows_bot_message(self, event, bridge.team_id):
+                    return None
                 self._bot_message_ts.add(bridge.thread_ts)
                 event_id = str(event.get("ts") or "")
                 if (
@@ -256,9 +269,10 @@ async def _poll_recent_replies(adapter) -> int:
     for bridge in batch:
         try:
             client = adapter._get_client(bridge.channel_id)
-            if bridge.channel_id.startswith("C") and bridge.channel_id not in state.joined_channels:
+            channel_key = (bridge.team_id, bridge.channel_id)
+            if bridge.channel_id.startswith("C") and channel_key not in state.joined_channels:
                 await client.conversations_join(channel=bridge.channel_id)
-                state.joined_channels.add(bridge.channel_id)
+                state.joined_channels.add(channel_key)
             result = await client.conversations_replies(
                 channel=bridge.channel_id,
                 ts=bridge.thread_ts,
