@@ -16,7 +16,6 @@ import selectors
 import shlex
 import subprocess
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +67,9 @@ GIT_MUTATING_VERBS = frozenset({
     "merge", "mv", "rebase", "reset", "restore", "revert", "rm", "stash", "switch",
     "tag", "worktree",
 })
+MAX_INDEXED_OBSERVATIONS = 20_000
+MAX_REPOSITORY_EVENT_IDS = 1_000
+MAX_REPOSITORY_CANDIDATES = 128
 
 
 class GitProbeError(RuntimeError):
@@ -455,7 +457,13 @@ def _result_for(events: list[dict[str, Any]], index: int) -> dict[str, Any] | No
     return None
 
 
-def observed_git_provenance(events: list[dict[str, Any]], metadata: dict[str, Any]) -> dict[str, Any]:
+def observed_git_provenance(
+    events: list[dict[str, Any]],
+    metadata: dict[str, Any],
+    *,
+    owned_first: int | None = None,
+    owned_last: int | None = None,
+) -> dict[str, Any]:
     default_cwd = _absolute(str(metadata.get("cwd", "")), None)
     repositories = []
     mutations = []
@@ -470,6 +478,11 @@ def observed_git_provenance(events: list[dict[str, Any]], metadata: dict[str, An
 
     for index, event in enumerate(events):
         if event.get("surface") != "tool_input":
+            continue
+        ordinal = event.get("ordinal")
+        if owned_first is not None and (not isinstance(ordinal, int) or ordinal < owned_first):
+            continue
+        if owned_last is not None and (not isinstance(ordinal, int) or ordinal > owned_last):
             continue
         text = str(event.get("text", ""))
         payload = _parse_payload(text)
@@ -776,12 +789,107 @@ def verified_repository_snapshot(repo: Path) -> dict[str, Any]:
     }
 
 
-def collect_git_provenance(
-    events: list[dict[str, Any]],
+def _merge_observed(parts: Any) -> dict[str, Any]:
+    merged = {
+        "repositories": [], "unavailable_repository_candidates": [], "file_mutations": [],
+        "git_commands": [], "observed_commits": [], "branch_switches": [],
+        "test_commands": [], "limitations": [],
+    }
+    repositories: dict[str, dict[str, Any]] = {}
+    unavailable: dict[tuple[Any, Any], dict[str, Any]] = {}
+    detail_keys = (
+        "file_mutations", "git_commands", "observed_commits", "branch_switches",
+        "test_commands", "limitations",
+    )
+    unique = {key: {} for key in detail_keys}
+    observations_seen = {key: 0 for key in detail_keys}
+    omitted_repositories = 0
+    omitted_unavailable = 0
+    indexed = 0
+    for part in parts:
+        for item in part.get("repositories", []):
+            root = item["repo_root"]
+            if root not in repositories and len(repositories) >= MAX_REPOSITORY_CANDIDATES:
+                omitted_repositories += 1
+                continue
+            target = repositories.setdefault(root, {
+                "repo_root": root, "sources": [], "event_ids": [], "confidence": "metadata",
+            })
+            target["sources"].extend(
+                value for value in item.get("sources", []) if value not in target["sources"]
+            )
+            for value in item.get("event_ids", []):
+                if value in target["event_ids"]:
+                    continue
+                if len(target["event_ids"]) < MAX_REPOSITORY_EVENT_IDS:
+                    target["event_ids"].append(value)
+                else:
+                    target["omitted_event_ids"] = target.get("omitted_event_ids", 0) + 1
+            if target["event_ids"]:
+                target["confidence"] = "direct"
+        for item in part.get("unavailable_repository_candidates", []):
+            key = (item.get("path"), item.get("reason"))
+            if key not in unavailable and len(unavailable) >= MAX_REPOSITORY_CANDIDATES:
+                omitted_unavailable += 1
+                continue
+            target = unavailable.setdefault(key, {
+                "path": item.get("path"), "reason": item.get("reason"),
+                "sources": [], "event_ids": [],
+            })
+            target["sources"].extend(
+                value for value in item.get("sources", []) if value not in target["sources"]
+            )
+            for value in item.get("event_ids", []):
+                if value in target["event_ids"]:
+                    continue
+                if len(target["event_ids"]) < MAX_REPOSITORY_EVENT_IDS:
+                    target["event_ids"].append(value)
+                else:
+                    target["omitted_event_ids"] = target.get("omitted_event_ids", 0) + 1
+        for key in detail_keys:
+            for item in part.get(key, []):
+                observations_seen[key] += 1
+                signature = json.dumps(item, sort_keys=True, separators=(",", ":"))
+                if signature in unique[key]:
+                    continue
+                if indexed < MAX_INDEXED_OBSERVATIONS:
+                    unique[key][signature] = item
+                    indexed += 1
+    merged["repositories"] = list(repositories.values())
+    merged["unavailable_repository_candidates"] = list(unavailable.values())
+    for key in detail_keys:
+        merged[key] = list(unique[key].values())
+    merged["index_limits"] = {
+        "max_indexed_observations": MAX_INDEXED_OBSERVATIONS,
+        "max_repository_candidates_per_class": MAX_REPOSITORY_CANDIDATES,
+        "indexed_observations": indexed,
+        "observations_seen": observations_seen,
+        "omitted_observations": {
+            key: observations_seen[key] - len(unique[key]) for key in detail_keys
+        },
+        "omitted_repository_candidates": omitted_repositories,
+        "omitted_unavailable_repository_candidates": omitted_unavailable,
+        "full_evidence_preserved_in_event_ledger": True,
+    }
+    return merged
+
+
+def collect_git_provenance_chunks(
+    chunks: Any,
     metadata: dict[str, Any],
     explicit_repositories: list[str] | None = None,
 ) -> dict[str, Any]:
-    observed = observed_git_provenance(events, metadata)
+    def parts():
+        for chunk in chunks:
+            if isinstance(chunk, dict) and isinstance(chunk.get("events"), list):
+                yield observed_git_provenance(
+                    chunk["events"], metadata,
+                    owned_first=chunk.get("owned_first"), owned_last=chunk.get("owned_last"),
+                )
+            else:
+                yield observed_git_provenance(chunk, metadata)
+
+    observed = _merge_observed(parts())
     candidates = [item["repo_root"] for item in observed["repositories"]]
     candidates.extend(explicit_repositories or [])
     snapshots = []
@@ -801,13 +909,44 @@ def collect_git_provenance(
             "reason": "current git state is not a historical session-end snapshot",
         },
         "verified_now": {
-            "captured_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "repositories": snapshots,
         },
     }
 
 
-def validate_git_provenance(value: Any, event_ids: set[str]) -> list[str]:
+def collect_git_provenance(
+    events: list[dict[str, Any]],
+    metadata: dict[str, Any],
+    explicit_repositories: list[str] | None = None,
+) -> dict[str, Any]:
+    return collect_git_provenance_chunks([events], metadata, explicit_repositories)
+
+
+def git_referenced_event_ids(value: Any) -> set[str]:
+    found = set()
+    if not isinstance(value, dict) or not isinstance(value.get("session_observed"), dict):
+        return found
+    observed = value["session_observed"]
+    for key in ("file_mutations", "git_commands", "observed_commits", "branch_switches", "test_commands"):
+        for item in observed.get(key, []) if isinstance(observed.get(key), list) else []:
+            if not isinstance(item, dict):
+                continue
+            for field in ("event_id", "command_event_id"):
+                if isinstance(item.get(field), str):
+                    found.add(item[field])
+            if isinstance(item.get("result"), dict) and isinstance(item["result"].get("event_id"), str):
+                found.add(item["result"]["event_id"])
+    for key in ("repositories", "unavailable_repository_candidates"):
+        for item in observed.get(key, []) if isinstance(observed.get(key), list) else []:
+            if isinstance(item, dict):
+                found.update(value for value in item.get("event_ids", []) if isinstance(value, str))
+    for item in observed.get("limitations", []) if isinstance(observed.get("limitations"), list) else []:
+        if isinstance(item, dict) and isinstance(item.get("event_id"), str):
+            found.add(item["event_id"])
+    return found
+
+
+def validate_git_provenance(value: Any, event_ids: set[str] | None = None) -> list[str]:
     errors = []
     if not isinstance(value, dict) or value.get("schema_version") != "recap.git-provenance.v1":
         return ["git provenance schema is unsupported"]
@@ -822,25 +961,32 @@ def validate_git_provenance(value: Any, event_ids: set[str]) -> list[str]:
             errors.append(f"git session_observed.{key} must be a list")
     for key in ("file_mutations", "git_commands", "observed_commits", "branch_switches", "test_commands"):
         for item in observed.get(key, []) if isinstance(observed.get(key), list) else []:
-            if not isinstance(item, dict) or item.get("event_id") not in event_ids:
+            if not isinstance(item, dict) or (
+                event_ids is not None and item.get("event_id") not in event_ids
+            ):
                 errors.append(f"git {key} references unknown event")
                 continue
             result = item.get("result")
             if result is not None and (
-                not isinstance(result, dict) or result.get("event_id") not in event_ids
+                not isinstance(result, dict)
+                or (event_ids is not None and result.get("event_id") not in event_ids)
                 or result.get("pairing") != "order_inferred"
             ):
                 errors.append(f"git {key} has invalid result evidence")
-            if item.get("command_event_id") is not None and item["command_event_id"] not in event_ids:
+            if event_ids is not None and item.get("command_event_id") is not None and item["command_event_id"] not in event_ids:
                 errors.append(f"git {key} references unknown command event")
     for key in ("repositories", "unavailable_repository_candidates"):
         for item in observed.get(key, []) if isinstance(observed.get(key), list) else []:
-            if not isinstance(item, dict) or any(
-                event_id not in event_ids for event_id in item.get("event_ids", [])
+            if not isinstance(item, dict) or (
+                event_ids is not None and any(
+                    event_id not in event_ids for event_id in item.get("event_ids", [])
+                )
             ):
                 errors.append(f"git {key} references unknown event")
     for item in observed.get("limitations", []) if isinstance(observed.get("limitations"), list) else []:
-        if not isinstance(item, dict) or item.get("event_id") not in event_ids:
+        if not isinstance(item, dict) or (
+            event_ids is not None and item.get("event_id") not in event_ids
+        ):
             errors.append("git limitations reference unknown event")
     session_end = value.get("session_end")
     if not isinstance(session_end, dict) or session_end.get("state") not in {

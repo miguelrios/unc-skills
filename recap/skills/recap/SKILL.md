@@ -41,6 +41,17 @@ Validate before synthesis:
 python3 scripts/recap.py validate ~/.recap/current.json
 ```
 
+The manifest is a compact receipt and index. Its redacted events live in adjacent owner-private
+JSONL ledgers rather than inline in one huge JSON object. Read bounded semantic packets instead of
+loading the event ledger wholesale:
+
+```bash
+python3 scripts/recap.py packet ~/.recap/current.json packet-00000000
+```
+
+Packet IDs are listed in the manifest's private packet index. Complete prefix packets have
+content-addressed cache keys; a live append changes only the unfinished tail packet.
+
 Read `references/truth-contract.md` when handling child sessions, live/partial sessions, multiple
 repositories, ambiguous git attribution, or exhaustive-ledger requests.
 
@@ -75,8 +86,9 @@ failed, retried, discussed-only, and unverifiable-now. Never convert a proposed 
 
 ## Account for everything
 
-The bootstrap manifest proves structural capture only; it deliberately reports semantic accounting
-as `not_performed`. During synthesis, every observed event ordinal must appear exactly once in either:
+The collected manifest proves structural capture and packetization only; it deliberately reports
+semantic accounting as `packetized_not_classified`. During synthesis, every observed event ordinal
+must appear exactly once in either:
 
 - a significant claim's evidence list; or
 - an explicit low-signal aggregate such as repetitive progress polls or unchanged status checks.
@@ -84,6 +96,35 @@ as `not_performed`. During synthesis, every observed event ordinal must appear e
 Do not dump every tool call into the prose. Group mechanically repetitive evidence while preserving
 counts and ordinal ranges. If the manifest is partial, changed during collection, redacted in a way
 that blocks a claim, or fails validation, label the recap incomplete. Never hide that limitation.
+
+Write the semantic accounting draft beside the private manifest, never in the repository. Use this
+shape:
+
+```json
+{
+  "schema_version": "recap.accounting.v1",
+  "claims": [
+    {"claim_id": "goal-1", "kind": "goal", "label": "Short claim", "event_ids": ["evidence-id"]}
+  ],
+  "low_signal_groups": [
+    {"group_id": "routine-reads", "label": "Repeated routine reads", "ranges": [[4, 9]]}
+  ]
+}
+```
+
+Allowed claim kinds are `goal`, `decision`, `action`, `change`, `verification`, `failure`,
+`recovery`, `external_effect`, `final_state`, and `open_work`. Labels are private semantic notes,
+not public prose. Seal and validate the draft before treating the recap as exhaustive:
+
+```bash
+python3 scripts/recap.py seal-accounting ~/.recap/current.json ~/.recap/draft.json \
+  --output ~/.recap/accounting.json
+python3 scripts/recap.py validate-accounting ~/.recap/current.json ~/.recap/accounting.json
+```
+
+Both commands print content-free receipts. A missing event, reused event ID, overlapping range,
+invented evidence ID, out-of-bounds range, or stale ledger hash fails closed. Fix the private draft;
+never weaken the validator or silently fall back to plausible prose.
 
 ## Answer shape
 

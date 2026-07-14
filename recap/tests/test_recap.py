@@ -61,8 +61,9 @@ class RecapCollectorTest(unittest.TestCase):
         os.environ["RECALL_CODEX_ROOT"] = str(session.parent)
         os.environ["RECALL_SESSION_CURSOR_DB"] = str(session.parent / "session-cursors.db")
         os.environ["RECALL_EXPORT_SOURCE_ID"] = "claude:test:recap"
+        output = output or session.parent / "private" / "manifest.json"
         return SimpleNamespace(
-            current=False, session=str(session), output=str(output) if output else None,
+            current=False, session=str(session), output=str(output),
             repo=str(repo) if repo else None, recall_script=str(RECALL),
         )
 
@@ -71,12 +72,15 @@ class RecapCollectorTest(unittest.TestCase):
             session = Path(temporary) / "session.jsonl"
             write_session(session, secret=True)
             manifest = self.recap.collect(self.args(session))
-            self.assertEqual([event["ordinal"] for event in manifest["events"]], [0, 1, 2])
-            self.assertNotIn("sk-", json.dumps(manifest))
+            events = list(self.recap.iter_jsonl(Path(manifest["ledger"]["events"]["path"])))
+            self.assertEqual([event["ordinal"] for event in events], [0, 1, 2])
+            self.assertNotIn("sk-", json.dumps(events))
             self.assertEqual(manifest["coverage"]["redacted_lines"], 1)
-            self.assertEqual(manifest["coverage"]["semantic_accounting"], "not_performed")
+            self.assertEqual(manifest["coverage"]["semantic_accounting"], "packetized_not_classified")
             self.assertTrue(manifest["coverage"]["source_complete"])
             self.assertEqual(manifest["collector"]["page_count"], 1)
+            self.assertNotIn("page_receipts", manifest["collector"])
+            self.assertIn("page_receipt_chain_sha256", manifest["collector"])
             self.assertEqual(manifest["scope"]["source_id"], "claude:test:recap")
             self.assertIn("boundary_receipt", manifest["scope"])
             self.assertTrue(self.recap.validate_manifest(manifest)["valid"])
@@ -86,10 +90,16 @@ class RecapCollectorTest(unittest.TestCase):
             session = Path(temporary) / "session.jsonl"
             write_session(session)
             manifest = self.recap.collect(self.args(session))
-            manifest["events"][1]["text"] = "tampered"
+            ledger_path = Path(manifest["ledger"]["events"]["path"])
+            events = list(self.recap.iter_jsonl(ledger_path))
+            events[1]["text"] = "tampered"
+            ledger_path.write_text("".join(
+                json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n" for event in events
+            ))
+            ledger_path.chmod(0o600)
             result = self.recap.validate_manifest(manifest)
             self.assertFalse(result["valid"])
-            self.assertIn("event 1 text digest mismatch", result["errors"])
+            self.assertTrue(any("digest mismatch" in error for error in result["errors"]))
 
     def test_validation_detects_git_boundary_and_evidence_tampering(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -101,7 +111,7 @@ class RecapCollectorTest(unittest.TestCase):
             }]
             result = self.recap.validate_manifest(manifest)
             self.assertFalse(result["valid"])
-            self.assertIn("git file_mutations references unknown event", result["errors"])
+            self.assertIn("git provenance references unknown event evidence", result["errors"])
 
     def test_defense_in_depth_redacts_private_key_blocks(self):
         private_block = (
@@ -138,6 +148,34 @@ class RecapCollectorTest(unittest.TestCase):
                 self.recap.private_write(link, {"unsafe": True})
             self.assertEqual(target.read_text(), "unchanged")
 
+    def test_private_reader_rejects_manifest_symlink(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            private = Path(temporary) / "private"
+            private.mkdir(mode=0o700)
+            target = private / "target.json"
+            target.write_text("{}\n")
+            target.chmod(0o600)
+            link = private / "link.json"
+            link.symlink_to(target)
+            with self.assertRaisesRegex(self.recap.RecapError, "owner-private"):
+                self.recap._load_private_json(str(link), label="manifest")
+
+    def test_collect_rejects_output_symlink_without_touching_target(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session = root / "session.jsonl"
+            write_session(session)
+            private = root / "private"
+            private.mkdir(mode=0o700)
+            target = private / "target.json"
+            target.write_text("unchanged\n")
+            target.chmod(0o600)
+            link = private / "manifest.json"
+            link.symlink_to(target)
+            with self.assertRaisesRegex(self.recap.RecapError, "symlink"):
+                self.recap.collect(self.args(session, output=link))
+            self.assertEqual(target.read_text(), "unchanged\n")
+
     def test_private_write_never_chmods_shared_parent(self):
         with tempfile.TemporaryDirectory() as temporary:
             shared = Path(temporary) / "shared"
@@ -160,7 +198,7 @@ class RecapCollectorTest(unittest.TestCase):
             subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
             subprocess.run(["git", "-C", str(repo), "commit", "-qm", "base"], check=True)
             (repo / "new.txt").write_text("new\n")
-            provenance = self.recap.collect_git_provenance([], {}, [str(repo)])
+            provenance = self.recap.collect_git_provenance_chunks([[]], {}, [str(repo)])
             snapshot = provenance["verified_now"]["repositories"][0]
             self.assertTrue(snapshot["available"])
             self.assertEqual(snapshot["attribution"], "verified_now_only")
@@ -208,6 +246,28 @@ class RecapCollectorTest(unittest.TestCase):
                 manifest["git"]["verified_now"]["repositories"][0]["attribution"],
                 "verified_now_only",
             )
+
+    def test_packet_is_bounded_and_unchanged_collection_is_byte_stable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session = root / "session.jsonl"
+            write_session(session)
+            output = root / "private" / "manifest.json"
+            args = self.args(session, output=output)
+            first = self.recap.collect(args)
+            self.recap.private_write(output, first)
+            paths = [output] + [
+                Path(receipt["path"])
+                for key, receipt in first["ledger"].items()
+                if isinstance(receipt, dict) and "path" in receipt
+            ]
+            first_bytes = {path: path.read_bytes() for path in paths}
+            second = self.recap.collect(args)
+            self.recap.private_write(output, second)
+            self.assertEqual(first, second)
+            self.assertEqual(first_bytes, {path: path.read_bytes() for path in paths})
+            packet = list(self.recap.packet_events(first["ledger"], "packet-00000000"))
+            self.assertEqual([event["ordinal"] for event in packet], [0, 1, 2])
 
     def test_current_codex_identity_requires_one_exact_file(self):
         with tempfile.TemporaryDirectory() as temporary:

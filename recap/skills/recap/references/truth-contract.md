@@ -26,6 +26,18 @@ Structural manifest completeness is not semantic recap completeness. The former 
 event has a contiguous ordinal and valid digest; the latter requires the claim/group assignment
 above. Never report semantic zero-unaccounted before that assignment exists.
 
+The exhaustive event ledger, episode index, packet index, and repeat-group index are immutable
+JSONL streams with independent byte counts and SHA-256 receipts. Validation replays them in bounded
+memory and rejects missing, duplicate, reordered, or tampered evidence. Semantic packets are bounded
+at 1,000 events or 128 KiB of redacted text. Cache keys cover exact complete packet content; only
+the unfinished tail changes when a live session appends.
+
+Semantic accounting is a separate `recap.accounting.v1` overlay sealed to the event-ledger hash.
+Claims own explicit event IDs; low-signal groups own non-overlapping ordinal ranges plus a count and
+event-ID digest. Validation streams the ledger and requires every event to have exactly one owner.
+This separation lets the host agent exercise judgment without letting prose redefine structural
+truth.
+
 Low-signal grouping is semantic, not deletion. Typical candidates are repeated polls with unchanged
 state, duplicate status output, or mechanical progress notices. A group records count and ordinal
 ranges. User decisions, edits, commands with side effects, errors, tests, and final results are never

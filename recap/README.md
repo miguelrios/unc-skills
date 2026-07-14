@@ -27,7 +27,9 @@ against those sessions but its own transcript format is not yet indexed by Recal
 
 In Codex, use `$recap` or ask “recap this session.” For an older run, use Recall to identify the
 exact session first, then ask Recap to explain it. Long sessions stay readable: the default answer
-is concise, while exhaustive evidence lives in an owner-private ledger.
+is concise, while exhaustive evidence lives in owner-private streaming ledgers. The host agent reads
+bounded, content-addressed packets and seals every event to either a supported claim or an explicit
+low-signal group before calling the recap exhaustive.
 
 For sessions spanning multiple repositories, repeat `--repo` when collecting the private manifest.
 Recap keeps event-observed actions, the usually unknown historical session end, and read-only git

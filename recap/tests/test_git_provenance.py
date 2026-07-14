@@ -210,6 +210,29 @@ class GitProvenanceTest(unittest.TestCase):
             self.assertEqual(observed["test_commands"][0]["argv"], ["npm", "test"])
             self.assertEqual(observed["limitations"][0]["reason"], "tool_input_possibly_truncated")
 
+    def test_stream_chunk_lookahead_pairs_boundary_result_without_duplicate_observation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary) / "repo"
+            init_repo(repo)
+            events = [
+                event(0, "assistant", "before"),
+                event(1, "assistant", "before two"),
+                event(2, "tool_input", json.dumps({
+                    "cmd": "git status", "workdir": str(repo),
+                }), "exec_command"),
+                event(3, "assistant", "progress"),
+                event(4, "tool_output", json.dumps({"exit_code": 0})),
+                event(5, "assistant", "after"),
+            ]
+            chunks = [
+                {"events": events, "owned_first": 0, "owned_last": 2},
+                {"events": events[3:], "owned_first": 3, "owned_last": 5},
+            ]
+            provenance = git.collect_git_provenance_chunks(chunks, {})
+            commands = provenance["session_observed"]["git_commands"]
+            self.assertEqual(len(commands), 1)
+            self.assertEqual(commands[0]["result"]["event_id"], "event-4")
+
     def test_expired_reflog_and_no_git_are_uncertainty_not_invention(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -225,6 +248,23 @@ class GitProvenanceTest(unittest.TestCase):
             no_git = git.verified_repository_snapshot(root / "plain")
             self.assertFalse(no_git["available"])
             self.assertIsNone(no_git.get("head"))
+
+    def test_streamed_repository_candidate_index_is_explicitly_bounded(self):
+        part = {
+            "repositories": [
+                {
+                    "repo_root": f"/synthetic/repo-{index}",
+                    "sources": ["tool_workdir"],
+                    "event_ids": [f"event-{index}"],
+                    "confidence": "direct",
+                }
+                for index in range(git.MAX_REPOSITORY_CANDIDATES + 2)
+            ],
+        }
+        merged = git._merge_observed([part])
+        self.assertEqual(len(merged["repositories"]), git.MAX_REPOSITORY_CANDIDATES)
+        self.assertEqual(merged["index_limits"]["omitted_repository_candidates"], 2)
+        self.assertTrue(merged["index_limits"]["full_evidence_preserved_in_event_ledger"])
 
     def test_amend_revert_detached_head_and_cross_worktree_remain_current_context(self):
         with tempfile.TemporaryDirectory() as temporary:
