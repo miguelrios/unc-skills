@@ -184,6 +184,12 @@ class MacPackageTest(unittest.TestCase):
         self.assertIn('--disable-connector-supervisor', installer)
         self.assertIn('"client.cli", "connector-supervisor-run"', installer)
         self.assertIn('"KeepAlive": True', installer)
+        self.assertIn('while launchctl print "$TARGET"', installer)
+        self.assertIn('launch agent stop did not converge', installer)
+        self.assertIn('stop_launch_agent "$LABEL"', installer)
+        uninstaller = (package / "uninstall.sh").read_text()
+        self.assertIn('while launchctl print "$TARGET"', uninstaller)
+        self.assertIn('launch agent stop did not converge', uninstaller)
         invalid = subprocess.run([
             "sh", str(package / "install.sh"),
             "--endpoint", "https://example.invalid", "--host-id", "test",

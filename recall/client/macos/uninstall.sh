@@ -13,10 +13,24 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+stop_launch_agent() {
+  TARGET="gui/$(id -u)/$1"
+  launchctl bootout "$TARGET" >/dev/null 2>&1 || true
+  ATTEMPTS=0
+  while launchctl print "$TARGET" >/dev/null 2>&1; do
+    ATTEMPTS=$((ATTEMPTS + 1))
+    if [ "$ATTEMPTS" -ge 100 ]; then
+      echo "launch agent stop did not converge" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+}
+
 for HARNESS in claude codex chatgpt-export connector-supervisor; do
   LABEL="ai.parcha.recall.$HARNESS"
   if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
-    launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
+    stop_launch_agent "$LABEL"
   fi
   rm -f "$LAUNCH_AGENTS/$LABEL.plist"
 done

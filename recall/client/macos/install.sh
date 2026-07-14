@@ -65,6 +65,20 @@ if [ -n "$EXPORT_INBOX" ]; then
   [ -d "$EXPORT_INBOX" ] && [ ! -L "$EXPORT_INBOX" ] || { echo "export inbox must be an explicit non-symlink directory" >&2; exit 2; }
 fi
 
+stop_launch_agent() {
+  TARGET="gui/$(id -u)/$1"
+  launchctl bootout "$TARGET" >/dev/null 2>&1 || true
+  ATTEMPTS=0
+  while launchctl print "$TARGET" >/dev/null 2>&1; do
+    ATTEMPTS=$((ATTEMPTS + 1))
+    if [ "$ATTEMPTS" -ge 100 ]; then
+      echo "launch agent stop did not converge" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+}
+
 SOURCE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 mkdir -p "$PREFIX" "$PREFIX/bin" "$PREFIX/lib" "$PREFIX/state" "$LAUNCH_AGENTS"
 rm -rf "$PREFIX/lib/client" "$PREFIX/lib/collector" "$PREFIX/lib/connectors" "$PREFIX/lib/privacy" "$PREFIX/runtime"
@@ -116,7 +130,7 @@ write_plist() {
   LABEL="ai.parcha.recall.$HARNESS"
   PLIST="$LAUNCH_AGENTS/$LABEL.plist"
   if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
-    launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
+    stop_launch_agent "$LABEL"
   fi
   "$RUNTIME" - "$PLIST" "$LABEL" "$RUNTIME" "$PREFIX/lib" "$ENDPOINT" "$SOURCE_ID" "$HARNESS" "$ROOT" "$PREFIX/state/$HARNESS.db" "$KEYCHAIN_SERVICE" "$VISIBILITY" "$PRIVACY_MODE" <<'PY'
 import plistlib
@@ -159,7 +173,7 @@ write_export_inbox_plist() {
   SPOOL="$PREFIX/state/chatgpt-export-runner.db"
   CATALOG="$PREFIX/state/chatgpt-export-catalog.db"
   if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
-    launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
+    stop_launch_agent "$LABEL"
   fi
   "$RUNTIME" - "$PLIST" "$LABEL" "$RUNTIME" "$PREFIX/lib" "$ENDPOINT" "$SOURCE_ID" "$EXPORT_INBOX" "$CATALOG" "$SPOOL" "$KEYCHAIN_SERVICE" "$PRIVACY_MODE" <<'PY'
 import plistlib
@@ -199,7 +213,7 @@ write_supervisor_plist() {
   PLIST="$LAUNCH_AGENTS/$LABEL.plist"
   STATE="$PREFIX/state/connector-supervisor.db"
   if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
-    launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
+    stop_launch_agent "$LABEL"
   fi
   PYTHONPATH="$PREFIX/lib" "$RUNTIME" -m client.cli connector-supervisor-config-preview --config "$SUPERVISOR_CONFIG" >/dev/null
   "$RUNTIME" - "$PLIST" "$LABEL" "$RUNTIME" "$PREFIX/lib" "$SUPERVISOR_CONFIG" "$STATE" <<'PY'
@@ -237,14 +251,14 @@ if [ -n "$SUPERVISOR_CONFIG" ]; then write_supervisor_plist; fi
 if [ "$DISABLE_EXPORT_INBOX" -eq 1 ]; then
   LABEL="ai.parcha.recall.chatgpt-export"
   if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
-    launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
+    stop_launch_agent "$LABEL"
   fi
   rm -f "$LAUNCH_AGENTS/$LABEL.plist"
 fi
 if [ "$DISABLE_SUPERVISOR" -eq 1 ]; then
   LABEL="ai.parcha.recall.connector-supervisor"
   if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
-    launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
+    stop_launch_agent "$LABEL"
   fi
   rm -f "$LAUNCH_AGENTS/$LABEL.plist"
 fi
