@@ -155,6 +155,9 @@ class MacPackageTest(unittest.TestCase):
         self.assertTrue((package / "runtime" / "bin" / "python3").is_symlink())
         self.assertTrue((package / "runtime" / "lib" / "python3.12" / "LICENSE.txt").is_file())
         self.assertNotIn("token", json.dumps(manifest).lower())
+        packaged_paths = {entry["path"] for entry in manifest["files"]}
+        self.assertIn("lib/connectors/sdk.py", packaged_paths)
+        self.assertIn("lib/connectors/__init__.py", packaged_paths)
 
         wrapper = (package / "bin" / "recall-brain").read_text()
         self.assertIn('exec "$HERE/runtime/bin/python3" -m client.cli', wrapper)
@@ -165,6 +168,7 @@ class MacPackageTest(unittest.TestCase):
         self.assertIn('RUNTIME_LOCK.json', installer)
         self.assertIn('ssl.get_default_verify_paths()', installer)
         self.assertIn('get_ca_certs()', installer)
+        self.assertIn('cp -R "$SOURCE/lib/connectors"', installer)
 
         home = self.root / "home"
         home.mkdir()
