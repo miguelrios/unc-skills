@@ -216,6 +216,8 @@ def main() -> None:
         print(json.dumps(registry_preview(), sort_keys=True))
         return
     if args.command == "connector-registry-status":
+        if len(args.authority) != len(set(args.authority)):
+            raise SystemExit("duplicate_authority_slots")
         try:
             result = aggregate_status(
                 args.connector_id, args.enabled, args.privacy_mode,

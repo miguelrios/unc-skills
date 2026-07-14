@@ -16,6 +16,7 @@ from connectors.registry import (
     ConnectorRegistryError,
     aggregate_status,
     definition,
+    _index,
     validate_policy,
 )
 
@@ -52,8 +53,14 @@ class FrozenRegistryTest(unittest.TestCase):
         self.assertEqual(definition("grep.ai").authority_slots, ("brain", "source"))
         with self.assertRaises(ConnectorRegistryError):
             definition("entrypoint.from.cwd")
+        with self.assertRaisesRegex(ConnectorRegistryError, "duplicate_connector_id"):
+            _index((REGISTRY[0], REGISTRY[0]))
         with self.assertRaises((AttributeError, TypeError)):
             REGISTRY[0].mode = "write"
+        value = REGISTRY[0].to_public()
+        value["schema_version"] = True
+        with self.assertRaises(ConnectorRegistryError):
+            ConnectorDefinition.from_mapping(value)
 
     def test_policy_is_registry_driven_and_deletion_is_always_explicit(self):
         validate_policy("recall.capture", visibility="shared", privacy_mode="off", authorities={"brain"})
@@ -117,6 +124,13 @@ class RegistryPreviewAndStatusTest(unittest.TestCase):
             self.assertNotIn("private-cursor", rendered)
             self.assertNotIn(str(spool), rendered)
             self.assertFalse(set(value) & {"cursor", "source_id", "path", "credential", "report", "content"})
+            self.assertEqual(value["authority_present"], {"brain": True, "source": True})
+
+            connection = sqlite3.connect(spool)
+            connection.execute("UPDATE meta SET value='private_secret_code' WHERE key='last_error_code'")
+            connection.commit(); connection.close()
+            with self.assertRaisesRegex(ConnectorRegistryError, "local_state_invalid"):
+                aggregate_status("grep.ai", True, "drop", {"brain", "source"}, spool)
 
     def test_status_distinguishes_disabled_missing_state_authority_and_ready(self):
         disabled = aggregate_status("grep.ai", False, "drop", set(), None)
@@ -127,6 +141,15 @@ class RegistryPreviewAndStatusTest(unittest.TestCase):
         self.assertEqual(missing_authority["health"], "reference_missing")
         self.assertEqual(missing_state["health"], "local_state_unavailable")
         self.assertEqual(capture["health"], "ready")
+
+    def test_status_cli_rejects_duplicate_authority_flags(self):
+        arguments = [
+            "recall-brain", "connector-registry-status",
+            "--connector-id", "grep.ai", "--enabled", "--privacy-mode", "drop",
+            "--authority", "brain", "--authority", "brain",
+        ]
+        with mock.patch("sys.argv", arguments), self.assertRaisesRegex(SystemExit, "duplicate_authority_slots"):
+            client_cli.main()
 
 
 if __name__ == "__main__":

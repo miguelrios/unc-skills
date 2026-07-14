@@ -26,6 +26,7 @@ RUNTIME_ERROR_CODES = {
     "grep_ai_conflict", "grep_ai_forbidden", "grep_ai_idempotency_key_in_flight",
     "grep_ai_idempotency_key_reuse_mismatch", "grep_ai_idempotency_key_ttl_expired",
     "grep_ai_insufficient_credits", "grep_ai_internal_error", "grep_ai_invalid_error",
+    "grep_ai_invalid_request", "grep_ai_invalid_transport",
     "grep_ai_job_not_found", "grep_ai_rate_limited", "grep_ai_redirect_rejected",
     "grep_ai_resource_not_found", "grep_ai_unauthenticated", "grep_ai_unknown_error",
     "grep_ai_unavailable", "grep_ai_upstream_unavailable", "grep_ai_validation_error",
@@ -64,13 +65,13 @@ class ConnectorDefinition:
     deletion: str
 
     def __post_init__(self) -> None:
-        if self.schema_version != 1:
+        if not isinstance(self.schema_version, int) or isinstance(self.schema_version, bool) or self.schema_version != 1:
             raise ConnectorRegistryError("invalid_schema_version")
         if not isinstance(self.connector_id, str) or not IDENTITY.fullmatch(self.connector_id):
             raise ConnectorRegistryError("invalid_connector_id")
         if not isinstance(self.command, str) or not COMMAND.fullmatch(self.command):
             raise ConnectorRegistryError("invalid_command")
-        if self.mode not in MODES:
+        if not isinstance(self.mode, str) or self.mode not in MODES:
             raise ConnectorRegistryError("invalid_mode")
         for value, label, allowed in (
             (self.authority_slots, "authority_slots", AUTHORITIES),
@@ -81,9 +82,9 @@ class ConnectorDefinition:
             object.__setattr__(self, label, normalized)
         if "brain" not in self.authority_slots:
             raise ConnectorRegistryError("brain_authority_required")
-        if self.checkpoint not in CHECKPOINTS:
+        if not isinstance(self.checkpoint, str) or self.checkpoint not in CHECKPOINTS:
             raise ConnectorRegistryError("invalid_checkpoint")
-        if self.deletion not in DELETIONS:
+        if not isinstance(self.deletion, str) or self.deletion not in DELETIONS:
             raise ConnectorRegistryError("invalid_deletion")
         if self.mode == "push" and self.checkpoint != "none":
             raise ConnectorRegistryError("invalid_push_checkpoint")
@@ -128,7 +129,14 @@ REGISTRY = (
         "checkpoint": "ack_cursor", "deletion": "explicit_receipt",
     }),
 )
-_BY_ID = {item.connector_id: item for item in REGISTRY}
+def _index(items: tuple[ConnectorDefinition, ...]) -> dict[str, ConnectorDefinition]:
+    result = {item.connector_id: item for item in items}
+    if len(result) != len(items):
+        raise ConnectorRegistryError("duplicate_connector_id")
+    return result
+
+
+_BY_ID = _index(REGISTRY)
 
 
 def definition(connector_id: str) -> ConnectorDefinition:
@@ -180,6 +188,9 @@ def _base_status(item: ConnectorDefinition, enabled: bool, privacy_mode: str,
         "connector_id": item.connector_id,
         "enabled": enabled,
         "configured": configured,
+        "authority_present": {
+            slot: slot in authorities for slot in item.authority_slots
+        },
         "mode": item.mode,
         "privacy_mode": privacy_mode,
         "privacy_policy_version": PrivacyPolicy(mode=privacy_mode).apply({}).policy_version,
