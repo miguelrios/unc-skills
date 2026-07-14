@@ -258,9 +258,22 @@ def private_output_path(path_value: str, *, label: str) -> Path:
     return resolved
 
 
+def session_target(value: str, *, allow_remote_receipt: bool = True) -> str:
+    """Preserve central Recall receipts; normalize only native filesystem paths."""
+    raw = str(value)
+    safe, redactions = sanitize(raw)
+    if redactions or safe != raw:
+        raise RecapError("session target contains credential-shaped material")
+    if raw.startswith("recall://"):
+        if not allow_remote_receipt:
+            raise RecapError("remote Recall receipts do not expose the native relationship graph")
+        return raw
+    return str(Path(raw).expanduser().resolve())
+
+
 def collect(args: argparse.Namespace) -> dict[str, Any]:
     recall_path = find_recall_script(args.recall_script)
-    session_target = None if args.current else str(Path(args.session).expanduser().resolve())
+    normalized_target = None if args.current else session_target(args.session)
     output_path = private_output_path(args.output, label="manifest output")
     builder = LedgerBuilder(output_path)
     session = None
@@ -270,7 +283,7 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
     last_page_receipt = None
     final_page = None
     try:
-        for page in recall_session_pages(recall_path, current=args.current, session=session_target):
+        for page in recall_session_pages(recall_path, current=args.current, session=normalized_target):
             page_count += 1
             page_receipt = page["page"].get("page_receipt")
             page_receipt_chain.update(
@@ -355,7 +368,7 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
         chunked_events(Path(ledger["events"]["path"])), metadata, explicit_repositories,
     ))
     safe_metadata, metadata_redactions = sanitize_structure(metadata)
-    safe_target, target_redactions = sanitize(str(session_target or ""))
+    safe_target, target_redactions = sanitize(str(normalized_target or ""))
     safe_recall_path, recall_path_redactions = sanitize(str(recall_path))
     redaction_count = (
         ledger["redacted_lines"] + git_redactions + metadata_redactions
@@ -599,9 +612,11 @@ def command_collect_set(args: argparse.Namespace) -> int:
         raise RecapError("collect-set requires --include-children, --chain, or both")
     started = time.monotonic()
     recall_path = find_recall_script(args.recall_script)
-    session_target = None if args.current else str(Path(args.session).expanduser().resolve())
+    normalized_target = (
+        None if args.current else session_target(args.session, allow_remote_receipt=False)
+    )
     graph = recall_session_relations(
-        recall_path, current=args.current, session=session_target,
+        recall_path, current=args.current, session=normalized_target,
         include_children=args.include_children, chain=args.chain,
     )
     output = private_output_path(args.output, label="boundary-set output")

@@ -14,6 +14,9 @@ synthesizer. The wrapper collects and validates evidence; it never calls a model
 - With no target, recap the exact current native session. `CODEX_THREAD_ID` is authoritative for
   Codex. An exact Claude session ID is authoritative when the harness exposes one.
 - For a prior session, first use `$recall` to find it, then pass its exact path or stable receipt.
+- Match the requested harness and time boundary. If the user asks for a prior Claude session, do
+  not substitute `--current` or a Codex result: search Recall with `--harness claude` plus the
+  relevant cwd/branch, then pass the winning exact path or receipt. Fail if no candidate matches.
 - Keep resumed sessions, subagents, and continuations separate by default. Include them only when
   the user asks, and label every boundary independently.
 - If identity is ambiguous, stop with the candidates. Never choose the nearest transcript by time.

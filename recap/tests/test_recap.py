@@ -67,6 +67,17 @@ class RecapCollectorTest(unittest.TestCase):
             repo=str(repo) if repo else None, recall_script=str(RECALL),
         )
 
+    def test_session_target_preserves_remote_receipts_and_normalizes_paths(self):
+        receipt = "recall://claude:mac:test/session-event?rev=1#item-0"
+        self.assertEqual(self.recap.session_target(receipt), receipt)
+        self.assertTrue(Path(self.recap.session_target("relative.jsonl")).is_absolute())
+        with self.assertRaisesRegex(self.recap.RecapError, "native relationship graph"):
+            self.recap.session_target(receipt, allow_remote_receipt=False)
+
+    def test_session_target_rejects_credential_shaped_material(self):
+        with self.assertRaisesRegex(self.recap.RecapError, "credential-shaped"):
+            self.recap.session_target("recall://source/event?token=sk-" + "A" * 32)
+
     def test_collect_is_ordered_redacted_and_structurally_honest(self):
         with tempfile.TemporaryDirectory() as temporary:
             session = Path(temporary) / "session.jsonl"

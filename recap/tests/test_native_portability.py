@@ -119,6 +119,7 @@ class NativePortabilityTest(unittest.TestCase):
         skill = (PACKAGE / "skills/recap/SKILL.md").read_text()
         readme = (PACKAGE / "README.md").read_text()
         self.assertIn("remote-only Recall", skill)
+        self.assertIn("not substitute `--current` or a Codex result", skill)
         self.assertIn("not currently expose this graph", skill)
         self.assertIn("pi can run the skill", readme)
         self.assertIn("against those sessions", readme)

@@ -953,7 +953,29 @@ def session_evidence_id(source_id: str, session_id: str, event_native_id: str,
 def resolve_current_session() -> Path:
     claude, codex, _ = paths()
     thread_id = os.environ.get("CODEX_THREAD_ID")
-    claude_id = os.environ.get("CLAUDE_SESSION_ID")
+    claude_ids = {
+        value for value in (
+            os.environ.get("CLAUDE_SESSION_ID"),
+            os.environ.get("CLAUDE_CODE_SESSION_ID"),
+        ) if value
+    }
+    if len(claude_ids) > 1:
+        raise ValueError("current Claude identity is ambiguous; pass --target explicitly")
+    claude_id = next(iter(claude_ids), None)
+    claude_active = (
+        os.environ.get("CLAUDECODE") == "1"
+        or bool(os.environ.get("CLAUDE_CODE_ENTRYPOINT"))
+    )
+    if claude_active:
+        if not claude_id:
+            raise ValueError(
+                "current Claude identity unavailable; inherited Codex identity was ignored; "
+                "pass --target explicitly"
+            )
+        matches = [path for path in claude.rglob(f"*{claude_id}*.jsonl") if path.is_file()]
+        if len(matches) != 1:
+            raise ValueError(f"current Claude identity resolved to {len(matches)} sessions")
+        return matches[0].resolve()
     if thread_id and claude_id:
         raise ValueError("current harness identity is ambiguous; pass --target explicitly")
     if thread_id:
