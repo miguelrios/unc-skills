@@ -28,6 +28,22 @@ MANIFEST = ROOT / "manifest.json"
 
 
 class FrozenHostConfigTest(unittest.TestCase):
+    def test_https_endpoint_accepts_explicit_tailnet_port_and_rejects_bad_ports(self) -> None:
+        value = json.loads(CORPUS.read_text().splitlines()[0])["config"]
+        value["jobs"][0]["endpoint"] = "https://brain.example.test:9443"
+        configured = ConnectorHostConfig.from_mapping(value)
+        self.assertEqual(configured.jobs[0].endpoint, "https://brain.example.test:9443")
+
+        for endpoint in (
+            "https://brain.example.test:0",
+            "https://brain.example.test:65536",
+            "https://brain.example.test:not-a-port",
+        ):
+            with self.subTest(endpoint=endpoint):
+                value["jobs"][0]["endpoint"] = endpoint
+                with self.assertRaisesRegex(ConnectorHostError, "invalid_endpoint"):
+                    ConnectorHostConfig.from_mapping(value)
+
     def test_manifest_and_closed_config_thresholds(self) -> None:
         manifest = json.loads(MANIFEST.read_text())
         rows = [json.loads(line) for line in CORPUS.read_text().splitlines()]
