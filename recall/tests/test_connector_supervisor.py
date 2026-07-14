@@ -191,6 +191,34 @@ class SupervisorSchedulingTest(unittest.TestCase):
         self.assertEqual((result["ran"], result["outcomes"]), (2, {"success": 1, "transient": 1}))
         self.assertNotIn("secret payload canary", self.path.read_bytes().decode(errors="ignore"))
 
+    def test_lease_overrun_is_fenced_and_does_not_block_the_next_job(self) -> None:
+        moments = iter((0, 25, 25, 25))
+        calls: list[str] = []
+        jobs = (
+            ScheduledJob(schedule(KEY_A, lease_seconds=20),
+                         lambda: calls.append("a") or {"status": "committed"}),
+            ScheduledJob(schedule(KEY_B, connector_id="openai.export-inbox"),
+                         lambda: calls.append("b") or {"status": "committed"}),
+        )
+        result = self.supervisor.tick(jobs, now=0, clock=lambda: next(moments))
+        self.assertEqual(calls, ["a", "b"])
+        self.assertEqual(result["outcomes"], {"success": 1})
+        self.assertEqual(result["lost_leases"], 1)
+        self.assertEqual(self.store.snapshot(KEY_A)["state"], "leased")
+        self.assertEqual(self.store.snapshot(KEY_B)["last_outcome"], "success")
+
+    def test_absent_job_is_retired_without_leaving_a_due_busy_loop(self) -> None:
+        jobs = (
+            ScheduledJob(schedule(KEY_A), lambda: {"status": "committed"}),
+            ScheduledJob(schedule(KEY_B, connector_id="openai.export-inbox"), lambda: {"status": "committed"}),
+        )
+        self.supervisor.tick(jobs, now=0)
+        only_a = (ScheduledJob(schedule(KEY_A), lambda: {"status": "committed"}),)
+        self.supervisor.tick(only_a, now=100)
+        retired = self.store.snapshot(KEY_B)
+        self.assertEqual((retired["enabled"], retired["state"], retired["due_at"]), (0, "disabled", None))
+        self.assertGreater(self.store.next_wait(now=100, maximum=30), 0)
+
     def test_contract_failure_parks_and_explicit_wake_unparks(self) -> None:
         job = ScheduledJob(schedule(), lambda: (_ for _ in ()).throw(ConnectorContractError("private cursor")))
         self.assertEqual(self.supervisor.tick((job,), now=0)["outcomes"], {"contract": 1})

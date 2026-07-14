@@ -390,6 +390,35 @@ class SupervisorStore:
             self.db.rollback()
             raise
 
+    def retire_absent(self, job_keys: set[str], *, now: int | float) -> None:
+        """Disable configured-set removals without cancelling a live lease."""
+        now = _finite_time(now)
+        if not isinstance(job_keys, set) or any(
+            not isinstance(key, str) or not JOB_KEY.fullmatch(key) for key in job_keys
+        ):
+            raise SupervisorContractError("invalid_job_keys")
+        self._begin()
+        try:
+            rows = self.db.execute(
+                "SELECT job_key,state,lease_until FROM supervisor_jobs WHERE enabled=1"
+            ).fetchall()
+            for row in rows:
+                if row["job_key"] in job_keys:
+                    continue
+                active = (row["state"] == "leased" and row["lease_until"] is not None
+                          and row["lease_until"] > now)
+                if active:
+                    continue
+                self.db.execute("""
+                    UPDATE supervisor_jobs SET enabled=0,state='disabled',due_at=NULL,
+                      lease_until=NULL,lease_token=NULL,failures=0,last_outcome='disabled',
+                      updated_at=? WHERE job_key=?
+                """, (now, row["job_key"]))
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
+
     def next_wait(self, *, now: int | float, maximum: int | float) -> float:
         now = _finite_time(now)
         maximum = _finite_positive(maximum, "max_wait_seconds")
@@ -474,16 +503,20 @@ class ConnectorSupervisor:
         value = self.jitter(item.job_key, failures, item.jitter_seconds)
         return _integer(value, "jitter", 0, item.jitter_seconds)
 
-    def tick(self, jobs: tuple[ScheduledJob, ...] | list[ScheduledJob], *, now: int | float) -> dict[str, Any]:
+    def tick(self, jobs: tuple[ScheduledJob, ...] | list[ScheduledJob], *, now: int | float,
+             clock: Callable[[], int | float] | None = None) -> dict[str, Any]:
         now = _finite_time(now)
         values = self._jobs(jobs)
         for job in values:
             self.store.reconcile(job.definition, now=now)
+        self.store.retire_absent({job.definition.job_key for job in values}, now=now)
         outcomes: dict[str, int] = {}
         ran = 0
+        lost_leases = 0
         for job in values:
             item = job.definition
-            token = self.store.acquire(item, now=now)
+            acquired_at = _finite_time(clock()) if clock is not None else now
+            token = self.store.acquire(item, now=acquired_at)
             if token is None:
                 continue
             ran += 1
@@ -493,11 +526,21 @@ class ConnectorSupervisor:
                 outcome, retry_after = _classify_error(error), None
             state = self.store.snapshot(item.job_key)
             jitter = self._jitter(item, int(state["failures"]) + int(outcome != "success"))
-            self.store.complete(item, token, now=now, outcome=outcome,
-                                retry_after=retry_after, jitter=jitter)
+            completed_at = _finite_time(clock()) if clock is not None else now
+            try:
+                self.store.complete(item, token, now=completed_at, outcome=outcome,
+                                    retry_after=retry_after, jitter=jitter)
+            except SupervisorContractError as error:
+                if str(error) != "lease_lost":
+                    raise
+                lost_leases += 1
+                continue
             outcomes[outcome] = outcomes.get(outcome, 0) + 1
-        return {"schema_version": 1, "configured": len(values), "ran": ran,
-                "outcomes": dict(sorted(outcomes.items()))}
+        result = {"schema_version": 1, "configured": len(values), "ran": ran,
+                  "outcomes": dict(sorted(outcomes.items()))}
+        if lost_leases:
+            result["lost_leases"] = lost_leases
+        return result
 
     def wake(self, jobs: tuple[ScheduledJob, ...] | list[ScheduledJob], *, now: int | float) -> None:
         now = _finite_time(now)
@@ -515,8 +558,9 @@ class ConnectorSupervisor:
         cycles = 0
         while not stop_event.is_set() and (max_cycles is None or cycles < max_cycles):
             now = _finite_time(clock())
-            self.tick(values, now=now)
-            timeout = self.store.next_wait(now=now, maximum=maximum)
+            self.tick(values, now=now, clock=clock)
+            after = _finite_time(clock())
+            timeout = self.store.next_wait(now=after, maximum=maximum)
             awakened = bool(wake_event.wait(timeout))
             cycles += 1
             if awakened:
