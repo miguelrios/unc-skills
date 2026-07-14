@@ -37,6 +37,22 @@ Searches have a 300ms database-work budget by default. Override it only within t
 10–2000ms range with `RECALL_SEARCH_DEADLINE_MS`; the response and service log expose only
 content-free per-leg timings, result counts, and the deadline outcome.
 
+Federated ranking uses explicit host-owned source profiles. Ingest envelopes and model tools
+cannot set family, quality, or freshness policy. After a source has ingested at least one event,
+an operator may configure it through the database-local admin CLI:
+
+```bash
+RECALL_DATABASE_URL=... python -m recall_server.cli source-profile-set SOURCE_ID \
+  --family coding_history --quality trusted --freshness-half-life-days 180
+RECALL_DATABASE_URL=... python -m recall_server.cli federation-scoreboard
+```
+
+Families and quality levels are closed enums. Search results add a content-free source profile
+receipt plus bounded lexical, freshness, quality, and cross-family corroboration components.
+The scoreboard reports aggregates only: it never returns source IDs, query text, or item text.
+Unprofiled sources remain explicitly `unclassified`/`unrated`; the server never guesses a profile
+from source-name patterns.
+
 After applying schema 005 to an existing brain, backfill the rebuildable entity projection
 online. The command commits bounded batches, holds a dedicated advisory lock, resumes from its
 watermark after interruption, and does not rewrite canonical events or items:

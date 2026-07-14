@@ -45,6 +45,8 @@ def content_sha256(envelope: dict) -> str:
 
 
 def validate_envelope(envelope: dict) -> dict:
+    if set(envelope) & {"source_profile", "source_family", "source_quality", "quality"}:
+        raise ValueError("source profile is host-controlled")
     required = (
         "schema_version", "source_id", "native_id", "kind", "occurred_at",
         "observed_at", "principal_id", "visibility", "content_type", "content",

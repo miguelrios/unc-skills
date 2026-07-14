@@ -1,0 +1,5 @@
+{"family": "coding_history", "freshness_half_life_days": 180, "quality": "trusted", "source_id": "synthetic:coding:trusted-current"}
+{"family": "coding_history", "freshness_half_life_days": 180, "quality": "trusted", "source_id": "synthetic:coding:trusted-stale"}
+{"family": "deliberate_capture", "freshness_half_life_days": 365, "quality": "authoritative", "source_id": "synthetic:capture:authoritative"}
+{"family": "user_export", "freshness_half_life_days": 90, "quality": "standard", "source_id": "synthetic:export:standard"}
+{"family": "third_party_research", "freshness_half_life_days": 365, "quality": "unrated", "source_id": "synthetic:research:unrated"}
