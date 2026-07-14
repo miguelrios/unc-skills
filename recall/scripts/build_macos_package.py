@@ -159,6 +159,7 @@ def application_payloads(source_root: Path, runtime_lock_data: bytes) -> dict[st
         source_root / "connectors" / "export_inbox.py": "lib/connectors/export_inbox.py",
         source_root / "connectors" / "grep_ai.py": "lib/connectors/grep_ai.py",
         source_root / "connectors" / "registry.py": "lib/connectors/registry.py",
+        source_root / "connectors" / "supervisor.py": "lib/connectors/supervisor.py",
         source_root / "connectors" / "__init__.py": "lib/connectors/__init__.py",
         source_root / "privacy" / "policy.py": "lib/privacy/policy.py",
         source_root / "privacy" / "__init__.py": "lib/privacy/__init__.py",

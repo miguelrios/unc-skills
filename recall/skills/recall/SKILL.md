@@ -64,6 +64,13 @@ capture, export inbox, and Grep AI trust boundaries. Use
 to inspect only bounded health/count/checkpoint facts. Neither command reads
 credential values or source content, and status never syncs or repairs state.
 
+Use `connector-supervisor-preview` to inspect the static cadence/lease/backoff
+contract and `connector-supervisor-status --state <private-db>` for aggregate
+ready/due/leased/parked/outcome counts. Status is immutable and never renders a
+job key, connector/source identity, path, cursor, command, credential, exception,
+or content. The supervisor schedules only explicitly constructed registered pull
+connectors; it does not discover plugins or own connector configuration.
+
 When the packaged Brain client is available, offer its opt-in pre-ingest privacy
 policy for transcript/export/memory writes: `off` preserves compatibility,
 `scrub` retains safe context, and `drop` omits the classified record before spool
