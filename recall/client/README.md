@@ -54,6 +54,14 @@ client and its spool with:
 ./uninstall.sh
 ```
 
+To continuously ingest only files deliberately copied into a flat export inbox,
+add `--export-inbox "$HOME/Recall Inbox"`. The installer creates a separate
+private LaunchAgent and uses Keychain account `chatgpt-export:mac:<host-id>`.
+This does not inspect the ChatGPT app, Cowork, Downloads, or browser storage.
+Re-run with `--disable-export-inbox` to unload only that LaunchAgent while
+preserving its content-free catalog/spool for recovery; full uninstall removes
+all Recall client state but never deletes the user-owned inbox.
+
 ## Supported exports and explicit memory
 
 Only files supplied on the command line are considered. JSON, JSONL, and ZIP

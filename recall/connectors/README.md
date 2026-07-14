@@ -48,3 +48,25 @@ External source credentials stay inside the connector. The Brain credential is
 source-scoped and stays inside its Brain client. Revoking either side leaves the
 pending page and cursor recoverable. Deletion records set `deleted: true`; their
 tombstones bypass contextual privacy-judge availability.
+
+## Explicit ChatGPT/Cowork export inbox
+
+`ExportInboxConnector` is the bundled, network-free adapter for user-supplied
+OpenAI-style `conversations.json`, JSONL, and ZIP exports. It never discovers
+Downloads, Desktop, application support, browser state, or private databases.
+The selected directory is flat: nested roots, symlinks, hard links, archive
+traversal, and malformed records fail closed.
+
+The catalog stores only hashes, stable native IDs, timestamps, and content-free
+provenance. Message bodies cross the shared privacy boundary before the durable
+runner spool or Brain network. Removing a file from the inbox does not delete
+central history. List its opaque export ID and explicitly queue removal instead:
+
+```bash
+recall-brain export-inbox-dry-run --inbox "$HOME/Recall Inbox" --catalog "$STATE/catalog.db"
+recall-brain export-inbox-list --inbox "$HOME/Recall Inbox" --catalog "$STATE/catalog.db"
+recall-brain export-inbox-remove --inbox "$HOME/Recall Inbox" --catalog "$STATE/catalog.db" exp_...
+```
+
+The next scheduled `export-inbox-sync` ACKs reference-safe tombstones. If another
+active export still owns the same upstream message, that message remains live.

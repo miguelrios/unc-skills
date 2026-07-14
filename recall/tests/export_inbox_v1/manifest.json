@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "sha256": {
+    "conversations.json": "4f9499c5c63eeec2ec66bfd9ddd22860d45c6af13d0320cddf445fde5bdc409c",
+    "cowork.jsonl": "d0ef5b4fcc9f4622805a9603a6d594848c8276ee4195ccefbd1fdb51241a54ff"
+  },
+  "expected": {
+    "attachments": 1,
+    "branches": 1,
+    "conversations": 2,
+    "messages": 6,
+    "privacy_canaries": 2
+  }
+}

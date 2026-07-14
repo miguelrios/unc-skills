@@ -16,6 +16,8 @@ from client.mac import (
     store_keychain_token,
 )
 from collector.collector import Collector
+from connectors.export_inbox import ExportInboxConnector
+from connectors.sdk import ConnectorRunner
 from privacy.policy import AgenticJudge, PrivacyPolicy, load_scoped_virtual_key
 
 
@@ -46,6 +48,11 @@ def _privacy(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--privacy-judge-key-file", default=os.environ.get("RECALL_PRIVACY_JUDGE_KEY_FILE"))
     parser.add_argument("--privacy-judge-model", default=os.environ.get("RECALL_PRIVACY_JUDGE_MODEL"))
     parser.add_argument("--privacy-judge-failure", choices=("drop", "ignore"), default="drop")
+
+
+def _export_inbox(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--inbox", required=True)
+    parser.add_argument("--catalog", required=True)
 
 
 def _privacy_policy(args) -> PrivacyPolicy:
@@ -94,6 +101,23 @@ def parser() -> argparse.ArgumentParser:
     preview = commands.add_parser("privacy-preview")
     _privacy(preview)
 
+    inbox_dry = commands.add_parser("export-inbox-dry-run")
+    _export_inbox(inbox_dry)
+    inbox_dry.add_argument("--privacy-mode", choices=("off", "scrub", "drop"), default=os.environ.get("RECALL_PRIVACY_MODE", "off"))
+
+    inbox_list = commands.add_parser("export-inbox-list")
+    _export_inbox(inbox_list)
+
+    inbox_remove = commands.add_parser("export-inbox-remove")
+    _export_inbox(inbox_remove)
+    inbox_remove.add_argument("export_id")
+
+    inbox_sync = commands.add_parser("export-inbox-sync")
+    _connection(inbox_sync)
+    _privacy(inbox_sync)
+    _export_inbox(inbox_sync)
+    inbox_sync.add_argument("--spool", required=True)
+
     delete = commands.add_parser("delete")
     _connection(delete)
     delete.add_argument("receipt")
@@ -134,6 +158,23 @@ def main() -> None:
             value = raw
         print(json.dumps(_privacy_policy(args).apply(value).receipt(), sort_keys=True))
         return
+    if args.command in {"export-inbox-dry-run", "export-inbox-list", "export-inbox-remove"}:
+        connector = ExportInboxConnector(
+            inbox=Path(args.inbox), catalog_path=Path(args.catalog),
+            source_id="chatgpt:export:local",
+            privacy_mode=getattr(args, "privacy_mode", "off"),
+        )
+        try:
+            if args.command == "export-inbox-dry-run":
+                result = connector.dry_run()
+            elif args.command == "export-inbox-list":
+                result = {"schema_version": 1, "exports": connector.exports()}
+            else:
+                result = connector.queue_remove(args.export_id)
+        finally:
+            connector.close()
+        print(json.dumps(result, sort_keys=True))
+        return
 
     if args.keychain_service and not args.keychain_account:
         raise SystemExit("--keychain-account is required with --keychain-service")
@@ -145,7 +186,7 @@ def main() -> None:
         "principal_id": args.principal_id,
         "visibility": args.visibility,
     }
-    privacy = _privacy_policy(args) if args.command in {"collect", "export", "put"} else PrivacyPolicy(mode="off")
+    privacy = _privacy_policy(args) if args.command in {"collect", "export", "put", "export-inbox-sync"} else PrivacyPolicy(mode="off")
     if args.command == "collect":
         collector = Collector(
             root=Path(args.root), harness=args.harness, source_id=args.source_id,
@@ -164,6 +205,26 @@ def main() -> None:
             result = {**inventory, "records": len(inventory["records"])}
         else:
             result = importer.import_with(BrainClient(**common, privacy=privacy), [Path(value) for value in args.inputs])
+    elif args.command == "export-inbox-sync":
+        if args.visibility != "private":
+            raise SystemExit("export inbox visibility must be private")
+        connector = ExportInboxConnector(
+            inbox=Path(args.inbox), catalog_path=Path(args.catalog),
+            source_id=args.source_id, privacy_mode=args.privacy_mode,
+        )
+        runner = ConnectorRunner(
+            connector=connector, brain=BrainClient(**common),
+            spool_path=Path(args.spool), privacy=privacy,
+        )
+        try:
+            result = {
+                "sync": runner.run_once(),
+                "doctor": runner.doctor(),
+                "exports": len(connector.exports()),
+            }
+        finally:
+            runner.close()
+            connector.close()
     elif args.command == "put":
         text = args.text if args.text is not None else sys.stdin.read()
         result = MemoryClient(**common, privacy=privacy).put(text, provenance={"uri": args.provenance_uri})

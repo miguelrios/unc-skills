@@ -158,17 +158,31 @@ class MacPackageTest(unittest.TestCase):
         packaged_paths = {entry["path"] for entry in manifest["files"]}
         self.assertIn("lib/connectors/sdk.py", packaged_paths)
         self.assertIn("lib/connectors/__init__.py", packaged_paths)
+        self.assertIn("lib/connectors/export_inbox.py", packaged_paths)
 
         wrapper = (package / "bin" / "recall-brain").read_text()
         self.assertIn('exec "$HERE/runtime/bin/python3" -m client.cli', wrapper)
         self.assertNotIn("exec python3", wrapper)
         installer = (package / "install.sh").read_text()
+        subprocess.run(["sh", "-n", str(package / "install.sh")], check=True)
+        subprocess.run(["sh", "-n", str(package / "uninstall.sh")], check=True)
         self.assertIn('$PREFIX/runtime/bin/python3', installer)
         self.assertNotRegex(installer, r"(?m)(?:^|[ ;])python3(?:[ ;]|$)")
         self.assertIn('RUNTIME_LOCK.json', installer)
         self.assertIn('ssl.get_default_verify_paths()', installer)
         self.assertIn('get_ca_certs()', installer)
         self.assertIn('cp -R "$SOURCE/lib/connectors"', installer)
+        self.assertIn('"client.cli", "export-inbox-sync"', installer)
+        self.assertIn('--export-inbox', installer)
+        self.assertIn('--disable-export-inbox', installer)
+        invalid = subprocess.run([
+            "sh", str(package / "install.sh"),
+            "--endpoint", "https://example.invalid", "--host-id", "test",
+            "--keychain-service", "synthetic", "--visibility", "private",
+            "--export-inbox", str(self.root), "--disable-export-inbox", "--no-load",
+        ], text=True, capture_output=True)
+        self.assertEqual(invalid.returncode, 2)
+        self.assertIn("mutually exclusive", invalid.stderr)
 
         home = self.root / "home"
         home.mkdir()
