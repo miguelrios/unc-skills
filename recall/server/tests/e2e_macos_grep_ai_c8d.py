@@ -102,7 +102,7 @@ def main() -> None:
         install = subprocess.run([
             str(args.bundle_root / "install.sh"),
             "--prefix", str(prefix), "--launch-agents", str(launch_agents),
-            "--endpoint", args.endpoint, "--host-id", "miguel-mbpro-c8d",
+            "--endpoint", args.endpoint, "--host-id", "synthetic-c8d-live-host",
             "--keychain-service", "ai.parcha.recall.c8d.ephemeral",
             "--visibility", "private", "--privacy-mode", "scrub",
             "--disable-export-inbox", "--no-load",
