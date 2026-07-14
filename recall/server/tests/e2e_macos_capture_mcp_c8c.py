@@ -4,41 +4,15 @@
 from __future__ import annotations
 
 import argparse
-import ctypes
-import ctypes.util
 import json
+import os
 import shutil
 import subprocess
 import sys
 import urllib.error
 from pathlib import Path
 
-from client.mac import BrainClient, load_keychain_token, store_keychain_token
-
-
-ITEM_NOT_FOUND = -25300
-
-
-def delete_keychain_token(service: str, account: str) -> int:
-    security = ctypes.CDLL(ctypes.util.find_library("Security"))
-    security.SecKeychainFindGenericPassword.restype = ctypes.c_int32
-    security.SecKeychainItemDelete.restype = ctypes.c_int32
-    service_bytes = service.encode()
-    account_bytes = account.encode()
-    item = ctypes.c_void_p()
-    status = security.SecKeychainFindGenericPassword(
-        None, len(service_bytes), ctypes.c_char_p(service_bytes),
-        len(account_bytes), ctypes.c_char_p(account_bytes),
-        None, None, ctypes.byref(item),
-    )
-    if status == 0:
-        try:
-            status = security.SecKeychainItemDelete(item)
-        finally:
-            core = ctypes.CDLL(ctypes.util.find_library("CoreFoundation"))
-            core.CFRelease.argtypes = [ctypes.c_void_p]
-            core.CFRelease(item)
-    return status
+from client.mac import BrainClient
 
 
 def rpc(process: subprocess.Popen, request: dict) -> dict:
@@ -75,7 +49,6 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--endpoint", required=True)
     parser.add_argument("--source-id", required=True)
-    parser.add_argument("--keychain-service", required=True)
     parser.add_argument("--nonce", required=True)
     parser.add_argument("--workspace", type=Path, required=True)
     parser.add_argument("--wrapper", type=Path, required=True)
@@ -85,18 +58,21 @@ def main() -> None:
         raise ValueError("stdin must contain one scoped credential")
 
     root = args.workspace / "synthetic-capture-c8c"
+    token_file = root / "scoped-token.json"
     canary = f"c8c-{args.nonce}-secret-canary"
     process = None
     result = None
     try:
         root.mkdir(parents=True)
-        store_keychain_token(args.keychain_service, args.source_id, token)
-        assert load_keychain_token(args.keychain_service, args.source_id) == token
+        descriptor = os.open(token_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w") as output:
+            json.dump({"token": token}, output)
+        assert token_file.stat().st_mode & 0o777 == 0o600
         preview = subprocess.run([
             str(args.wrapper), "mcp-config-preview",
             "--endpoint", args.endpoint, "--source-id", args.source_id,
-            "--visibility", "private", "--keychain-service", args.keychain_service,
-            "--keychain-account", args.source_id, "--privacy-mode", "scrub",
+            "--visibility", "private", "--token-file", str(token_file),
+            "--privacy-mode", "scrub",
         ], check=True, text=True, capture_output=True)
         config = json.loads(preview.stdout)
         assert config["network_requests"] == 0 and config["writes"] == 0
@@ -105,8 +81,8 @@ def main() -> None:
         process = subprocess.Popen([
             str(args.wrapper), "mcp-serve",
             "--endpoint", args.endpoint, "--source-id", args.source_id,
-            "--visibility", "private", "--keychain-service", args.keychain_service,
-            "--keychain-account", args.source_id, "--privacy-mode", "scrub",
+            "--visibility", "private", "--token-file", str(token_file),
+            "--privacy-mode", "scrub",
         ], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         initialized = rpc(process, {
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -188,12 +164,9 @@ def main() -> None:
             stderr = process.stderr.read() if process.stderr else ""
             if result is not None:
                 assert process.returncode == 0 and stderr == ""
-        status = delete_keychain_token(args.keychain_service, args.source_id)
-        if status not in {0, ITEM_NOT_FOUND}:
-            raise RuntimeError(f"Keychain cleanup failed with OSStatus {status}")
         shutil.rmtree(root, ignore_errors=True)
     assert not root.exists() and result is not None
-    result["summary"]["keychain_residue"] = 0
+    result["summary"]["credential_file_residue"] = 0
     result["summary"]["local_residue"] = 0
     print(json.dumps(result, sort_keys=True))
 
