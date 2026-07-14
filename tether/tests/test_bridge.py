@@ -6,6 +6,7 @@ import json
 import os
 import pathlib
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -84,6 +85,27 @@ class StoreTest(unittest.TestCase):
         self.store.requeue_processing()
         self.assertEqual(self.store.claim_next_event(bridge.bridge_id)["text"], "resume me")
 
+    def test_ingress_is_persistent_and_recognizes_legacy_native_events(self):
+        bridge = self.store.bind(self.store.create(self.request()).bridge_id, "123.456")
+        self.assertTrue(self.store.mark_ingress("111.1", bridge.bridge_id))
+        self.assertTrue(self.store.has_ingress("111.1"))
+        self.assertFalse(self.store.mark_ingress("111.1", bridge.bridge_id))
+        self.assertTrue(self.store.enqueue_event("111.2", bridge.bridge_id, "legacy event"))
+        self.assertTrue(self.store.has_ingress("111.2"))
+
+    def test_recent_active_bridges_include_native_and_headless_sources(self):
+        native_request = self.request("native")
+        native_request["source_kind"] = "claude_session"
+        native_request["source"] = {"session_id": "claude-1", "cwd": "/tmp/project"}
+        native = self.store.bind(self.store.create(native_request).bridge_id, "123.456")
+        headless_request = self.request("headless")
+        headless_request["source_kind"] = "headless_run"
+        headless = self.store.bind(self.store.create(headless_request).bridge_id, "456.789")
+        self.assertEqual(
+            {bridge.bridge_id for bridge in self.store.recent_active_bridges()},
+            {native.bridge_id, headless.bridge_id},
+        )
+
     def test_stored_errors_are_truncated(self):
         bridge = self.store.create(self.request())
         self.store.claim_event("111.1", bridge.bridge_id)
@@ -122,6 +144,13 @@ class StoreTest(unittest.TestCase):
             server.server_close()
             socket_path.unlink(missing_ok=True)
 
+    def test_store_connections_close_after_each_transaction(self):
+        context = self.store.connect()
+        with context as db:
+            self.assertEqual(db.execute("SELECT 1").fetchone()[0], 1)
+        with self.assertRaises(sqlite3.ProgrammingError):
+            db.execute("SELECT 1")
+
     def test_broker_reuses_hermes_channel_and_allowlist_without_copying_ids(self):
         broker = self.runtime.Broker("test-token", self.store)
         request = {
@@ -132,14 +161,78 @@ class StoreTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {
             "SLACK_HOME_CHANNEL": "C12345678",
             "SLACK_ALLOWED_USERS": "U12345678,U87654321",
-        }, clear=False), mock.patch.object(self.runtime, "slack_post", return_value="123.456"):
+        }, clear=False), mock.patch.object(
+            broker, "_ensure_channel_membership"
+        ), mock.patch.object(self.runtime, "slack_post", return_value="123.456"):
             result = broker.handle(request)
             status = broker.handle({"op": "status"})
         bridge = self.store.get(result["bridge_id"])
         self.assertEqual(bridge.channel_id, "C12345678")
         self.assertEqual(bridge.owner_user_id, "*", "Hermes's explicit allowlist is shared by default")
         self.assertEqual(status["allowed_user_count"], 2)
+        self.assertEqual(status["implementation"], "tether")
+        self.assertEqual(status["protocol_version"], 2)
         self.assertNotIn("allowed_users", status, "status reports readiness, never identities")
+
+    def test_thread_history_stays_behind_broker_and_returns_sanitized_messages(self):
+        broker = self.runtime.Broker("test-token", self.store)
+        response = {
+            "messages": [{
+                "ts": "123.456", "thread_ts": "100.000", "text": "reply",
+                "user": "U12345678", "blocks": [{"private": "detail"}],
+            }]
+        }
+        with mock.patch.object(self.runtime, "_slack_call", side_effect=[
+            {"ok": True, "channel": {"id": "C12345678"}}, response,
+        ]) as call:
+            result = broker.handle({
+                "op": "thread_history", "channel_id": "C12345678",
+                "thread_ts": "100.000", "limit": 10,
+            })
+        self.assertEqual(result["messages"], [{
+            "ts": "123.456", "thread_ts": "100.000", "text": "reply", "user": "U12345678",
+        }])
+        self.assertEqual(call.call_args_list, [
+            mock.call("test-token", "conversations.join", {"channel": "C12345678"}),
+            mock.call(
+                "test-token", "conversations.replies",
+                {"channel": "C12345678", "ts": "100.000", "limit": 10},
+            ),
+        ])
+
+    def test_public_destination_is_joined_only_once_per_broker(self):
+        broker = self.runtime.Broker("test-token", self.store)
+        with mock.patch.object(self.runtime, "_slack_call", return_value={"ok": True}) as call:
+            broker._ensure_channel_membership("C12345678")
+            broker._ensure_channel_membership("C12345678")
+            broker._ensure_channel_membership("D12345678")
+        call.assert_called_once_with(
+            "test-token", "conversations.join", {"channel": "C12345678"},
+        )
+
+    def test_identity_returns_only_nonsecret_bot_metadata(self):
+        broker = self.runtime.Broker("test-token", self.store)
+        with mock.patch.object(self.runtime, "_slack_call", return_value={
+            "ok": True, "team_id": "T12345678", "user_id": "U12345678",
+            "user": "agent", "url": "https://example.slack.com/",
+        }):
+            result = broker.handle({"op": "identity"})
+        self.assertEqual(result, {
+            "ok": True, "team_id": "T12345678", "user_id": "U12345678", "user": "agent",
+        })
+
+    def test_brokered_thread_post_does_not_create_a_second_bridge(self):
+        broker = self.runtime.Broker("test-token", self.store)
+        with mock.patch.object(broker, "_ensure_channel_membership"), mock.patch.object(
+            self.runtime, "slack_post", return_value="123.457",
+        ) as post:
+            result = broker.handle({
+                "op": "thread_reply", "channel_id": "C12345678",
+                "thread_ts": "123.456", "text": "progress",
+            })
+        post.assert_called_once_with("test-token", "C12345678", "progress", "123.456")
+        self.assertEqual(result["thread_ts"], "123.456")
+        self.assertEqual(self.store.recent_active_bridges(), [])
 
     def test_concurrent_idempotent_notifications_post_one_root_message(self):
         broker = self.runtime.Broker("test-token", self.store)
@@ -157,7 +250,9 @@ class StoreTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {
             "SLACK_HOME_CHANNEL": "C12345678",
             "SLACK_ALLOWED_USERS": "U12345678",
-        }, clear=False), mock.patch.object(self.runtime, "slack_post", return_value="123.456") as post:
+        }, clear=False), mock.patch.object(
+            broker, "_ensure_channel_membership"
+        ), mock.patch.object(self.runtime, "slack_post", return_value="123.456") as post:
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                 results = list(executor.map(lambda _: notify(), range(2)))
 
@@ -317,6 +412,40 @@ class CredentialBoundaryTest(unittest.TestCase):
                 self.runtime.deliver_zellij(bridge, "continue")
         run.assert_not_called()
 
+    def test_native_zellij_delivery_verifies_visible_input_and_live_agent_after_enter(self):
+        bridge = self.runtime.Bridge(
+            "brg_test", "claude_session",
+            {
+                "session_id": "session-1", "zellij_session": "work",
+                "zellij_pane_id": "7", "cwd": "/tmp/project",
+                "pane_agent": "claude", "pane_command_hash": "expected",
+            },
+            "*", "T12345678", "C12345678", "123.456", "key", "active",
+        )
+        text = "review AJ's correction"
+        marker = "tether-" + self.runtime.hashlib.sha256(
+            f"{bridge.bridge_id}\0{text}".encode()
+        ).hexdigest()[:12]
+
+        def run(command, **_kwargs):
+            if "dump-screen" in command:
+                return types.SimpleNamespace(stdout=f"prompt contains {marker}", stderr="", returncode=0)
+            return types.SimpleNamespace(stdout="", stderr="", returncode=0)
+
+        with mock.patch.object(
+            self.runtime, "zellij_pane_identity",
+            return_value={"pane_command_hash": "expected"},
+        ) as identity, mock.patch.object(self.runtime.subprocess, "run", side_effect=run) as invoked, mock.patch.object(
+            self.runtime.time, "sleep"
+        ), mock.patch.object(self.runtime, "_resolve_executable", return_value="/usr/bin/zellij"):
+            self.runtime.deliver_zellij(bridge, text)
+
+        commands = [call.args[0] for call in invoked.call_args_list]
+        self.assertTrue(any("write-chars" in command for command in commands))
+        self.assertTrue(any("send-keys" in command and "Enter" in command for command in commands))
+        self.assertEqual(sum("dump-screen" in command for command in commands), 2)
+        self.assertGreaterEqual(identity.call_count, 2)
+
 
 class NotifierTest(unittest.TestCase):
     def setUp(self):
@@ -355,15 +484,20 @@ class NotifierTest(unittest.TestCase):
 
     def test_native_session_keeps_zellij_metadata(self):
         args = types.SimpleNamespace(run_id=None, hermes_session_id=None)
+        identity = {
+            "session_name": "work", "pane_id": "7", "cwd": str(pathlib.Path.cwd()),
+            "pane_agent": "claude", "pane_command_hash": "abc123",
+        }
         with mock.patch.dict(os.environ, {
             "CLAUDE_CODE_SESSION_ID": "claude-session",
             "ZELLIJ_SESSION_NAME": "work",
             "ZELLIJ_PANE_ID": "7",
-        }, clear=True):
+        }, clear=True), mock.patch.object(self.notifier, "zellij_pane_identity", return_value=identity):
             kind, source = self.notifier.detected_source(args)
         self.assertEqual(kind, "claude_session")
         self.assertEqual(source["zellij_session"], "work")
         self.assertEqual(source["zellij_pane_id"], "7")
+        self.assertEqual(source["pane_command_hash"], "abc123")
 
     def test_zellij_only_source_captures_process_identity(self):
         args = types.SimpleNamespace(run_id=None, hermes_session_id=None)
@@ -383,30 +517,62 @@ class NotifierTest(unittest.TestCase):
     def test_noninteractive_setup_delegates_manifest_to_hermes(self):
         args = types.SimpleNamespace(non_interactive=True, no_restart=False)
         completed = types.SimpleNamespace(returncode=0)
-        with mock.patch.object(self.notifier.shutil, "which", return_value="/usr/bin/hermes"), mock.patch.object(
+        with mock.patch.object(self.notifier, "_find_hermes", return_value="/usr/bin/hermes"), mock.patch.object(
             self.notifier.subprocess, "run", return_value=completed
         ) as run:
             self.assertEqual(self.notifier.run_setup(args), 0)
-        run.assert_called_once_with(
-            ["/usr/bin/hermes", "slack", "manifest", "--write"],
-            timeout=self.notifier.SERVICE_TIMEOUT_SECONDS,
-            text=True,
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [
+                ["/usr/bin/hermes", "plugins", "enable", "tether"],
+                ["/usr/bin/hermes", "config", "set", "slack.allow_bots", "all"],
+                ["/usr/bin/hermes", "config", "set", "display.busy_ack_enabled", "false"],
+                ["/usr/bin/hermes", "slack", "manifest", "--write"],
+            ],
         )
 
     def test_interactive_setup_runs_hermes_onboarding_restart_and_live_doctor(self):
         args = types.SimpleNamespace(non_interactive=False, no_restart=False)
         completed = types.SimpleNamespace(returncode=0)
-        with mock.patch.object(self.notifier.shutil, "which", return_value="/usr/bin/hermes"), mock.patch.object(
+        with mock.patch.object(self.notifier, "_find_hermes", return_value="/usr/bin/hermes"), mock.patch.object(
             self.notifier.subprocess, "run", return_value=completed
         ) as run, mock.patch.object(self.notifier, "doctor", return_value=(True, ["ok live broker"])):
             self.assertEqual(self.notifier.run_setup(args), 0)
         self.assertEqual(
             [call.args[0] for call in run.call_args_list],
-            [["/usr/bin/hermes", "gateway", "setup"], ["/usr/bin/hermes", "gateway", "restart"]],
+            [
+                ["/usr/bin/hermes", "plugins", "enable", "tether"],
+                ["/usr/bin/hermes", "config", "set", "slack.allow_bots", "all"],
+                ["/usr/bin/hermes", "config", "set", "display.busy_ack_enabled", "false"],
+                ["/usr/bin/hermes", "gateway", "setup"],
+                ["/usr/bin/hermes", "gateway", "restart"],
+            ],
         )
         self.assertEqual(
             [call.kwargs["timeout"] for call in run.call_args_list],
-            [self.notifier.SETUP_TIMEOUT_SECONDS, self.notifier.SERVICE_TIMEOUT_SECONDS],
+            [
+                self.notifier.SERVICE_TIMEOUT_SECONDS,
+                self.notifier.SERVICE_TIMEOUT_SECONDS,
+                self.notifier.SERVICE_TIMEOUT_SECONDS,
+                self.notifier.SETUP_TIMEOUT_SECONDS,
+                self.notifier.SERVICE_TIMEOUT_SECONDS,
+            ],
+        )
+
+    def test_setup_disables_detected_legacy_bridge_before_restart(self):
+        legacy = self.home / ".hermes" / "plugins" / "session-bridge"
+        legacy.mkdir(parents=True)
+        with mock.patch.object(self.notifier, "_find_hermes", return_value="/usr/bin/hermes"), mock.patch.object(
+            self.notifier.subprocess, "run", return_value=types.SimpleNamespace(returncode=0)
+        ) as run:
+            result = self.notifier._enable_plugin("/usr/bin/hermes")
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [
+                ["/usr/bin/hermes", "plugins", "enable", "tether"],
+                ["/usr/bin/hermes", "plugins", "disable", "session-bridge"],
+            ],
         )
 
 
@@ -469,6 +635,187 @@ class PluginRoutingTest(unittest.TestCase):
         self.assertFalse(self.plugin._mark_bridge_thread_before_slack_gate(adapter, {
             "thread_ts": "999.999", "channel": "C12345678",
         }))
+
+    def test_prefilter_admits_unmentioned_reply_before_hermes_mention_gate(self):
+        self.make_bridge()
+
+        class SlackAdapter:
+            _tether_prefilter = False
+
+            def __init__(self):
+                self._bot_message_ts = set()
+                self._channel_team = {"C12345678": "T12345678"}
+                self.sent = []
+
+            async def connect(self):
+                return True
+
+            async def send(self, channel, content, metadata=None):
+                self.sent.append((channel, content, metadata))
+                return {"ok": True}
+
+            async def _handle_slack_message(self, event):
+                return event.get("thread_ts") in self._bot_message_ts
+
+        modules = {
+            "plugins": types.ModuleType("plugins"),
+            "plugins.platforms": types.ModuleType("plugins.platforms"),
+            "plugins.platforms.slack": types.ModuleType("plugins.platforms.slack"),
+            "plugins.platforms.slack.adapter": types.ModuleType("plugins.platforms.slack.adapter"),
+        }
+        modules["plugins.platforms.slack.adapter"].SlackAdapter = SlackAdapter
+        with mock.patch.dict(sys.modules, modules), mock.patch.object(self.plugin, "_ensure_reply_poller"):
+            self.plugin._install_slack_bridge_prefilter()
+            adapter = SlackAdapter()
+            admitted = asyncio.run(adapter._handle_slack_message({
+                "ts": "111.1", "thread_ts": "123.456", "channel": "C12345678",
+            }))
+            ignored = asyncio.run(adapter._handle_slack_message({
+                "ts": "111.2", "thread_ts": "999.999", "channel": "C12345678",
+            }))
+            suppressed = asyncio.run(adapter.send("C12345678", "NO_REPLY"))
+            delivered = asyncio.run(adapter.send("C12345678", "NO_REPLY is a control token"))
+        self.assertTrue(admitted)
+        self.assertFalse(ignored)
+        self.assertTrue(suppressed["suppressed"])
+        self.assertEqual(len(adapter.sent), 1)
+        self.assertEqual(adapter.sent[0][1], "NO_REPLY is a control token")
+        self.assertTrue(delivered["ok"])
+
+    def test_live_hermes_adapter_alias_precedes_source_tree_fallback(self):
+        class LiveSlackAdapter:
+            async def _handle_slack_message(self, event):
+                return event
+
+        class SourceTreeSlackAdapter(LiveSlackAdapter):
+            pass
+
+        modules = {
+            "hermes_plugins": types.ModuleType("hermes_plugins"),
+            "hermes_plugins.slack_platform": types.ModuleType("hermes_plugins.slack_platform"),
+            "hermes_plugins.slack_platform.adapter": types.ModuleType("hermes_plugins.slack_platform.adapter"),
+            "plugins": types.ModuleType("plugins"),
+            "plugins.platforms": types.ModuleType("plugins.platforms"),
+            "plugins.platforms.slack": types.ModuleType("plugins.platforms.slack"),
+            "plugins.platforms.slack.adapter": types.ModuleType("plugins.platforms.slack.adapter"),
+        }
+        modules["hermes_plugins.slack_platform.adapter"].SlackAdapter = LiveSlackAdapter
+        modules["plugins.platforms.slack.adapter"].SlackAdapter = SourceTreeSlackAdapter
+        with mock.patch.dict(sys.modules, modules):
+            self.assertIs(self.plugin._resolve_slack_adapter(), LiveSlackAdapter)
+
+    def test_reply_poller_recovers_only_authorized_unseen_human_reply(self):
+        bridge = self.make_bridge()
+        messages = [
+            {"ts": bridge.thread_ts, "text": "root", "bot_id": "B12345678"},
+            {"ts": "111.1", "thread_ts": bridge.thread_ts, "text": "continue", "user": "U12345678"},
+            {"ts": "111.2", "thread_ts": bridge.thread_ts, "text": "no", "user": "U99999999"},
+            {"ts": "111.3", "thread_ts": bridge.thread_ts, "text": "bot", "bot_id": "B12345678"},
+        ]
+
+        class Client:
+            async def conversations_join(self, **_kwargs):
+                return {"ok": True}
+
+            async def conversations_replies(self, **_kwargs):
+                return {"messages": messages}
+
+        class Adapter:
+            def __init__(self):
+                self.events = []
+
+            def _get_client(self, _channel):
+                return Client()
+
+            async def _handle_slack_message(self, event):
+                self.events.append(event)
+                self_plugin.store.mark_ingress(str(event["ts"]), bridge.bridge_id)
+
+        self_plugin = self.plugin
+        adapter = Adapter()
+        recovered = asyncio.run(self.plugin._poll_recent_replies(adapter))
+        recovered_again = asyncio.run(self.plugin._poll_recent_replies(adapter))
+        self.assertEqual(recovered, 1)
+        self.assertEqual(recovered_again, 0)
+        self.assertEqual(adapter.events[0]["text"], "continue")
+        self.assertTrue(adapter.events[0]["_tether_polled"])
+
+    def test_reply_poller_recovers_peer_bot_thread_turns_when_enabled(self):
+        bridge = self.make_bridge()
+        messages = [
+            {"ts": bridge.thread_ts, "text": "root", "bot_id": "BLOCAL", "user": "ULOCAL"},
+            {
+                "ts": "111.1", "thread_ts": bridge.thread_ts,
+                "text": "<@ULOCAL> challenge this premise", "bot_id": "BPEER", "user": "UPEER",
+                "subtype": "bot_message",
+            },
+            {
+                "ts": "111.2", "thread_ts": bridge.thread_ts,
+                "text": "general bot chatter", "bot_id": "BPEER", "user": "UPEER",
+                "subtype": "bot_message",
+            },
+        ]
+
+        class Client:
+            async def conversations_join(self, **_kwargs):
+                return {"ok": True}
+
+            async def conversations_replies(self, **_kwargs):
+                return {"messages": messages}
+
+        class Adapter:
+            _bot_user_id = "ULOCAL"
+            _team_bot_user_ids = {"T12345678": "ULOCAL"}
+            config = types.SimpleNamespace(extra={"allow_bots": "all"})
+
+            def __init__(self):
+                self.events = []
+
+            def _get_client(self, _channel):
+                return Client()
+
+            async def _handle_slack_message(self, event):
+                self.events.append(event)
+
+        adapter = Adapter()
+        with mock.patch.dict(os.environ, {"TETHER_ALLOWED_BOT_USERS": "UPEER"}, clear=False):
+            recovered = asyncio.run(self.plugin._poll_recent_replies(adapter))
+            recovered_again = asyncio.run(self.plugin._poll_recent_replies(adapter))
+        self.assertEqual(recovered, 2)
+        self.assertEqual(recovered_again, 0)
+        self.assertEqual(adapter.events[0]["ts"], "111.1")
+
+    def test_peer_bot_requires_explicit_tether_allowlist(self):
+        adapter = types.SimpleNamespace(
+            _bot_user_id="ULOCAL",
+            _team_bot_user_ids={"T12345678": "ULOCAL"},
+            config=types.SimpleNamespace(extra={"allow_bots": "all"}),
+        )
+        event = {
+            "text": "general bot chatter",
+            "bot_id": "BPEER",
+            "user": "UPEER",
+            "subtype": "bot_message",
+        }
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(self.plugin._allows_bot_message(adapter, event, "T12345678"))
+        with mock.patch.dict(os.environ, {"TETHER_ALLOWED_BOT_USERS": "UOTHER,UPEER"}, clear=True):
+            self.assertTrue(self.plugin._allows_bot_message(adapter, event, "T12345678"))
+
+    def test_peer_bot_in_bound_thread_stays_with_hermes(self):
+        self.make_bridge()
+
+        class Platform:
+            value = "slack"
+
+        platform = Platform()
+        source = types.SimpleNamespace(
+            platform=platform, thread_id="123.456", guild_id="T12345678",
+            chat_id="C12345678", user_id="UPEER", message_id="111.1", is_bot=True,
+        )
+        event = types.SimpleNamespace(source=source, message_id="111.1", text="challenge this")
+        gateway = types.SimpleNamespace(adapters={platform: types.SimpleNamespace()})
+        self.assertIsNone(self.plugin._pre_gateway_dispatch(event=event, gateway=gateway))
 
     def test_native_delta_drops_synthetic_thread_history(self):
         text = "old transcript\n[End of thread context]\nplease continue"
@@ -575,11 +922,29 @@ class InstallerAndPackageTest(unittest.TestCase):
     def test_installer_supports_both_harnesses_and_preserves_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = pathlib.Path(tmp)
+            for harness in ("codex", "claude"):
+                legacy = home / harness / "skills" / "hermes-slack-bridge" / "scripts"
+                legacy.mkdir(parents=True)
+                (legacy / "hermes_notify.py").write_text(
+                    'notify.add_argument("--owner", default="U12345678")\n'
+                )
             first = self.run_installer(home)
             self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
             for harness in ("codex", "claude"):
                 self.assertTrue((home / harness / "skills" / "tether" / "SKILL.md").is_file())
+                compatibility_client = (
+                    home / harness / "skills" / "hermes-slack-bridge" / "scripts" / "hermes_notify.py"
+                ).read_text()
+                self.assertIn('notify.add_argument("--owner")', compatibility_client)
+                self.assertNotIn('default="U12345678"', compatibility_client)
+                compatibility_skill = (
+                    home / harness / "skills" / "hermes-slack-bridge" / "SKILL.md"
+                ).read_text()
+                self.assertIn("For a shared Slack channel, omit `--owner`", compatibility_skill)
             self.assertTrue((home / "hermes" / "plugins" / "tether" / "__init__.py").is_file())
+            manifest = home / "hermes" / "plugins" / "tether" / "plugin.yaml"
+            self.assertTrue(manifest.is_file())
+            self.assertIn("name: tether", manifest.read_text())
             config = home / "config" / "tether" / "config.toml"
             config.write_text('default_channel = "C12345678"\nallowed_users = ["U12345678"]\n')
             config.chmod(0o600)
@@ -642,7 +1007,11 @@ class InstallerAndPackageTest(unittest.TestCase):
         package = json.loads((ROOT / "package.json").read_text())
         self.assertEqual(package["pi"]["skills"], ["./skills"])
         for manifest in (ROOT / ".claude-plugin" / "plugin.json", ROOT / ".codex-plugin" / "plugin.json"):
-            self.assertEqual(json.loads(manifest.read_text())["name"], "tether")
+            payload = json.loads(manifest.read_text())
+            self.assertEqual(payload["name"], "tether")
+            self.assertEqual(payload["version"], package["version"])
+        plugin_manifest = (ROOT / "runtime" / "plugin" / "plugin.yaml").read_text()
+        self.assertIn(f"version: {package['version']}", plugin_manifest)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,7 @@
+manifest_version: 1
+name: tether
+version: 0.1.2
+description: Session-aware Slack notifications and exactly-once resumable thread replies.
+author: Parcha Labs
+provides_hooks:
+  - pre_gateway_dispatch

@@ -18,7 +18,7 @@ npx --yes --package=github:miguelrios/unc-skills#main tether setup --harness=bot
 
 Tether installs its Codex and Claude Code skill, adds an external Hermes plugin, opens Hermes's Slack setup, restarts the gateway, and checks the live connection.
 
-Slack's website is the one unavoidable pit stop: create or update the app from the generated manifest, install it to the workspace, create the Socket Mode app token, and invite the bot to your channels.
+Slack's website is the one unavoidable pit stop: create or update the app from the generated manifest, install it to the workspace, and create the Socket Mode app token. Tether joins public destinations before posting so their replies remain readable; invite the bot to private channels explicitly.
 
 When setup finishes:
 
@@ -40,7 +40,9 @@ The agent uses Tether to publish the result. The root message includes a compact
 Origin: Codex a1b2c3d4 in Zellij api-work / pane 7 · my-project
 ```
 
-Reply in that thread without mentioning the bot. Hermes verifies the workspace, channel, thread, user allowlist, and bridge owner, then resumes the captured session. The answer returns to the same thread.
+Reply in that thread without mentioning the bot. Hermes verifies the workspace, channel, thread, and user allowlist, then continues the captured session. Shared channels accept every explicitly allowlisted operator by default; private workflows can set one owner. When the notification came from a live Zellij pane, Tether verifies and steers that pane instead of launching a competing background resume. The answer returns to the same thread.
+
+Tether uses Socket Mode for immediate delivery and a bounded, persistent-dedupe poller for recent active threads. If Slack's websocket drops during a reply, the recovery path picks up the missed message and sends it through the same authorization and session routing exactly once.
 
 Say `cancel`, `stop`, `nvm`, or `never mind` to stop an active native continuation.
 
@@ -101,6 +103,8 @@ Then finish `hermes gateway setup`, start the gateway, and run `tether doctor`.
 Hermes and Tether update independently. After a Hermes update, rerun the setup command. Tether replaces only its own code, preserves bridge state and config, restarts Hermes, and checks the Slack adapter compatibility surface.
 
 Use `#main` for transparent latest updates or pin a release tag for reproducible production installs.
+
+`tether setup` enables the Tether Hermes plugin and disables the legacy pre-release `session-bridge` plugin when present. `tether doctor` verifies the live broker protocol and reply-ingress health; a plugin file merely existing on disk is not considered ready.
 
 ## Skill-only install
 

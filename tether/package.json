@@ -1,6 +1,6 @@
 {
   "name": "@parcha/tether",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Slack threads that stay attached to Codex, Claude Code, Zellij, and headless agents through Hermes",
   "bin": {
     "tether": "bin/tether.js"
@@ -12,8 +12,10 @@
     "bin/*.js",
     "runtime/bridge_runtime.py",
     "runtime/config.example.toml",
+    "runtime/compat/hermes-slack-bridge-SKILL.md",
     "runtime/tether",
     "runtime/plugin/__init__.py",
+    "runtime/plugin/plugin.yaml",
     "skills/tether/",
     "!skills/**/__pycache__/**",
     "!skills/**/*.pyc",
@@ -24,7 +26,7 @@
     "README.md"
   ],
   "scripts": {
-    "test": "python3 -m unittest discover -s tests -v && python3 -m py_compile runtime/bridge_runtime.py runtime/plugin/__init__.py skills/tether/scripts/tether_notify.py && python3 -m json.tool .claude-plugin/plugin.json >/dev/null && python3 -m json.tool .codex-plugin/plugin.json >/dev/null && python3 -m json.tool .agents/plugins/marketplace.json >/dev/null && node --check bin/tether.js",
+    "test": "python3 -m unittest discover -s tests -v && python3 -m py_compile runtime/bridge_runtime.py runtime/plugin/__init__.py skills/tether/scripts/tether_notify.py && python3 -c 'from pathlib import Path; assert \"name: tether\" in Path(\"runtime/plugin/plugin.yaml\").read_text()' && python3 -m json.tool .claude-plugin/plugin.json >/dev/null && python3 -m json.tool .codex-plugin/plugin.json >/dev/null && python3 -m json.tool .agents/plugins/marketplace.json >/dev/null && node --check bin/tether.js",
     "pack:check": "npm pack --dry-run"
   },
   "keywords": [

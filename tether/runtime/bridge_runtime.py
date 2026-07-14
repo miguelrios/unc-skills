@@ -18,9 +18,11 @@ import sys
 import threading
 import time
 import tomllib
+import urllib.parse
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any, TypedDict
 
 
@@ -55,14 +57,23 @@ SOURCE_FIELDS = {
         "session_name", "pane_id", "zellij_session", "zellij_pane_id", "cwd",
         "pane_command_hash", "pane_agent",
     }),
-    "claude_session": frozenset({"session_id", "zellij_session", "zellij_pane_id", "cwd"}),
-    "codex_session": frozenset({"session_id", "zellij_session", "zellij_pane_id", "cwd"}),
+    "claude_session": frozenset({
+        "session_id", "zellij_session", "zellij_pane_id", "cwd",
+        "pane_command_hash", "pane_agent",
+    }),
+    "codex_session": frozenset({
+        "session_id", "zellij_session", "zellij_pane_id", "cwd",
+        "pane_command_hash", "pane_agent",
+    }),
     "hermes_session": frozenset({"session_id", "run_id", "cwd"}),
     "headless_run": frozenset({"run_id", "queue_id", "cwd"}),
 }
 SLACK_METHOD_PATHS = {
+    "auth.test": "/api/auth.test",
     "chat.postMessage": "/api/chat.postMessage",
     "conversations.history": "/api/conversations.history",
+    "conversations.join": "/api/conversations.join",
+    "conversations.replies": "/api/conversations.replies",
 }
 class BridgeRequest(TypedDict, total=False):
     op: str
@@ -182,6 +193,7 @@ class Store:
         self.path = path
         path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
+            db.execute("PRAGMA journal_mode=WAL")
             db.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS bridges (
@@ -202,6 +214,10 @@ class Store:
                   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
+                CREATE TABLE IF NOT EXISTS bridge_ingress (
+                  event_id TEXT PRIMARY KEY, bridge_id TEXT NOT NULL,
+                  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
                 """
             )
             columns = {row[1] for row in db.execute("PRAGMA table_info(bridge_events)")}
@@ -211,11 +227,19 @@ class Store:
                 db.execute("ALTER TABLE bridge_events ADD COLUMN updated_at TEXT")
                 db.execute("UPDATE bridge_events SET updated_at=created_at WHERE updated_at IS NULL")
 
-    def connect(self) -> sqlite3.Connection:
+    @contextlib.contextmanager
+    def connect(self):
         db = sqlite3.connect(self.path, timeout=30)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA busy_timeout=30000")
-        return db
+        try:
+            yield db
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+        finally:
+            db.close()
 
     @staticmethod
     def decode(row: sqlite3.Row | None) -> Bridge | None:
@@ -288,6 +312,43 @@ class Store:
                     (channel_id, thread_ts),
                 ).fetchone()
             return self.decode(row)
+
+    def recent_active_bridges(self, hours: int = 24, limit: int = 100) -> list[Bridge]:
+        hours = max(1, min(hours, 168))
+        limit = max(1, min(limit, 500))
+        with self.connect() as db:
+            rows = db.execute(
+                """
+                SELECT * FROM bridges
+                WHERE status='active' AND thread_ts IS NOT NULL
+                  AND created_at >= datetime('now', ?)
+                ORDER BY created_at DESC LIMIT ?
+                """,
+                (f"-{hours} hours", limit),
+            ).fetchall()
+            return [bridge for row in rows if (bridge := self.decode(row)) is not None]
+
+    def mark_ingress(self, event_id: str, bridge_id: str) -> bool:
+        if not event_id:
+            return False
+        with self.connect() as db:
+            if db.execute("SELECT 1 FROM bridge_events WHERE event_id=?", (event_id,)).fetchone():
+                return False
+            try:
+                db.execute(
+                    "INSERT INTO bridge_ingress(event_id,bridge_id) VALUES(?,?)",
+                    (event_id, bridge_id),
+                )
+                return True
+            except sqlite3.IntegrityError:
+                return False
+
+    def has_ingress(self, event_id: str) -> bool:
+        with self.connect() as db:
+            return bool(
+                db.execute("SELECT 1 FROM bridge_ingress WHERE event_id=?", (event_id,)).fetchone()
+                or db.execute("SELECT 1 FROM bridge_events WHERE event_id=?", (event_id,)).fetchone()
+            )
 
     def claim_event(self, event_id: str, bridge_id: str) -> bool:
         with self.connect() as db:
@@ -363,12 +424,17 @@ def _slack_call(token: str, method: str, payload: dict[str, Any]) -> dict[str, A
         raise ValueError("unsupported Slack API method")
     connection = http.client.HTTPSConnection("slack.com", timeout=30)
     try:
-        connection.request(
-            "POST",
-            path,
-            body=json.dumps(payload).encode(),
-            headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
-        )
+        headers = {"Authorization": "Bearer " + token}
+        if method == "conversations.replies":
+            query = urllib.parse.urlencode(payload)
+            connection.request("GET", f"{path}?{query}", headers=headers)
+        else:
+            connection.request(
+                "POST",
+                path,
+                body=json.dumps(payload).encode(),
+                headers={**headers, "Content-Type": "application/json"},
+            )
         response = connection.getresponse()
         result = json.loads(response.read())
     finally:
@@ -415,21 +481,56 @@ def slack_upload(token: str, channel: str, text: str, file_path: str, thread_ts:
 
 
 class Broker:
-    def __init__(self, token: str, store: Store | None = None):
+    def __init__(
+        self,
+        token: str,
+        store: Store | None = None,
+        health_provider: Callable[[], dict[str, Any]] | None = None,
+    ):
         if not token:
             raise ValueError("Hermes Slack credential is unavailable")
         self.token = token
         self.store = store or Store()
+        self.health_provider = health_provider
         self._notify_lock = threading.Lock()
+        self._joined_channels: set[str] = set()
 
-    @staticmethod
-    def _status(config: Config, allowed_users: tuple[str, ...]) -> dict[str, Any]:
-        return {
+    def _ensure_channel_membership(self, channel: str) -> None:
+        if not channel.startswith("C") or channel in self._joined_channels:
+            return
+        try:
+            _slack_call(self.token, "conversations.join", {"channel": channel})
+        except RuntimeError as exc:
+            raise RuntimeError(
+                "Tether could not join the public Slack destination. Grant the bot "
+                "channels:join or invite it to the channel before creating a resumable thread "
+                f"({exc})"
+            ) from exc
+        self._joined_channels.add(channel)
+
+    def _status(self, config: Config, allowed_users: tuple[str, ...]) -> dict[str, Any]:
+        status = {
             "ok": True,
+            "implementation": "tether",
+            "protocol_version": 2,
             "channel_configured": bool(effective_channel(config)),
             "owner_configured": bool(config.default_owner or allowed_users),
             "allowed_user_count": len(allowed_users),
             "team_configured": bool(config.team_id),
+        }
+        if self.health_provider is not None:
+            health = self.health_provider()
+            if isinstance(health, dict):
+                status.update(health)
+        return status
+
+    def _identity(self) -> dict[str, Any]:
+        result = _slack_call(self.token, "auth.test", {})
+        return {
+            "ok": True,
+            "team_id": str(result.get("team_id") or ""),
+            "user_id": str(result.get("user_id") or ""),
+            "user": str(result.get("user") or ""),
         }
 
     def _notify(
@@ -457,6 +558,7 @@ class Broker:
             }
         root_text = with_origin(text, bridge)
         requested_thread = request.get("thread_ts")
+        self._ensure_channel_membership(bridge.channel_id)
         if request.get("file_path"):
             timestamp = slack_upload(
                 self.token,
@@ -479,6 +581,7 @@ class Broker:
         bridge = self.store.get(str(request.get("bridge_id") or ""))
         if not bridge or not bridge.thread_ts:
             raise ValueError("active bridge not found")
+        self._ensure_channel_membership(bridge.channel_id)
         timestamp = slack_post(self.token, bridge.channel_id, str(request.get("text") or ""), bridge.thread_ts)
         return {
             "ok": True,
@@ -492,6 +595,7 @@ class Broker:
         channel = str(request.get("channel_id") or effective_channel(config))
         if not channel:
             raise ValueError("no Slack channel was provided and Hermes has no home channel")
+        self._ensure_channel_membership(channel)
         result = _slack_call(self.token, "conversations.history", {"channel": channel, "limit": limit})
         messages = [
             {key: message.get(key) for key in ("ts", "text", "user", "bot_id") if message.get(key) is not None}
@@ -500,12 +604,49 @@ class Broker:
         ]
         return {"ok": True, "messages": messages}
 
+    def _thread_history(self, request: BridgeRequest, config: Config) -> dict[str, Any]:
+        limit = max(1, min(int(request.get("limit", 100)), 100))
+        channel = str(request.get("channel_id") or effective_channel(config))
+        thread_ts = str(request.get("thread_ts") or "")
+        if not channel or not thread_ts:
+            raise ValueError("Slack channel and thread timestamp are required")
+        self._ensure_channel_membership(channel)
+        result = _slack_call(
+            self.token,
+            "conversations.replies",
+            {"channel": channel, "ts": thread_ts, "limit": limit},
+        )
+        messages = [
+            {
+                key: message.get(key)
+                for key in ("ts", "thread_ts", "text", "user", "bot_id", "subtype")
+                if message.get(key) is not None
+            }
+            for message in result.get("messages", [])
+            if isinstance(message, dict)
+        ]
+        return {"ok": True, "messages": messages}
+
+    def _thread_reply(self, request: BridgeRequest) -> dict[str, Any]:
+        channel = str(request.get("channel_id") or "")
+        thread_ts = str(request.get("thread_ts") or "")
+        text = str(request.get("text") or "")
+        if not channel or not thread_ts:
+            raise ValueError("Slack channel and thread timestamp are required")
+        if not text.strip() or len(text) > MAX_TEXT:
+            raise ValueError("thread reply text is empty or too large")
+        self._ensure_channel_membership(channel)
+        message_ts = slack_post(self.token, channel, text, thread_ts)
+        return {"ok": True, "thread_ts": thread_ts, "message_ts": message_ts}
+
     def handle(self, request: BridgeRequest) -> dict[str, Any]:
         operation = str(request.get("op", "notify"))
         config = load_config()
         allowed_users = effective_allowed_users(config)
         if operation == "status":
             return self._status(config, allowed_users)
+        if operation == "identity":
+            return self._identity()
         if operation == "notify":
             with self._notify_lock:
                 return self._notify(request, config, allowed_users)
@@ -513,6 +654,10 @@ class Broker:
             return self._reply(request)
         if operation == "history":
             return self._history(request, config)
+        if operation == "thread_history":
+            return self._thread_history(request, config)
+        if operation == "thread_reply":
+            return self._thread_reply(request)
         raise ValueError("unsupported operation")
 
 
@@ -535,7 +680,11 @@ class UnixServer(socketserver.ThreadingUnixStreamServer):
     broker: Broker
 
 
-def start_broker(token: str, path: Path = SOCKET_PATH) -> UnixServer:
+def start_broker(
+    token: str,
+    path: Path = SOCKET_PATH,
+    health_provider: Callable[[], dict[str, Any]] | None = None,
+) -> UnixServer:
     path.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
     if path.exists() or path.is_symlink():
@@ -544,7 +693,7 @@ def start_broker(token: str, path: Path = SOCKET_PATH) -> UnixServer:
             raise RuntimeError("refusing to replace non-socket bridge path")
         path.unlink()
     server = UnixServer(str(path), Handler)
-    server.broker = Broker(token)
+    server.broker = Broker(token, health_provider=health_provider)
     os.chmod(path, 0o600)
     threading.Thread(target=server.serve_forever, name="hermes-bridge-broker", daemon=True).start()
     return server
@@ -801,8 +950,11 @@ def deliver_zellij(bridge: Bridge, text: str) -> None:
     if current["pane_command_hash"] != expected_hash:
         raise NativeContinuationError("captured Zellij pane now hosts a different process")
     notifier = RUNTIME_HOME / "tether_notify.py"
+    marker = "tether-" + hashlib.sha256(
+        f"{bridge.bridge_id}\0{text}".encode()
+    ).hexdigest()[:12]
     instruction = (
-        "[Hermes Slack reply] " + text + "\n\nAfter handling this, reply in the same Slack thread with: "
+        f"[Hermes Slack reply; {marker}] " + text + "\n\nAfter handling this, reply in the same Slack thread with: "
         f"python3 {notifier} reply --bridge-id {bridge.bridge_id} --text '<your response>'"
     )
     target = pane if pane.startswith(("terminal_", "plugin_")) else "terminal_" + pane
@@ -813,11 +965,36 @@ def deliver_zellij(bridge: Bridge, text: str) -> None:
         check=True,
         timeout=10,
     )
+    time.sleep(0.15)
+    staged = subprocess.run(  # nosec B603
+        [zellij, "--session", session, "action", "dump-screen", "--pane-id", target],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+    )
+    if marker not in staged.stdout:
+        raise NativeContinuationError("Slack instruction was not visible in the captured Zellij pane")
     subprocess.run(  # nosec B603
         [zellij, "--session", session, "action", "send-keys", "--pane-id", target, "Enter"],
         check=True,
         timeout=10,
     )
+    time.sleep(0.5)
+    submitted = subprocess.run(  # nosec B603
+        [zellij, "--session", session, "action", "dump-screen", "--pane-id", target],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+    )
+    if marker not in submitted.stdout:
+        raise NativeContinuationError("Slack instruction disappeared before submission could be verified")
+    after_submit = zellij_pane_identity(session, pane, str(bridge.source.get("cwd") or ""))
+    if after_submit["pane_command_hash"] != expected_hash:
+        raise NativeContinuationError("captured agent exited or changed process after Slack submission")
 
 
 def doctor() -> tuple[bool, list[str]]:
@@ -848,6 +1025,11 @@ def doctor() -> tuple[bool, list[str]]:
             checks.append("ok broker socket is live and private")
         try:
             status = broker_call({"op": "status"})
+            if status.get("implementation") != "tether":
+                ok = False
+                checks.append("FAIL broker belongs to a legacy bridge; disable it and restart Hermes")
+            else:
+                checks.append("ok Tether broker protocol is active")
             if status.get("allowed_user_count", 0):
                 checks.append(f"ok {status['allowed_user_count']} Hermes/Tether operator(s) authorized")
             else:
@@ -860,6 +1042,17 @@ def doctor() -> tuple[bool, list[str]]:
             if not status.get("owner_configured"):
                 ok = False
                 checks.append("FAIL no default bridge owner; configure a Hermes allowlist or Tether owner")
+            transport = status.get("slack_transport_connected")
+            poll_healthy = status.get("reply_poll_healthy")
+            if transport is True:
+                checks.append("ok Slack Socket Mode reply ingress connected")
+            elif poll_healthy is True:
+                checks.append("WARN Socket Mode is disconnected; reply polling fallback is healthy")
+            elif transport is False or poll_healthy is False:
+                ok = False
+                checks.append("FAIL no healthy Slack reply ingress path")
+            else:
+                checks.append("WARN Slack reply ingress health is not yet observed")
         except Exception as exc:
             ok = False
             checks.append(f"FAIL broker readiness check: {str(exc)[:160]}")

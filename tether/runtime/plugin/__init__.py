@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import importlib
 import importlib.util
 import logging
 import os
 import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
@@ -48,46 +50,291 @@ class PluginState:
     bridge_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
     active_cancellations: dict[str, threading.Event] = field(default_factory=dict)
     recovery_worker_started: bool = False
+    reply_poller: asyncio.Task | None = None
+    poll_cursor: int = 0
+    joined_channels: set[tuple[str, str]] = field(default_factory=set)
+    slack_transport_connected: bool | None = None
+    last_inbound_at: float | None = None
+    last_poll_at: float | None = None
+    last_poll_error_at: float | None = None
 
 
 state = PluginState()
 store = state.store
 
 
-def _mark_bridge_thread_before_slack_gate(adapter, event) -> bool:
+def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+    return max(minimum, min(value, maximum))
+
+
+def _reply_poll_interval() -> int:
+    return _bounded_env_int("TETHER_REPLY_POLL_SECONDS", 30, 10, 300)
+
+
+def _health_status() -> dict[str, Any]:
+    now = time.monotonic()
+    interval = _reply_poll_interval()
+    poll_age = None if state.last_poll_at is None else max(0, int(now - state.last_poll_at))
+    poll_healthy = (
+        state.reply_poller is not None
+        and not state.reply_poller.done()
+        and poll_age is not None
+        and poll_age <= max(90, interval * 3)
+        and (state.last_poll_error_at is None or state.last_poll_error_at < state.last_poll_at)
+    )
+    return {
+        "slack_transport_connected": state.slack_transport_connected,
+        "reply_poll_healthy": poll_healthy,
+        "reply_poll_age_seconds": poll_age,
+        "inbound_observed": state.last_inbound_at is not None,
+    }
+
+
+def _bridge_for_slack_event(adapter, event):
     thread_ts = str(event.get("thread_ts") or "")
     channel_id = str(event.get("channel") or event.get("channel_id") or "")
     if not thread_ts or not channel_id:
-        return False
+        return None
     team_id = str(
         event.get("team") or event.get("team_id")
         or getattr(adapter, "_channel_team", {}).get(channel_id, "") or ""
     )
-    bridge = store.find(team_id, channel_id, thread_ts)
+    return store.find(team_id, channel_id, thread_ts)
+
+
+def _mark_bridge_thread_before_slack_gate(adapter, event) -> bool:
+    bridge = _bridge_for_slack_event(adapter, event)
     if bridge is None:
         return False
-    adapter._bot_message_ts.add(thread_ts)
+    adapter._bot_message_ts.add(bridge.thread_ts)
     return True
 
 
+def _is_bot_message(event: dict[str, Any]) -> bool:
+    return bool(event.get("bot_id")) or event.get("subtype") == "bot_message"
+
+
+def _allowed_peer_bot_users() -> set[str]:
+    return {
+        value.strip()
+        for value in os.getenv("TETHER_ALLOWED_BOT_USERS", "").split(",")
+        if value.strip()
+    }
+
+
+def _is_silence_control_output(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    return value.strip().upper() in {"NO_REPLY", "NO REPLY", "[SILENT]", "SILENT"}
+
+
+def _allows_bot_message(adapter, event: dict[str, Any], team_id: str = "") -> bool:
+    user_id = str(event.get("user") or "")
+    if user_id not in _allowed_peer_bot_users():
+        return False
+    mode = str(
+        getattr(getattr(adapter, "config", None), "extra", {}).get("allow_bots")
+        or os.getenv("SLACK_ALLOW_BOTS", "none")
+    ).lower().strip()
+    if mode == "all":
+        return True
+    if mode != "mentions":
+        return False
+    bot_user_id = (
+        getattr(adapter, "_team_bot_user_ids", {}).get(team_id)
+        or getattr(adapter, "_bot_user_id", None)
+    )
+    return bool(bot_user_id and f"<@{bot_user_id}>" in str(event.get("text") or ""))
+
+
+def _resolve_slack_adapter():
+    errors = []
+    live_module = "hermes_plugins.slack_platform.adapter"
+    module = sys.modules.get(live_module)
+    if module is None:
+        try:
+            from gateway.platform_registry import platform_registry
+            platform_registry.get("slack")
+            module = sys.modules.get(live_module)
+        except (ImportError, AttributeError) as exc:
+            errors.append(f"gateway.platform_registry: {type(exc).__name__}")
+    if module is not None:
+        adapter = getattr(module, "SlackAdapter", None)
+        if adapter is not None and hasattr(adapter, "_handle_slack_message"):
+            return adapter
+        errors.append(f"{live_module}: incompatible")
+
+    for module_name in (live_module, "plugins.platforms.slack.adapter"):
+        try:
+            module = importlib.import_module(module_name)
+            adapter = getattr(module, "SlackAdapter")
+            if hasattr(adapter, "_handle_slack_message"):
+                return adapter
+        except (ImportError, AttributeError) as exc:
+            errors.append(f"{module_name}: {type(exc).__name__}")
+    raise RuntimeError(
+        "Hermes Slack adapter is unavailable or incompatible with Tether ("
+        + "; ".join(errors) + ")"
+    )
+
+
 def _install_slack_bridge_prefilter():
-    from plugins.platforms.slack.adapter import SlackAdapter
+    SlackAdapter = _resolve_slack_adapter()
     if not hasattr(SlackAdapter, "_handle_slack_message"):
         raise RuntimeError("Hermes Slack adapter is incompatible with Tether")
     if getattr(SlackAdapter, "_tether_prefilter", False):
         return
     original = SlackAdapter._handle_slack_message
+    original_connect = SlackAdapter.connect
+    original_send = getattr(SlackAdapter, "send", None)
+    original_restart = getattr(SlackAdapter, "_restart_socket_mode", None)
 
     @functools.wraps(original)
     async def bridged_handle(self, event):
+        if not event.get("_tether_polled"):
+            state.last_inbound_at = time.monotonic()
+            state.slack_transport_connected = True
+        _ensure_reply_poller(self)
         try:
-            _mark_bridge_thread_before_slack_gate(self, event)
+            bridge = _bridge_for_slack_event(self, event)
+            if bridge is not None:
+                if _is_bot_message(event) and not _allows_bot_message(self, event, bridge.team_id):
+                    return None
+                self._bot_message_ts.add(bridge.thread_ts)
+                event_id = str(event.get("ts") or "")
+                if (
+                    not event.get("_tether_polled")
+                    and _is_bot_message(event)
+                    and event_id
+                    and not store.mark_ingress(event_id, bridge.bridge_id)
+                ):
+                    return None
         except Exception:
             log.exception("Could not evaluate a Slack bridge thread before the mention gate")
         return await original(self, event)
 
     SlackAdapter._handle_slack_message = bridged_handle
+
+    @functools.wraps(original_connect)
+    async def bridged_connect(self, *args, **kwargs):
+        connected = await original_connect(self, *args, **kwargs)
+        state.slack_transport_connected = bool(connected)
+        if connected:
+            _ensure_reply_poller(self)
+        return connected
+
+    SlackAdapter.connect = bridged_connect
+    if original_send is not None:
+        @functools.wraps(original_send)
+        async def bridged_send(self, *args, **kwargs):
+            content = kwargs.get("content")
+            if content is None and len(args) >= 2:
+                content = args[1]
+            if _is_silence_control_output(content):
+                log.info("Tether suppressed an internal silence control token at Slack egress")
+                return {"ok": True, "suppressed": True}
+            return await original_send(self, *args, **kwargs)
+
+        SlackAdapter.send = bridged_send
+    if original_restart is not None:
+        @functools.wraps(original_restart)
+        async def bridged_restart(self, *args, **kwargs):
+            result = await original_restart(self, *args, **kwargs)
+            try:
+                state.slack_transport_connected = bool(await self._socket_transport_connected())
+            except Exception:
+                state.slack_transport_connected = False
+            return result
+
+        SlackAdapter._restart_socket_mode = bridged_restart
     SlackAdapter._tether_prefilter = True
+
+
+async def _poll_recent_replies(adapter) -> int:
+    hours = _bounded_env_int("TETHER_REPLY_RECOVERY_HOURS", 24, 1, 168)
+    batch_size = _bounded_env_int("TETHER_REPLY_POLL_BATCH", 10, 1, 25)
+    bridges = store.recent_active_bridges(hours=hours, limit=100)
+    if not bridges:
+        return 0
+    start = state.poll_cursor % len(bridges)
+    batch = (bridges + bridges)[start:start + min(batch_size, len(bridges))]
+    state.poll_cursor = (start + len(batch)) % len(bridges)
+    oldest = f"{time.time() - hours * 3600:.6f}"
+    recovered = 0
+    succeeded = 0
+    for bridge in batch:
+        try:
+            client = adapter._get_client(bridge.channel_id)
+            channel_key = (bridge.team_id, bridge.channel_id)
+            if bridge.channel_id.startswith("C") and channel_key not in state.joined_channels:
+                await client.conversations_join(channel=bridge.channel_id)
+                state.joined_channels.add(channel_key)
+            result = await client.conversations_replies(
+                channel=bridge.channel_id,
+                ts=bridge.thread_ts,
+                oldest=oldest,
+                inclusive=False,
+                limit=100,
+            )
+            succeeded += 1
+        except Exception as exc:
+            log.warning("Could not poll Tether thread %s: %s", bridge.bridge_id, type(exc).__name__)
+            continue
+        for message in result.get("messages", []):
+            if not isinstance(message, dict):
+                continue
+            event_id = str(message.get("ts") or "")
+            user_id = str(message.get("user") or "")
+            text = str(message.get("text") or "")
+            bot_allowed = _allows_bot_message(adapter, message, bridge.team_id)
+            if (
+                not event_id
+                or event_id == bridge.thread_ts
+                or not text.strip()
+                or (_is_bot_message(message) and not bot_allowed)
+                or (not _is_bot_message(message) and not _authorized(bridge, user_id))
+                or store.has_ingress(event_id)
+            ):
+                continue
+            event = dict(message)
+            event.update({
+                "channel": bridge.channel_id,
+                "team": bridge.team_id,
+                "thread_ts": bridge.thread_ts,
+                "channel_type": "im" if bridge.channel_id.startswith("D") else "channel",
+                "_tether_polled": True,
+            })
+            if _is_bot_message(message) and not store.mark_ingress(event_id, bridge.bridge_id):
+                continue
+            await adapter._handle_slack_message(event)
+            recovered += 1
+    if batch and not succeeded:
+        raise RuntimeError("every Slack thread poll failed")
+    return recovered
+
+
+async def _reply_poll_loop(adapter) -> None:
+    while True:
+        try:
+            recovered = await _poll_recent_replies(adapter)
+            state.last_poll_at = time.monotonic()
+            if recovered:
+                log.warning("Tether recovered %d Slack thread repl%s by polling", recovered, "y" if recovered == 1 else "ies")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            state.last_poll_error_at = time.monotonic()
+            log.exception("Tether Slack reply poll failed")
+        await asyncio.sleep(_reply_poll_interval())
+
+
+def _ensure_reply_poller(adapter) -> None:
+    if state.reply_poller is None or state.reply_poller.done():
+        state.reply_poller = asyncio.get_running_loop().create_task(_reply_poll_loop(adapter))
 
 
 def _reply_delta(text: str) -> str:
@@ -140,10 +387,19 @@ def _failure_reason(exc: Exception) -> str:
 
 
 def _run_recovered_event(bridge, item):
-    if bridge.source_kind == "zellij_pane":
+    if _has_bound_zellij_pane(bridge):
         deliver_zellij(bridge, item["text"])
-        return "_Delivered to the bound Zellij pane._"
+        return ""
     return continue_native(bridge, item["text"])
+
+
+def _has_bound_zellij_pane(bridge) -> bool:
+    source = bridge.source
+    return bool(
+        (source.get("session_name") or source.get("zellij_session"))
+        and (source.get("pane_id") or source.get("zellij_pane_id"))
+        and source.get("pane_command_hash")
+    )
 
 
 def _recover_queued_events():
@@ -191,9 +447,9 @@ async def _drain_bridge(bridge_id, gateway, platform):
             cancellation = threading.Event()
             state.active_cancellations[bridge_id] = cancellation
             try:
-                if bridge.source_kind == "zellij_pane":
+                if _has_bound_zellij_pane(bridge):
                     await asyncio.to_thread(deliver_zellij, bridge, item["text"])
-                    response = "_Delivered to the bound Zellij pane._"
+                    response = ""
                 else:
                     response = await asyncio.to_thread(continue_native, bridge, item["text"], cancellation)
                 if response:
@@ -228,9 +484,16 @@ def _pre_gateway_dispatch(*, event, gateway, **_kwargs):
     bridge = store.find(str(source.guild_id or ""), str(source.chat_id), str(source.thread_id))
     if bridge is None:
         return None
+    # Peer bots belong to the Hermes conversation, never a captured native
+    # coding session. The conversation agent decides whether to answer.
+    if getattr(source, "is_bot", False):
+        return None
     user_id = str(source.user_id or "")
     if not _authorized(bridge, user_id):
         return {"action": "skip", "reason": "bridge-user-not-authorized"}
+    event_id = str(event.message_id or source.message_id or "")
+    if not store.mark_ingress(event_id, bridge.bridge_id):
+        return {"action": "skip", "reason": "tether-duplicate"}
     _suppress_bridge_reaction(event, gateway)
     if bridge.source_kind in {"headless_run", "hermes_session"}:
         run_id = str(bridge.source.get("run_id") or bridge.source.get("session_id") or "unknown")
@@ -243,7 +506,6 @@ def _pre_gateway_dispatch(*, event, gateway, **_kwargs):
                 "continue as an operator conversation and return verified results in this thread.]\n\n" + event.text
             ),
         }
-    event_id = str(event.message_id or source.message_id or "")
     delta = _reply_delta(event.text)
     normalized = delta.lower().strip(" .!?")
     if normalized in {"cancel", "stop", "nvm", "never mind", "nevermind"}:
@@ -284,7 +546,7 @@ def register(ctx) -> None:
         return
     load_config()
     if state.broker is None:
-        state.broker = start_broker(token)
+        state.broker = start_broker(token, health_provider=_health_status)
     store.requeue_processing()
     if not state.recovery_worker_started and store.queued_bridge_ids():
         threading.Thread(target=_recover_queued_events, name="hermes-bridge-recovery", daemon=True).start()
