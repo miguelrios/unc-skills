@@ -41,10 +41,14 @@ class Pages:
             None: ConnectorPage(records=(
                 value("safe-one", "connector postgres exact safe marker"),
                 value("scrub-one", "keep context api_key=connector-postgres-secret-canary after"),
-            ), next_cursor="page-1", has_more=False),
+            ), next_cursor="page-1", has_more=True),
             "page-1": ConnectorPage(records=(
+                value("scrub-one", "keep context api_key=connector-postgres-secret-canary after"),
                 value("safe-one", "deletion bypass content", deleted=True),
-            ), next_cursor="page-2", has_more=False),
+            ), next_cursor="page-2", has_more=True),
+            "page-2": ConnectorPage(records=(
+                value("safe-one", "connector postgres exact safe marker"),
+            ), next_cursor="done", has_more=False),
         }
 
     def pull(self, cursor):
@@ -85,12 +89,18 @@ def main() -> None:
             assert connection.execute("SELECT count(*) AS n FROM items WHERE deleted_at IS NULL").fetchone()["n"] == 2
         second = runner.run_once()
         assert second["acked"] == 1
+        assert second["deduplicated"] == 1
+        assert store.search("connector postgres exact safe marker", authorized_source=SOURCE)["results"] == []
+        third = runner.run_once()
+        assert third["acked"] == 0
+        assert third["deduplicated"] == 1
         assert store.search("connector postgres exact safe marker", authorized_source=SOURCE)["results"] == []
         assert runner.doctor()["pending"] == 0
         runner.close()
         assert b"connector-postgres-secret-canary" not in spool.read_bytes()
         print(json.dumps({
-            "status": "pass", "records_acked": 3, "searchable_before_delete": 1,
+            "status": "pass", "records_acked": 3, "exact_repeats_suppressed": 2,
+            "searchable_before_delete": 1,
             "searchable_after_delete": 0, "canary_search_hits": 0,
             "spool_canary_hits": 0, "pending": 0,
         }, sort_keys=True))

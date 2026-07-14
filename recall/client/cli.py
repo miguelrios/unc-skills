@@ -28,7 +28,7 @@ from connectors.registry import (
     preview as registry_preview,
     validate_policy,
 )
-from connectors.sdk import ConnectorRunner
+from connectors.sdk import ConnectorContractError, ConnectorRunner, seed_acknowledged_records
 from connectors.supervisor import (
     SupervisorContractError,
     aggregate_supervisor_status,
@@ -138,6 +138,9 @@ def parser() -> argparse.ArgumentParser:
     registry_status.add_argument("--privacy-mode", choices=("off", "scrub", "drop"), required=True)
     registry_status.add_argument("--authority", choices=("brain", "source"), action="append", default=[])
     registry_status.add_argument("--spool")
+    seed_acknowledged = commands.add_parser("connector-spool-seed-acknowledged")
+    seed_acknowledged.add_argument("--spool", required=True)
+    seed_acknowledged.add_argument("--input", required=True)
     commands.add_parser("connector-supervisor-preview")
     supervisor_status = commands.add_parser("connector-supervisor-status")
     supervisor_status.add_argument("--state", required=True)
@@ -248,6 +251,15 @@ def main() -> None:
                 set(args.authority), Path(args.spool) if args.spool else None,
             )
         except ConnectorRegistryError as error:
+            raise SystemExit(str(error)) from None
+        print(json.dumps(result, sort_keys=True))
+        return
+    if args.command == "connector-spool-seed-acknowledged":
+        try:
+            result = seed_acknowledged_records(
+                spool_path=Path(args.spool), seed_path=Path(args.input),
+            )
+        except ConnectorContractError as error:
             raise SystemExit(str(error)) from None
         print(json.dumps(result, sort_keys=True))
         return

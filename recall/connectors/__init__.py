@@ -7,6 +7,7 @@ from .sdk import (
     ConnectorRecord,
     ConnectorRunError,
     ConnectorRunner,
+    seed_acknowledged_records,
 )
 from .export_inbox import ExportInboxConnector, ExportInboxError
 from .registry import ConnectorDefinition, ConnectorRegistryError, REGISTRY
@@ -26,6 +27,7 @@ __all__ = [
     "ConnectorRecord",
     "ConnectorRunError",
     "ConnectorRunner",
+    "seed_acknowledged_records",
     "ExportInboxConnector",
     "ExportInboxError",
     "ConnectorDefinition",
