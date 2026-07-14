@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import secrets
 import sqlite3
+import stat
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -23,7 +25,10 @@ MAX_PAGE_BYTES = 8_000_000
 IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@/=-]{1,255}\Z")
 CONNECTOR_ID = re.compile(r"[a-z][a-z0-9_.-]{2,63}\Z")
 SOURCE_ID = re.compile(r"[A-Za-z0-9_.:@-]{3,160}\Z")
+SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 ALLOWED_PROVENANCE_SCHEMES = {"https", "export", "connector", "manual"}
+MAX_ACK_SEED_BYTES = 16_000_000
+MAX_ACK_SEED_RECORDS = 250_000
 
 
 class ConnectorContractError(ValueError):
@@ -52,6 +57,158 @@ class ConnectorUpstreamError(RuntimeError):
             raise ConnectorContractError("upstream error code is invalid")
         self.error_code = error_code
         super().__init__(error_code)
+
+
+def _create_acknowledged_records_table(db: sqlite3.Connection) -> None:
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS acknowledged_records(
+          native_sha256 TEXT NOT NULL
+            CHECK(length(native_sha256)=64 AND native_sha256 NOT GLOB '*[^0-9a-f]*'),
+          content_sha256 TEXT NOT NULL
+            CHECK(length(content_sha256)=64 AND content_sha256 NOT GLOB '*[^0-9a-f]*'),
+          acknowledged_at REAL NOT NULL,
+          PRIMARY KEY(native_sha256,content_sha256)
+        ) WITHOUT ROWID
+    """)
+    columns = [
+        (row[1], row[2], row[3], row[5])
+        for row in db.execute("PRAGMA table_info(acknowledged_records)")
+    ]
+    expected = [
+        ("native_sha256", "TEXT", 1, 1),
+        ("content_sha256", "TEXT", 1, 2),
+        ("acknowledged_at", "REAL", 1, 0),
+    ]
+    if columns != expected:
+        raise ConnectorContractError("acknowledged-record ledger schema is invalid")
+    table_sql = db.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='acknowledged_records'"
+    ).fetchone()[0]
+    if "WITHOUT ROWID" not in table_sql.upper():
+        raise ConnectorContractError("acknowledged-record ledger schema is invalid")
+
+
+def _native_sha256(source_id: str, native_id: str) -> str:
+    return hashlib.sha256(f"{source_id}\0{native_id}".encode()).hexdigest()
+
+
+def _strict_private_file(path: Path, *, label: str, max_bytes: int | None = None,
+                         read_data: bool = True) -> bytes:
+    path = Path(path)
+    if not path.is_absolute():
+        raise ConnectorContractError(f"{label} path must be absolute")
+    try:
+        parent = path.parent.lstat()
+        details = path.lstat()
+    except OSError as error:
+        raise ConnectorContractError(f"{label} path is unavailable") from error
+    if not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode):
+        raise ConnectorContractError(f"{label} parent must be a non-symlink directory")
+    if stat.S_IMODE(parent.st_mode) != 0o700:
+        raise ConnectorContractError(f"{label} parent must have mode 0700")
+    if stat.S_ISLNK(details.st_mode) or not stat.S_ISREG(details.st_mode):
+        raise ConnectorContractError(f"{label} must be a regular non-symlink file")
+    if stat.S_IMODE(details.st_mode) != 0o600:
+        raise ConnectorContractError(f"{label} must have mode 0600")
+    if max_bytes is not None and details.st_size > max_bytes:
+        raise ConnectorContractError(f"{label} exceeds maximum byte count")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if (opened.st_dev, opened.st_ino) != (details.st_dev, details.st_ino):
+                raise ConnectorContractError(f"{label} changed during validation")
+            if not read_data:
+                return b""
+            chunks = []
+            remaining = details.st_size + 1
+            while remaining:
+                chunk = os.read(descriptor, min(1_048_576, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            return b"".join(chunks)
+        finally:
+            os.close(descriptor)
+    except ConnectorContractError:
+        raise
+    except OSError as error:
+        raise ConnectorContractError(f"{label} could not be read safely") from error
+
+
+def seed_acknowledged_records(*, spool_path: Path, seed_path: Path) -> dict[str, int]:
+    """Seed an existing spool from a strict, hash-only acknowledged-record manifest."""
+    raw = _strict_private_file(Path(seed_path), label="seed", max_bytes=MAX_ACK_SEED_BYTES)
+    try:
+        manifest = json.loads(raw, parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise ConnectorContractError("seed must be finite JSON") from error
+    if not isinstance(manifest, dict) or set(manifest) != {"schema_version", "records"}:
+        raise ConnectorContractError("seed must be a closed versioned object")
+    records = manifest["records"]
+    if manifest["schema_version"] != 1 or not isinstance(records, list):
+        raise ConnectorContractError("seed schema is invalid")
+    if len(records) > MAX_ACK_SEED_RECORDS:
+        raise ConnectorContractError("seed exceeds maximum record count")
+    pairs: list[tuple[str, str]] = []
+    for record in records:
+        if not isinstance(record, dict) or set(record) != {"native_sha256", "content_sha256"}:
+            raise ConnectorContractError("seed record must be a closed object")
+        native_sha256 = record["native_sha256"]
+        content_sha256 = record["content_sha256"]
+        if not isinstance(native_sha256, str) or not SHA256.fullmatch(native_sha256):
+            raise ConnectorContractError("seed native hash is invalid")
+        if not isinstance(content_sha256, str) or not SHA256.fullmatch(content_sha256):
+            raise ConnectorContractError("seed content hash is invalid")
+        pairs.append((native_sha256, content_sha256))
+    if len(pairs) != len(set(pairs)):
+        raise ConnectorContractError("seed contains duplicate records")
+
+    spool_path = Path(spool_path)
+    _strict_private_file(spool_path, label="spool", read_data=False)
+    try:
+        db = sqlite3.connect(f"file:{spool_path}?mode=rw", uri=True)
+        db.row_factory = sqlite3.Row
+        tables = {row[0] for row in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )}
+        if not {"meta", "pages", "outbox"}.issubset(tables):
+            raise ConnectorContractError("spool schema is invalid")
+        identity = dict(db.execute(
+            "SELECT key,value FROM meta WHERE key IN ('connector_id','source_id')"
+        ))
+        if set(identity) != {"connector_id", "source_id"}:
+            raise ConnectorContractError("spool identity is incomplete")
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            pending = db.execute("SELECT count(*) FROM pages").fetchone()[0]
+            pending += db.execute("SELECT count(*) FROM outbox").fetchone()[0]
+            if pending:
+                raise ConnectorContractError("spool must have no pending work before seeding")
+            _create_acknowledged_records_table(db)
+            before = db.execute("SELECT count(*) FROM acknowledged_records").fetchone()[0]
+            acknowledged_at = time.time()
+            db.executemany(
+                "INSERT OR IGNORE INTO acknowledged_records"
+                "(native_sha256,content_sha256,acknowledged_at) VALUES (?,?,?)",
+                [(native, content, acknowledged_at) for native, content in pairs],
+            )
+            after = db.execute("SELECT count(*) FROM acknowledged_records").fetchone()[0]
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+    except ConnectorContractError:
+        raise
+    except sqlite3.Error as error:
+        raise ConnectorContractError("spool could not be seeded") from error
+    finally:
+        if "db" in locals():
+            db.close()
+    seeded = after - before
+    return {"schema_version": 1, "seeded": seeded, "already_acknowledged": len(pairs) - seeded}
 
 
 def _json_copy(value: Any, label: str) -> Any:
@@ -196,6 +353,7 @@ class ConnectorRunner:
               envelope_json TEXT NOT NULL, state TEXT NOT NULL CHECK(state='pending')
             );
         """)
+        _create_acknowledged_records_table(self.db)
         self._pin_identity()
 
     def _pin_identity(self) -> None:
@@ -245,11 +403,19 @@ class ConnectorRunner:
             occurred_at=record.occurred_at, provenance=provenance,
         )
 
+    def _acknowledged(self, event: dict[str, Any]) -> bool:
+        return self.db.execute(
+            "SELECT 1 FROM acknowledged_records WHERE native_sha256=? AND content_sha256=?",
+            (_native_sha256(self.source_id, event["native_id"]), event["content_sha256"]),
+        ).fetchone() is not None
+
     def _stage(self, page: ConnectorPage, cursor: str | None) -> dict[str, Any]:
         if page.next_cursor == cursor and (page.records or page.has_more):
             raise ConnectorContractError("connector cursor did not advance")
         receipts = []
         events = []
+        dropped = 0
+        deduplicated = 0
         for record in page.records:
             provenance_decision = PrivacyPolicy(mode="scrub").apply(record.provenance)
             safe_provenance = provenance_decision.value
@@ -262,7 +428,11 @@ class ConnectorRunner:
                     record, decision.value["content"], decision.value["provenance"]
                 )
             receipts.append(decision.receipt())
-            if event is not None:
+            if event is None:
+                dropped += 1
+            elif self._acknowledged(event):
+                deduplicated += 1
+            else:
                 events.append(event)
         privacy = summarize_receipts(receipts, self.privacy.mode)
         with self.db:
@@ -276,7 +446,10 @@ class ConnectorRunner:
             )
             if not events:
                 self._commit_page(page_id, page.next_cursor)
-        return {"privacy": privacy, "staged": len(events), "dropped": len(page.records) - len(events)}
+        return {
+            "privacy": privacy, "staged": len(events), "dropped": dropped,
+            "deduplicated": deduplicated,
+        }
 
     def _commit_page(self, page_id: int, cursor: str | None) -> None:
         self.db.execute("DELETE FROM outbox WHERE page_id=?", (page_id,))
@@ -317,6 +490,15 @@ class ConnectorRunner:
             raise ConnectorRunError("brain_invalid_acknowledgement")
         replayed = int(bool(self._get_meta("last_error_code") == "brain_unavailable"))
         with self.db:
+            acknowledged_at = time.time()
+            self.db.executemany(
+                "INSERT OR IGNORE INTO acknowledged_records"
+                "(native_sha256,content_sha256,acknowledged_at) VALUES (?,?,?)",
+                [
+                    (_native_sha256(self.source_id, event["native_id"]), event["content_sha256"], acknowledged_at)
+                    for event in events
+                ],
+            )
             self._commit_page(page["id"], json.loads(page["cursor_after"]))
         self._purge_acknowledged_bytes()
         return {"acked": len(events), "replayed": replayed}

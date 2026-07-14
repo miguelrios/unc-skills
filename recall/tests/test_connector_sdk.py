@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import hashlib
+import io
 import json
+import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from client import cli as client_cli
 from connectors.sdk import (
     ConnectorContractError,
     ConnectorPage,
@@ -12,6 +18,7 @@ from connectors.sdk import (
     ConnectorRecord,
     ConnectorRunError,
     ConnectorRunner,
+    seed_acknowledged_records,
 )
 from privacy.policy import PrivacyPolicy
 
@@ -34,6 +41,7 @@ class FakeBrain:
     def __init__(self):
         self.calls = 0
         self.events: dict[tuple[str, str, str], dict] = {}
+        self.duplicate_events = 0
         self.fail_after_commit = False
         self.unauthorized = False
 
@@ -42,16 +50,22 @@ class FakeBrain:
         if self.unauthorized:
             raise PermissionError("synthetic unauthorized response with payload that must stay private")
         receipts = []
+        inserted = duplicates = 0
         for event in events:
             key = (event["source_id"], event["native_id"], event["content_sha256"])
-            self.events[key] = event
+            if key in self.events:
+                duplicates += 1
+            else:
+                self.events[key] = event
+                inserted += 1
             receipts.append(f"recall://{event['source_id']}/{event['native_id']}?rev=1")
+        self.duplicate_events += duplicates
         if self.fail_after_commit:
             self.fail_after_commit = False
             raise OSError("synthetic lost acknowledgement")
         return {
-            "status": "committed", "inserted": len(events),
-            "duplicate_events": 0, "receipts": receipts, "replay": False,
+            "status": "committed", "inserted": inserted,
+            "duplicate_events": duplicates, "receipts": receipts, "replay": False,
         }
 
 
@@ -131,6 +145,9 @@ class ConnectorRunnerTest(unittest.TestCase):
         runner = self.runner(connector, brain)
         with self.assertRaisesRegex(ConnectorRunError, "brain_unavailable"):
             runner.run_once()
+        self.assertEqual(
+            runner.db.execute("SELECT count(*) FROM acknowledged_records").fetchone()[0], 0,
+        )
         self.assertFalse(runner.doctor()["checkpointed"])
         self.assertEqual(runner.doctor()["pending"], 1)
         runner.close()
@@ -140,10 +157,84 @@ class ConnectorRunnerTest(unittest.TestCase):
         self.assertEqual(result["replayed"], 1)
         self.assertTrue(recovered.doctor()["checkpointed"])
         self.assertEqual(len(brain.events), 1)
+        self.assertEqual(
+            recovered.db.execute("SELECT count(*) FROM acknowledged_records").fetchone()[0], 1,
+        )
         self.assertEqual(connector.pulls, [None])
         recovered.run_once()
         self.assertEqual(connector.pulls, [None, "page-1"])
         recovered.close()
+
+    def test_reordered_acknowledged_record_is_not_resubmitted(self) -> None:
+        repeated = record("reordered-one", "same acknowledged content")
+        connector = SyntheticConnector({
+            None: ConnectorPage(records=(repeated,), next_cursor="first", has_more=True),
+            "first": ConnectorPage(records=(repeated,), next_cursor="second", has_more=False),
+        })
+        brain = FakeBrain()
+        runner = self.runner(connector, brain)
+        self.assertEqual(runner.run_once()["acked"], 1)
+        second = runner.run_once()
+        self.assertEqual(second["acked"], 0)
+        self.assertEqual(brain.calls, 1)
+        self.assertEqual(brain.duplicate_events, 0)
+        self.assertEqual(second["deduplicated"], 1)
+        runner.close()
+
+    def test_changed_content_and_tombstone_ingest_but_old_versions_stay_suppressed(self) -> None:
+        connector = SyntheticConnector({
+            None: ConnectorPage(
+                records=(record("versioned-one", "first version"),),
+                next_cursor="first", has_more=True,
+            ),
+            "first": ConnectorPage(
+                records=(record("versioned-one", "second version"),),
+                next_cursor="second", has_more=True,
+            ),
+            "second": ConnectorPage(
+                records=(record("versioned-one", "deleted", deleted=True),),
+                next_cursor="deleted", has_more=True,
+            ),
+            "deleted": ConnectorPage(
+                records=(record("versioned-one", "first version"),),
+                next_cursor="done", has_more=False,
+            ),
+        })
+        brain = FakeBrain()
+        runner = self.runner(connector, brain)
+        self.assertEqual(runner.run_once()["acked"], 1)
+        self.assertEqual(runner.run_once()["acked"], 1)
+        self.assertEqual(runner.run_once()["acked"], 1)
+        final = runner.run_once()
+        self.assertEqual(final["acked"], 0)
+        self.assertEqual(final["deduplicated"], 1)
+        self.assertEqual(brain.calls, 3)
+        self.assertEqual(brain.duplicate_events, 0)
+        self.assertEqual(
+            runner.db.execute("SELECT count(*) FROM acknowledged_records").fetchone()[0], 3,
+        )
+        runner.close()
+
+    def test_acknowledged_ledger_contains_hashes_only(self) -> None:
+        native_id = "ledger-native-marker-73"
+        content_marker = "ledger-content-marker-84"
+        connector = SyntheticConnector({None: ConnectorPage(
+            records=(record(native_id, content_marker),), next_cursor="done", has_more=False,
+        )})
+        runner = self.runner(connector, FakeBrain())
+        runner.run_once()
+        row = runner.db.execute(
+            "SELECT native_sha256,content_sha256 FROM acknowledged_records"
+        ).fetchone()
+        self.assertEqual(
+            row["native_sha256"],
+            hashlib.sha256(f"{runner.source_id}\0{native_id}".encode()).hexdigest(),
+        )
+        self.assertRegex(row["native_sha256"], r"\A[0-9a-f]{64}\Z")
+        self.assertRegex(row["content_sha256"], r"\A[0-9a-f]{64}\Z")
+        self.assertNotIn(native_id.encode(), self.spool_bytes())
+        self.assertNotIn(content_marker.encode(), self.spool_bytes())
+        runner.close()
 
     def test_pending_payload_is_durable_but_acknowledged_bytes_are_purged(self) -> None:
         marker = "synthetic-ack-purge-marker-91"
@@ -290,6 +381,131 @@ class ConnectorRunnerTest(unittest.TestCase):
         self.assertNotIn(cursor, rendered_doctor)
         self.assertTrue(runner.doctor()["checkpointed"])
         runner.close()
+
+
+class AcknowledgedSeedTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        os.chmod(self.root, 0o700)
+        self.spool = self.root / "connector.db"
+        connector = SyntheticConnector({})
+        runner = ConnectorRunner(connector=connector, brain=FakeBrain(), spool_path=self.spool)
+        runner.close()
+        self.seed = self.root / "seed.json"
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def write_seed(self, value: object, *, path: Path | None = None, mode: int = 0o600) -> Path:
+        target = path or self.seed
+        target.write_text(json.dumps(value))
+        os.chmod(target, mode)
+        return target
+
+    @staticmethod
+    def pair(native: str = "a", content: str = "b") -> dict[str, str]:
+        return {
+            "native_sha256": hashlib.sha256(native.encode()).hexdigest(),
+            "content_sha256": hashlib.sha256(content.encode()).hexdigest(),
+        }
+
+    def test_seed_is_idempotent_content_free_and_suppresses_first_upgraded_sweep(self) -> None:
+        native_id = "already-central"
+        repeated = record(native_id, "already central content")
+        connector = SyntheticConnector({None: ConnectorPage(
+            records=(repeated,), next_cursor="done", has_more=False,
+        )})
+        event_runner = ConnectorRunner(
+            connector=connector, brain=FakeBrain(), spool_path=self.root / "event.db",
+        )
+        event = event_runner._event(repeated, repeated.content, repeated.provenance)
+        event_runner.close()
+        pair = {
+            "native_sha256": hashlib.sha256(
+                f"{connector.source_id}\0{native_id}".encode()
+            ).hexdigest(),
+            "content_sha256": event["content_sha256"],
+        }
+        self.write_seed({"schema_version": 1, "records": [pair]})
+        result = seed_acknowledged_records(spool_path=self.spool, seed_path=self.seed)
+        self.assertEqual(result, {
+            "schema_version": 1, "seeded": 1, "already_acknowledged": 0,
+        })
+        again = seed_acknowledged_records(spool_path=self.spool, seed_path=self.seed)
+        self.assertEqual(again, {
+            "schema_version": 1, "seeded": 0, "already_acknowledged": 1,
+        })
+        brain = FakeBrain()
+        upgraded = ConnectorRunner(connector=connector, brain=brain, spool_path=self.spool)
+        synced = upgraded.run_once()
+        self.assertEqual(synced["deduplicated"], 1)
+        self.assertEqual(synced["acked"], 0)
+        self.assertEqual(brain.calls, 0)
+        upgraded.close()
+
+    def test_seed_rejects_non_hash_data_duplicates_uppercase_and_open_schema(self) -> None:
+        pair = self.pair()
+        invalid = [
+            {"schema_version": 1, "records": [{**pair, "native_sha256": "raw-id"}]},
+            {"schema_version": 1, "records": [{**pair, "native_sha256": pair["native_sha256"].upper()}]},
+            {"schema_version": 1, "records": [pair, pair]},
+            {"schema_version": 1, "records": [{**pair, "extra": "not-closed"}]},
+            {"schema_version": 1, "records": [pair], "extra": True},
+        ]
+        for index, value in enumerate(invalid):
+            with self.subTest(index=index):
+                self.write_seed(value)
+                with self.assertRaises(ConnectorContractError):
+                    seed_acknowledged_records(spool_path=self.spool, seed_path=self.seed)
+        with sqlite3.connect(self.spool) as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM acknowledged_records").fetchone()[0], 0)
+
+    def test_seed_rejects_relative_paths_bad_modes_symlinks_and_unsafe_parent(self) -> None:
+        manifest = {"schema_version": 1, "records": [self.pair()]}
+        self.write_seed(manifest)
+        with self.assertRaisesRegex(ConnectorContractError, "absolute"):
+            seed_acknowledged_records(spool_path=self.spool, seed_path=Path("seed.json"))
+        self.write_seed(manifest, mode=0o644)
+        with self.assertRaisesRegex(ConnectorContractError, "0600"):
+            seed_acknowledged_records(spool_path=self.spool, seed_path=self.seed)
+        self.write_seed(manifest)
+        link = self.root / "seed-link.json"
+        link.symlink_to(self.seed)
+        with self.assertRaisesRegex(ConnectorContractError, "non-symlink"):
+            seed_acknowledged_records(spool_path=self.spool, seed_path=link)
+        os.chmod(self.root, 0o755)
+        with self.assertRaisesRegex(ConnectorContractError, "0700"):
+            seed_acknowledged_records(spool_path=self.spool, seed_path=self.seed)
+
+    def test_seed_cli_emits_counts_without_paths_or_hashes(self) -> None:
+        pair = self.pair("cli-native", "cli-content")
+        self.write_seed({"schema_version": 1, "records": [pair]})
+        output = io.StringIO()
+        with mock.patch("sys.argv", [
+            "recall-brain", "connector-spool-seed-acknowledged",
+            "--spool", str(self.spool), "--input", str(self.seed),
+        ]), mock.patch("sys.stdout", output):
+            client_cli.main()
+        rendered = output.getvalue()
+        self.assertEqual(json.loads(rendered)["seeded"], 1)
+        self.assertNotIn(str(self.spool), rendered)
+        self.assertNotIn(str(self.seed), rendered)
+        self.assertNotIn(pair["native_sha256"], rendered)
+        self.assertNotIn(pair["content_sha256"], rendered)
+
+    def test_seed_rejects_pending_work_without_modifying_ledger(self) -> None:
+        pair = self.pair("pending-native", "pending-content")
+        self.write_seed({"schema_version": 1, "records": [pair]})
+        with sqlite3.connect(self.spool) as db:
+            db.execute(
+                "INSERT INTO pages(cursor_before,cursor_after,has_more,created_at) VALUES (?,?,?,?)",
+                ("null", '"next"', 0, 1.0),
+            )
+        with self.assertRaisesRegex(ConnectorContractError, "no pending"):
+            seed_acknowledged_records(spool_path=self.spool, seed_path=self.seed)
+        with sqlite3.connect(self.spool) as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM acknowledged_records").fetchone()[0], 0)
 
 
 if __name__ == "__main__":

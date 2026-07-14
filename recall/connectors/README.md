@@ -106,6 +106,30 @@ boundary behind them so a later status transition is revisited.
 List absence, 404, retention, and authorization failure never infer deletion—forget
 an imported result explicitly with its Brain receipt.
 
+After a valid Brain acknowledgement, the runner keeps only the lowercase
+SHA-256 pair for the source-qualified native ID and canonical content. Exact
+versions encountered again on a reordered upstream page advance the cursor
+without another Brain request. Changed content and tombstones remain distinct
+versions and still ingest. A lost acknowledgement deliberately replays because
+the pair is not recorded until the acknowledgement transaction commits.
+
+When upgrading a spool whose records already exist centrally, stop its service
+and create a private hash-only seed manifest from canonical Brain events:
+
+```json
+{"schema_version":1,"records":[{"native_sha256":"<64 lowercase hex>","content_sha256":"<64 lowercase hex>"}]}
+```
+
+The manifest and existing spool must be absolute, regular non-symlink mode-0600
+files in mode-0700 non-symlink directories. The spool must have pinned identity
+and no pending work. The command validates the entire closed schema before one
+atomic, idempotent insert and emits counts only:
+
+```bash
+recall-brain connector-spool-seed-acknowledged \
+  --spool "$STATE/grep-ai.db" --input "$PRIVATE/grep-ai-ack-seed.json"
+```
+
 ## Declarative registry and content-free status
 
 `connectors.registry` is the closed inventory for Recall's installed input
