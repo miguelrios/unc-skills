@@ -40,6 +40,7 @@ install -d -m 700 "$RUNTIME_HOME" "$CONFIG_DIR" "$PLUGIN_HOME" "$HOME/.local/bin
 install -m 600 "$ROOT_DIR/runtime/bridge_runtime.py" "$RUNTIME_HOME/bridge_runtime.py"
 install -m 700 "$SKILL_SOURCE/scripts/tether_notify.py" "$RUNTIME_HOME/tether_notify.py"
 install -m 600 "$ROOT_DIR/runtime/plugin/__init__.py" "$PLUGIN_HOME/__init__.py"
+install -m 644 "$ROOT_DIR/runtime/plugin/plugin.yaml" "$PLUGIN_HOME/plugin.yaml"
 
 if [[ ! -f "$CONFIG_DIR/config.toml" ]]; then
   install -m 600 "$ROOT_DIR/runtime/config.example.toml" "$CONFIG_DIR/config.toml"
@@ -54,6 +55,16 @@ install_skill() {
   install -m 644 "$SKILL_SOURCE/references/setup.md" "$destination/references/setup.md"
   install -m 644 "$SKILL_SOURCE/references/contract.md" "$destination/references/contract.md"
   install -m 700 "$SKILL_SOURCE/scripts/tether_notify.py" "$destination/scripts/tether_notify.py"
+
+  # Older Greppy instructions invoke this path directly. Keep it as a thin
+  # compatibility entrypoint to canonical Tether so it cannot retain legacy
+  # defaults such as silently restricting every shared thread to one operator.
+  local legacy_destination="$harness_home/skills/hermes-slack-bridge"
+  if [[ -d "$legacy_destination" ]]; then
+    install -d -m 700 "$legacy_destination/scripts"
+    install -m 644 "$ROOT_DIR/runtime/compat/hermes-slack-bridge-SKILL.md" "$legacy_destination/SKILL.md"
+    install -m 700 "$SKILL_SOURCE/scripts/tether_notify.py" "$legacy_destination/scripts/hermes_notify.py"
+  fi
 }
 
 if [[ "$HARNESS" == "codex" || "$HARNESS" == "both" ]]; then

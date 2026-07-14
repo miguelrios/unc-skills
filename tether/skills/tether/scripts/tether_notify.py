@@ -46,21 +46,25 @@ def detected_source(args: argparse.Namespace) -> tuple[str, dict[str, str]]:
     if args.hermes_session_id:
         return "hermes_session", {"session_id": args.hermes_session_id, "cwd": cwd}
     terminal = {}
+    terminal_identity = None
     if os.getenv("ZELLIJ_SESSION_NAME") and os.getenv("ZELLIJ_PANE_ID"):
+        terminal_identity = zellij_pane_identity(
+            os.environ["ZELLIJ_SESSION_NAME"],
+            os.environ["ZELLIJ_PANE_ID"],
+            cwd,
+        )
         terminal = {
             "zellij_session": os.environ["ZELLIJ_SESSION_NAME"],
             "zellij_pane_id": os.environ["ZELLIJ_PANE_ID"],
+            "pane_agent": terminal_identity["pane_agent"],
+            "pane_command_hash": terminal_identity["pane_command_hash"],
         }
     if os.getenv("CLAUDE_CODE_SESSION_ID"):
         return "claude_session", {"session_id": os.environ["CLAUDE_CODE_SESSION_ID"], "cwd": cwd, **terminal}
     if os.getenv("CODEX_THREAD_ID"):
         return "codex_session", {"session_id": os.environ["CODEX_THREAD_ID"], "cwd": cwd, **terminal}
     if terminal:
-        return "zellij_pane", zellij_pane_identity(
-            terminal["zellij_session"],
-            terminal["zellij_pane_id"],
-            cwd,
-        )
+        return "zellij_pane", terminal_identity
     raise SystemExit("No resumable context found; pass --run-id for a headless run")
 
 
@@ -79,10 +83,19 @@ def build_parser() -> argparse.ArgumentParser:
     reply = sub.add_parser("reply")
     reply.add_argument("--bridge-id", required=True)
     reply.add_argument("--text", required=True)
+    post = sub.add_parser("post")
+    post.add_argument("--channel", required=True)
+    post.add_argument("--thread-ts", required=True)
+    post.add_argument("--text", required=True)
     history = sub.add_parser("history")
     history.add_argument("--channel")
     history.add_argument("--limit", type=int, default=15)
+    thread = sub.add_parser("thread")
+    thread.add_argument("--channel", required=True)
+    thread.add_argument("--thread-ts", required=True)
+    thread.add_argument("--limit", type=int, default=100)
     sub.add_parser("doctor")
+    sub.add_parser("identity")
     setup = sub.add_parser("setup")
     setup.add_argument("--non-interactive", action="store_true")
     setup.add_argument("--no-restart", action="store_true")
@@ -94,8 +107,52 @@ def _run_hermes(command: list[str], timeout: int) -> subprocess.CompletedProcess
     return subprocess.run(command, timeout=timeout, text=True)  # nosec B603
 
 
+def _find_hermes() -> str | None:
+    configured = os.getenv("HERMES_BIN", "").strip()
+    candidates = [
+        configured,
+        shutil.which("hermes") or "",
+        str(Path.home() / ".local" / "bin" / "hermes"),
+        str(Path(os.getenv("HERMES_HOME", Path.home() / ".hermes")) / "hermes-agent" / "venv" / "bin" / "hermes"),
+    ]
+    return next((path for path in candidates if path and os.path.isfile(path) and os.access(path, os.X_OK)), None)
+
+
+def _enable_plugin(hermes: str) -> int:
+    enabled = _run_hermes([hermes, "plugins", "enable", "tether"], SERVICE_TIMEOUT_SECONDS)
+    if enabled.returncode:
+        print("Tether was installed but Hermes could not enable its plugin.", file=sys.stderr)
+        return enabled.returncode
+    hermes_home = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes"))
+    if (hermes_home / "plugins" / "session-bridge").is_dir():
+        disabled = _run_hermes(
+            [hermes, "plugins", "disable", "session-bridge"],
+            SERVICE_TIMEOUT_SECONDS,
+        )
+        if disabled.returncode:
+            print("Refusing to run Tether alongside the legacy session-bridge plugin.", file=sys.stderr)
+            return disabled.returncode
+    return 0
+
+
+def _configure_peer_agents(hermes: str) -> int:
+    settings = (
+        ("slack.allow_bots", "all"),
+        ("display.busy_ack_enabled", "false"),
+    )
+    for key, value in settings:
+        configured = _run_hermes(
+            [hermes, "config", "set", key, value],
+            SERVICE_TIMEOUT_SECONDS,
+        )
+        if configured.returncode:
+            print(f"Tether could not configure {key} for peer-agent threads.", file=sys.stderr)
+            return configured.returncode
+    return 0
+
+
 def run_setup(args: argparse.Namespace) -> int:
-    hermes = shutil.which("hermes")
+    hermes = _find_hermes()
     if not hermes:
         print(
             "Hermes Agent is required. Install it from "
@@ -103,6 +160,12 @@ def run_setup(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    plugin_result = _enable_plugin(hermes)
+    if plugin_result:
+        return plugin_result
+    peer_result = _configure_peer_agents(hermes)
+    if peer_result:
+        return peer_result
     if args.non_interactive:
         result = _run_hermes([hermes, "slack", "manifest", "--write"], SERVICE_TIMEOUT_SECONDS)
         if result.returncode:
@@ -146,12 +209,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         ok, checks = doctor()
         print("\n".join(checks))
         return 0 if ok else 1
+    if args.command == "identity":
+        print(json.dumps(broker_call({"op": "identity"}), ensure_ascii=False))
+        return 0
     if args.command == "setup":
         return run_setup(args)
     if args.command == "reply":
         result = broker_call({"op": "reply", "bridge_id": args.bridge_id, "text": args.text})
+    elif args.command == "post":
+        result = broker_call({
+            "op": "thread_reply", "channel_id": args.channel,
+            "thread_ts": args.thread_ts, "text": args.text,
+        })
     elif args.command == "history":
         result = broker_call({"op": "history", "channel_id": args.channel or "", "limit": args.limit})
+        print(json.dumps(result["messages"], ensure_ascii=False))
+        return 0
+    elif args.command == "thread":
+        result = broker_call({
+            "op": "thread_history",
+            "channel_id": args.channel,
+            "thread_ts": args.thread_ts,
+            "limit": args.limit,
+        })
         print(json.dumps(result["messages"], ensure_ascii=False))
         return 0
     else:
