@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "corpus_sha256": "851ea4827e18bb466c0f5e90155a3a21a495da973e4bc0f401d776fcffd8c830",
+  "expected": {
+    "cases": 15,
+    "errors": 1,
+    "kept": 5,
+    "privacy_canaries": 4,
+    "skipped": 9
+  },
+  "policy": {
+    "allowed_record_types": [
+      "assistant",
+      "user"
+    ],
+    "allowed_content_blocks": [
+      "text"
+    ],
+    "deletion": "explicit_receipt_only",
+    "excluded_surfaces": [
+      "attachments",
+      "audit",
+      "metadata",
+      "reasoning",
+      "system",
+      "tool_input",
+      "tool_output"
+    ]
+  }
+}
