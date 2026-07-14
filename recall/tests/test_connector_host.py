@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -197,6 +198,26 @@ class HostCliTest(unittest.TestCase):
         self.assertEqual(result, {"schema_version": 1, "status": "stopped", "cycles": 2})
         self.assertEqual(load.call_count, 2); self.assertEqual(build.call_count, 2)
         first.close.assert_called_once(); second.close.assert_called_once()
+
+    def test_mac_live_probe_excludes_structural_connector_metadata(self) -> None:
+        script = Path(__file__).resolve().parents[1] / "server/tests/e2e_macos_connector_host_c8g.py"
+        spec = importlib.util.spec_from_file_location("c8g_mac_e2e", script)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        event = {"content": {
+            "provider": "grep.ai", "status": "complete",
+            "question": "Synthetic private question marker",
+            "report_markdown": "Synthetic private report marker",
+            "structured_output": None, "expert_id": None,
+        }}
+        private = module.private_content_strings(event)
+        self.assertEqual(private, [
+            "Synthetic private question marker", "Synthetic private report marker",
+        ])
+        self.assertEqual(module.private_query(event), "Synthetic")
+        self.assertNotIn("grep.ai", private)
+        self.assertNotIn("complete", private)
 
 
 if __name__ == "__main__":

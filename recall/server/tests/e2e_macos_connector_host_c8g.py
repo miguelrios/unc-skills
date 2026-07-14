@@ -161,8 +161,31 @@ def wait_until(operation, *, timeout=90):
     raise AssertionError("bounded Mac condition did not become true")
 
 
+def private_content_strings(event) -> list[str]:
+    content = event.get("content", {})
+    if not isinstance(content, dict):
+        raise AssertionError("live Grep event content is not an object")
+
+    def leaves(value):
+        if isinstance(value, str) and value:
+            yield value
+        elif isinstance(value, dict):
+            for child in value.values():
+                yield from leaves(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from leaves(child)
+
+    values = []
+    for key in ("question", "report_markdown", "structured_output", "expert_id"):
+        values.extend(leaves(content.get(key)))
+    if not values:
+        raise AssertionError("live Grep event has no private source content")
+    return values
+
+
 def private_query(event) -> str:
-    text = json.dumps(event.get("content", {}), ensure_ascii=False)
+    text = "\n".join(private_content_strings(event))
     words = re.findall(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{5,}", text)
     if not words:
         raise AssertionError("live Grep event has no bounded private query probe")
@@ -309,12 +332,11 @@ def main() -> None:
         rendered_status = json.dumps(status)
         assert EXPORT_SOURCE not in rendered_status and GREP_SOURCE not in rendered_status
 
-        private_strings = [EXPORT_MARKER, grep_key]
-        private_strings.extend(str(value) for value in grep_event.get("content", {}).values() if isinstance(value, str))
+        private_strings = [EXPORT_MARKER, grep_key, *private_content_strings(grep_event)]
         for path in (prefix / "state").iterdir():
             if path.is_file():
-                raw = path.read_bytes().decode(errors="ignore")
-                assert all(value not in raw for value in private_strings if value)
+                raw = path.read_bytes()
+                assert all(value.encode() not in raw for value in private_strings)
 
         disable = subprocess.run([
             str(args.bundle_root / "install.sh"), "--prefix", str(prefix),
