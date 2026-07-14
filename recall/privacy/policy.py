@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import copy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import re
 import ssl
@@ -180,10 +180,14 @@ def load_scoped_virtual_key(path: Path) -> str:
         raise ValueError("privacy judge virtual key has the wrong scope")
     try:
         expires = datetime.fromisoformat(str(parsed["expires_at"]).replace("Z", "+00:00"))
-        if expires.tzinfo is None or expires.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+        if expires.tzinfo is None:
+            raise ValueError
+        now = datetime.now(timezone.utc)
+        expires = expires.astimezone(timezone.utc)
+        if not now < expires <= now + timedelta(hours=24):
             raise ValueError
     except (ValueError, TypeError) as error:
-        raise ValueError("privacy judge virtual key is expired or has invalid expiry") from error
+        raise ValueError("privacy judge virtual key must expire within 24 hours") from error
     value = parsed.get("virtual_key")
     if not isinstance(value, str) or not value:
         raise ValueError("privacy judge virtual-key file is empty")

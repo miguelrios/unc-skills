@@ -17,8 +17,8 @@ from privacy.policy import PrivacyPolicy, summarize_receipts
 
 COLLECTOR_VERSION = 1
 MAX_BATCH_BYTES = 8_000_000
-SENSITIVE_KEY = re.compile(r"(?:litellm.*master.*key|api[_-]?key|password|secret|authorization|bearer|token)", re.I)
-SENSITIVE_LINE = re.compile(r"(?i)(LITELLM_MASTER_KEY|api[_-]?key|password|secret|authorization|bearer|token)\s*[=:]\s*\S+")
+SENSITIVE_KEY = re.compile(r"(?:litellm.*master.*key|api[_-]?key|password|secret|authorization|bearer|access[_-]?token|refresh[_-]?token|token)$", re.I)
+SENSITIVE_LINE = re.compile(r"(?i)\b(LITELLM_MASTER_KEY|api[_-]?key|password|secret|authorization|bearer|access[_-]?token|refresh[_-]?token|token)\s*[=:]\s*\S+")
 
 
 def canonical_json(value: Any) -> bytes:

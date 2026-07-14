@@ -193,6 +193,22 @@ class CollectorTest(unittest.TestCase):
         self.assertEqual(payloads[0]["source_id"], "claude:linux:test")
         collector.close()
 
+    def test_benign_token_count_key_is_not_treated_as_a_credential(self) -> None:
+        (self.root / "session.jsonl").write_text(json.dumps({
+            "type": "event_msg", "timestamp": "2026-07-12T22:00:00Z",
+            "payload": {"type": "token_count", "info": {"total": 42}},
+        }) + "\n")
+        collector = Collector(
+            root=self.root, harness="claude", source_id="claude:linux:test",
+            spool_path=self.spool, endpoint=self.endpoint, token="test-token-not-a-secret",
+            privacy=PrivacyPolicy(mode="scrub"),
+        )
+        collector.scan()
+        rendered = json.dumps(collector.pending_envelopes())
+        self.assertIn("token_count", rendered)
+        self.assertIn('"total": 42', rendered)
+        collector.close()
+
     def test_drop_never_writes_sensitive_record_to_spool_or_network(self) -> None:
         canary = "synthetic-secret-drop-canary-91"
         (self.root / "session.jsonl").write_text(

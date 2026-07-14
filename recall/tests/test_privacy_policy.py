@@ -5,6 +5,7 @@ import json
 import re
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -130,7 +131,7 @@ class AgenticJudgeContractTest(unittest.TestCase):
             path.write_text(json.dumps({
                 "virtual_key": "synthetic-scoped-key",
                 "scope": "recall-privacy-judge",
-                "expires_at": "2099-01-01T00:00:00Z",
+                "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
             }))
             path.chmod(0o600)
             self.assertEqual(load_scoped_virtual_key(path), "synthetic-scoped-key")
