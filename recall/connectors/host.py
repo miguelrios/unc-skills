@@ -220,9 +220,19 @@ class HostedJobDefinition:
 def _endpoint(value: Any) -> str:
     if not isinstance(value, str) or len(value) > 2048:
         raise ConnectorHostError("invalid_endpoint")
-    parsed = urlparse(value)
-    production = parsed.scheme == "https" and bool(parsed.hostname) and parsed.port is None
-    loopback = parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost"} and parsed.port is not None
+    try:
+        parsed = urlparse(value)
+        port = parsed.port
+    except ValueError as error:
+        raise ConnectorHostError("invalid_endpoint") from error
+    valid_port = port is None or 1 <= port <= 65535
+    production = parsed.scheme == "https" and bool(parsed.hostname) and valid_port
+    loopback = (
+        parsed.scheme == "http"
+        and parsed.hostname in {"127.0.0.1", "localhost"}
+        and port is not None
+        and valid_port
+    )
     if not (production or loopback) or parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise ConnectorHostError("invalid_endpoint")
     if parsed.path not in {"", "/"}:
