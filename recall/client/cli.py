@@ -19,6 +19,8 @@ from client.mac import (
 from collector.collector import Collector
 from client.capture import CaptureClient, ORIGIN
 from client.mcp import McpServer, serve as serve_mcp
+from client.macos_utility import SOURCE_SPECS, MacUtilityError, disable_source, mac_status
+from connectors.cowork_local import CoworkLocalConnector
 from connectors.export_inbox import ExportInboxConnector
 from connectors.grep_ai import GrepAIConnector, load_private_api_key, validate_api_key
 from connectors.registry import (
@@ -173,6 +175,28 @@ def parser() -> argparse.ArgumentParser:
     collect.add_argument("--root", required=True)
     collect.add_argument("--spool", required=True)
 
+    cowork = commands.add_parser("cowork-local-sync")
+    _private_connection(cowork)
+    _privacy(cowork, choices=("scrub", "drop"), default="scrub")
+    cowork.add_argument("--root", required=True)
+    cowork.add_argument("--spool", required=True)
+
+    mac_status_parser = commands.add_parser("mac-status")
+    mac_status_parser.add_argument(
+        "--prefix", default=str(Path.home() / "Library" / "Application Support" / "RecallBrain")
+    )
+    mac_status_parser.add_argument(
+        "--launch-agents", default=str(Path.home() / "Library" / "LaunchAgents")
+    )
+    mac_status_parser.add_argument("--now", type=float)
+
+    mac_disable = commands.add_parser("mac-disable")
+    mac_disable.add_argument("--source", choices=tuple(SOURCE_SPECS), required=True)
+    mac_disable.add_argument(
+        "--launch-agents", default=str(Path.home() / "Library" / "LaunchAgents")
+    )
+    mac_disable.add_argument("--no-load", action="store_true")
+
     export = commands.add_parser("export")
     _connection(export)
     _privacy(export)
@@ -247,6 +271,25 @@ def parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = parser().parse_args()
+    if args.command == "mac-status":
+        try:
+            result = mac_status(
+                prefix=Path(args.prefix), launch_agents=Path(args.launch_agents),
+                now=time.time() if args.now is None else args.now,
+            )
+        except MacUtilityError as error:
+            raise SystemExit(str(error)) from None
+        print(json.dumps(result, sort_keys=True))
+        return
+    if args.command == "mac-disable":
+        try:
+            result = disable_source(
+                args.source, launch_agents=Path(args.launch_agents), no_load=args.no_load,
+            )
+        except MacUtilityError as error:
+            raise SystemExit(str(error)) from None
+        print(json.dumps(result, sort_keys=True))
+        return
     if args.command == "connector-registry-preview":
         print(json.dumps(registry_preview(), sort_keys=True))
         return
@@ -435,7 +478,7 @@ def main() -> None:
         "principal_id": args.principal_id,
         "visibility": args.visibility,
     }
-    privacy = _privacy_policy(args) if args.command in {"collect", "export", "put", "export-inbox-sync", "mcp-serve", "grep-ai-sync"} else PrivacyPolicy(mode="off")
+    privacy = _privacy_policy(args) if args.command in {"collect", "cowork-local-sync", "export", "put", "export-inbox-sync", "mcp-serve", "grep-ai-sync"} else PrivacyPolicy(mode="off")
     if args.command == "mcp-serve":
         backend = CaptureClient(**common, privacy=privacy)
         serve_mcp(
@@ -454,6 +497,18 @@ def main() -> None:
             result = {"scan": collector.scan(), "flush": collector.flush(), "doctor": collector.doctor()}
         finally:
             collector.close()
+    elif args.command == "cowork-local-sync":
+        connector = CoworkLocalConnector(
+            root=Path(args.root), source_id=args.source_id,
+        )
+        runner = ConnectorRunner(
+            connector=connector, brain=BrainClient(**common),
+            spool_path=Path(args.spool), privacy=privacy,
+        )
+        try:
+            result = {"sync": runner.run_once(), "doctor": runner.doctor()}
+        finally:
+            runner.close()
     elif args.command == "export":
         importer = ExportImporter(source_id=args.source_id, principal_id=args.principal_id, visibility=args.visibility, privacy=privacy)
         inventory = importer.inventory([Path(value) for value in args.inputs])

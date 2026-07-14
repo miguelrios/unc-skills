@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "evidence_class": "synthetic-content-free",
+  "package": {
+    "format": "recall-macos-v2",
+    "runtime": "arm64-cpython-3.12.13",
+    "artifact_sha256": "ef7566d7700d270b3358ed8558341b6d4ff3bb303faa601891e146b4b7e88e05",
+    "reproduced_builds": 2,
+    "byte_identical": true,
+    "secret_transcript_scan_matches": 0
+  },
+  "tests": {
+    "focused_tests_passed": 16,
+    "full_suite_tests_passed": 193,
+    "full_suite_tests_failed": 0
+  },
+  "mac_lifecycle": {
+    "legacy_sources_before_upgrade": 2,
+    "sources_after_upgrade": 4,
+    "checkpoint_preserved": true,
+    "absolute_bundled_runtimes": 4,
+    "source_scoped_keychain_accounts": 4,
+    "unique_source_ids": 4,
+    "per_source_disable_state_preserved": true,
+    "default_uninstall_state_retained": true,
+    "explicit_uninstall_state_deleted": true,
+    "private_source_records_read": 0
+  },
+  "status_privacy": {
+    "source_classes": 4,
+    "adversarial_path_matches": 0,
+    "credential_matches": 0,
+    "exception_text_matches": 0,
+    "content_matches": 0
+  }
+}

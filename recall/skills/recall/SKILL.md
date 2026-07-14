@@ -90,11 +90,11 @@ transcript; deletion still requires the canonical receipt. Never enable the
 optional contextual-PII judge without consent, and route it only through staging
 LiteLLM with a short-lived scoped virtual key—never a master key or direct provider.
 
-## Consented ChatGPT/Cowork exports
+## Consented ChatGPT exports and Cowork local project logs
 
 When the packaged Brain client is installed, use its explicit export inbox for
-ChatGPT/Cowork history. Never scrape application databases, caches, browser
-storage, Desktop, or Downloads. Inventory only the directory the user selected:
+ChatGPT exports. Never scrape application databases, caches, browser storage,
+Desktop, or Downloads. Inventory only the directory the user selected:
 
 ```bash
 recall-brain export-inbox-dry-run --inbox "$HOME/Recall Inbox" \
@@ -107,6 +107,23 @@ queues reference-safe tombstones; deleting a local file alone deliberately does
 not delete central memory. Use `--export-inbox` during Mac package installation
 to opt into scheduled sync, and `--disable-export-inbox` to unload that agent
 without destroying its recoverable catalog/spool.
+
+For Claude Cowork, the user may separately opt into the packaged `cowork`
+collector. This is a narrow exception for Cowork's local project-log surface
+beneath an explicitly selected `local-agent-mode-sessions` root; it is
+not permission to inspect a Claude application database, cache, audit log,
+attachment store, browser store, session metadata file, Desktop, or Downloads.
+Only user/assistant natural-language records under the nested
+`.claude/projects` logs are eligible. Privacy must be `scrub` or `drop` and is
+applied before spool or network writes. Local absence and archive state never
+imply deletion.
+
+Install the unified utility with explicit selections such as
+`--sources claude-code,codex,cowork` and `--export-inbox <selected-directory>`.
+Use `recall-brain mac-status` for a content-free enabled/health/lag/checkpoint
+view. Use `recall-brain mac-disable --source <class>` to unload one source while
+retaining its recoverable state; uninstall also retains state unless the user
+explicitly selects `--delete-state`.
 
 ## Deliberate capture from any MCP host
 

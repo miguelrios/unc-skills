@@ -159,11 +159,13 @@ class MacPackageTest(unittest.TestCase):
         self.assertIn("lib/connectors/sdk.py", packaged_paths)
         self.assertIn("lib/connectors/__init__.py", packaged_paths)
         self.assertIn("lib/connectors/export_inbox.py", packaged_paths)
+        self.assertIn("lib/connectors/cowork_local.py", packaged_paths)
         self.assertIn("lib/connectors/grep_ai.py", packaged_paths)
         self.assertIn("lib/connectors/supervisor.py", packaged_paths)
         self.assertIn("lib/connectors/host.py", packaged_paths)
         self.assertIn("lib/client/capture.py", packaged_paths)
         self.assertIn("lib/client/mcp.py", packaged_paths)
+        self.assertIn("lib/client/macos_utility.py", packaged_paths)
 
         wrapper = (package / "bin" / "recall-brain").read_text()
         self.assertIn('exec "$HERE/runtime/bin/python3" -m client.cli', wrapper)
@@ -178,6 +180,9 @@ class MacPackageTest(unittest.TestCase):
         self.assertIn('get_ca_certs()', installer)
         self.assertIn('cp -R "$SOURCE/lib/connectors"', installer)
         self.assertIn('"client.cli", "export-inbox-sync"', installer)
+        self.assertIn('"client.cli", "cowork-local-sync"', installer)
+        self.assertIn('claude-code', installer)
+        self.assertIn('cowork', installer)
         self.assertIn('--export-inbox', installer)
         self.assertIn('--disable-export-inbox', installer)
         self.assertIn('--connector-supervisor-config', installer)
@@ -190,6 +195,9 @@ class MacPackageTest(unittest.TestCase):
         uninstaller = (package / "uninstall.sh").read_text()
         self.assertIn('while launchctl print "$TARGET"', uninstaller)
         self.assertIn('launch agent stop did not converge', uninstaller)
+        self.assertIn('--delete-state', uninstaller)
+        self.assertIn('"state_retained":true', uninstaller)
+        self.assertNotIn('rm -rf "$PREFIX"\necho', uninstaller)
         invalid = subprocess.run([
             "sh", str(package / "install.sh"),
             "--endpoint", "https://example.invalid", "--host-id", "test",
