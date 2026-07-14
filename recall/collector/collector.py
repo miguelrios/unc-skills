@@ -18,7 +18,15 @@ from privacy.policy import PrivacyPolicy, summarize_receipts
 COLLECTOR_VERSION = 1
 MAX_BATCH_BYTES = 8_000_000
 SENSITIVE_KEY = re.compile(r"(?:litellm.*master.*key|api[_-]?key|password|secret|authorization|bearer|access[_-]?token|refresh[_-]?token|token)$", re.I)
-SENSITIVE_LINE = re.compile(r"(?i)\b(LITELLM_MASTER_KEY|api[_-]?key|password|secret|authorization|bearer|access[_-]?token|refresh[_-]?token|token)\s*[=:]\s*\S+")
+SENSITIVE_LINE = re.compile(
+    r"(?i)\b(LITELLM_MASTER_KEY|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|password|secret|authorization|bearer|access[_-]?token|refresh[_-]?token|token|key)"
+    r"\s*[=:]\s*\S{12,}|sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|"
+    r"(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}|AKIA[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{30,}"
+)
+PRIVATE_KEY_BLOCK = re.compile(
+    r"-----BEGIN (?P<label>[A-Z0-9 ]*PRIVATE KEY)-----.*?-----END (?P=label)-----",
+    re.DOTALL,
+)
 
 
 def canonical_json(value: Any) -> bytes:
@@ -31,7 +39,7 @@ def sanitize(value: Any) -> Any:
     if isinstance(value, list):
         return [sanitize(item) for item in value]
     if isinstance(value, str):
-        without_nul = value.replace("\x00", "[NUL]")
+        without_nul = PRIVATE_KEY_BLOCK.sub("[REDACTED-PRIVATE-KEY]", value.replace("\x00", "[NUL]"))
         return "\n".join("[REDACTED]" if SENSITIVE_LINE.search(line) else line for line in without_nul.splitlines())
     return value
 
@@ -193,6 +201,7 @@ class Collector:
             "provenance": {
                 "harness": self.harness,
                 "collector_version": COLLECTOR_VERSION,
+                "privacy_policy_version": self.privacy.apply({}).policy_version,
                 "original_path": str(path),
                 "byte_start": start,
                 "byte_end": end,

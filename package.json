@@ -21,6 +21,7 @@
       "./parable/skills",
       "./cascade/skills",
       "./recall/skills",
+      "./recap/skills",
       "./tether/skills",
       "./desloppify/skills"
     ]

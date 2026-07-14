@@ -40,8 +40,25 @@ def write_session(path: Path, secret: bool = False) -> None:
 class RecapCollectorTest(unittest.TestCase):
     def setUp(self):
         self.recap = load_recap()
+        self.old_env = {key: os.environ.get(key) for key in (
+            "RECALL_CLAUDE_ROOT", "RECALL_CODEX_ROOT", "RECALL_SESSION_CURSOR_DB",
+            "RECALL_EXPORT_SOURCE_ID", "RECALL_MODE", "RECALL_URL",
+        )}
+        os.environ["RECALL_MODE"] = "local"
+        os.environ.pop("RECALL_URL", None)
+
+    def tearDown(self):
+        for key, value in self.old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
     def args(self, session: Path, output: Path | None = None, repo: Path | None = None):
+        os.environ["RECALL_CLAUDE_ROOT"] = str(session.parent)
+        os.environ["RECALL_CODEX_ROOT"] = str(session.parent)
+        os.environ["RECALL_SESSION_CURSOR_DB"] = str(session.parent / "session-cursors.db")
+        os.environ["RECALL_EXPORT_SOURCE_ID"] = "claude:test:recap"
         return SimpleNamespace(
             current=False, session=str(session), output=str(output) if output else None,
             repo=str(repo) if repo else None, recall_script=str(RECALL),
@@ -57,6 +74,9 @@ class RecapCollectorTest(unittest.TestCase):
             self.assertEqual(manifest["coverage"]["redacted_lines"], 1)
             self.assertEqual(manifest["coverage"]["semantic_accounting"], "not_performed")
             self.assertTrue(manifest["coverage"]["source_complete"])
+            self.assertEqual(manifest["collector"]["page_count"], 1)
+            self.assertEqual(manifest["scope"]["source_id"], "claude:test:recap")
+            self.assertIn("boundary_receipt", manifest["scope"])
             self.assertTrue(self.recap.validate_manifest(manifest)["valid"])
 
     def test_validation_detects_tampered_text(self):
@@ -68,6 +88,17 @@ class RecapCollectorTest(unittest.TestCase):
             result = self.recap.validate_manifest(manifest)
             self.assertFalse(result["valid"])
             self.assertIn("event 1 text digest mismatch", result["errors"])
+
+    def test_defense_in_depth_redacts_private_key_blocks(self):
+        private_block = (
+            "-----BEGIN " + "PRIVATE KEY-----\n" + ("Q" * 256)
+            + "\n-----END " + "PRIVATE KEY-----"
+        )
+        safe, count = self.recap.sanitize("before\n" + private_block + "\nafter")
+        self.assertEqual(count, 1)
+        self.assertNotIn("Q" * 64, safe)
+        self.assertIn("before", safe)
+        self.assertIn("after", safe)
 
     def test_private_write_uses_0600_and_rejects_symlink(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -82,6 +113,17 @@ class RecapCollectorTest(unittest.TestCase):
             with self.assertRaises(self.recap.RecapError):
                 self.recap.private_write(link, {"unsafe": True})
             self.assertEqual(target.read_text(), "unchanged")
+
+    def test_private_write_never_chmods_shared_parent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            shared = Path(temporary) / "shared"
+            shared.mkdir(mode=0o755)
+            shared.chmod(0o755)
+            before = shared.stat().st_mode & 0o777
+            with self.assertRaisesRegex(self.recap.RecapError, "0700"):
+                self.recap.private_write(shared / "manifest.json", {"unsafe": True})
+            self.assertEqual(shared.stat().st_mode & 0o777, before)
+            self.assertFalse((shared / "manifest.json").exists())
 
     def test_git_snapshot_labels_current_state_without_causation(self):
         with tempfile.TemporaryDirectory() as temporary:

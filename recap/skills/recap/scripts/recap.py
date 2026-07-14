@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import json
 import os
 import re
@@ -17,14 +16,27 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = "recap.manifest.v0.1"
+SCHEMA_VERSION = "recap.manifest.v0.2"
 UUID_RE = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
 SECRET_PATTERNS = (
-    re.compile(r"(?i)(?:api[_-]?key|token|secret|password|authorization)\s*[=:]\s*\S+"),
-    re.compile(r"\b(?:sk|xox[baprs]|gh[psou])[-_][A-Za-z0-9_-]{16,}\b"),
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-    re.compile(r"\bAKIA[A-Z0-9]{16}\b"),
+    re.compile(
+        r"[\"']?(?:api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|token|secret|password|bearer|authorization|\bkey)"
+        r"[\"']?\s*[=:]\s*[\"']?(?:Bearer\s+)?\S{12,}|sk-[A-Za-z0-9_-]{20,}|"
+        r"xox[baprs]-[A-Za-z0-9-]{10,}|(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}|"
+        r"AKIA[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{30,}",
+        re.I,
+    ),
 )
+PRIVATE_KEY_RE = re.compile(
+    r"-----BEGIN (?P<label>[A-Z0-9 ]*PRIVATE KEY)-----.*?-----END (?P=label)-----",
+    re.DOTALL,
+)
+REDACTION_MARKERS = {
+    "[redacted-secret-line]",
+    "[redacted-private-key-block]",
+    "[REDACTED]",
+    "[REDACTED-PRIVATE-KEY]",
+}
 
 
 class RecapError(RuntimeError):
@@ -48,18 +60,21 @@ def sha256_file(path: Path) -> str:
 
 
 def sanitize(text: str) -> tuple[str, int]:
+    text = PRIVATE_KEY_RE.sub("[redacted-private-key-block]", text)
     redactions = 0
     safe_lines = []
-    for line in text.splitlines():
-        if line == "[redacted-secret-line]":
-            safe_lines.append(line)
+    for part in text.splitlines(keepends=True):
+        line = part.rstrip("\r\n")
+        ending = part[len(line):]
+        if line in REDACTION_MARKERS:
+            safe_lines.append(line + ending)
             redactions += 1
         elif any(pattern.search(line) for pattern in SECRET_PATTERNS):
-            safe_lines.append("[redacted-secret-line]")
+            safe_lines.append("[redacted-secret-line]" + ending)
             redactions += 1
         else:
-            safe_lines.append(line)
-    return "\n".join(safe_lines), redactions
+            safe_lines.append(part)
+    return "".join(safe_lines), redactions
 
 
 def session_id_from_path(path: Path) -> str:
@@ -110,18 +125,67 @@ def recall_candidates(explicit: str | None) -> list[Path]:
     return candidates
 
 
-def load_recall(explicit: str | None):
+def find_recall_script(explicit: str | None) -> Path:
     for candidate in recall_candidates(explicit):
-        if not candidate.is_file():
-            continue
-        spec = importlib.util.spec_from_file_location("recap_recall_adapter", candidate)
-        if spec is None or spec.loader is None:
-            continue
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        if hasattr(module, "direct_chunks"):
-            return module, candidate
-    raise RecapError("Recall parser not found; install Recall or pass --recall-script")
+        if candidate.is_file():
+            return candidate
+    raise RecapError("Recall session exporter not found; install Recall or pass --recall-script")
+
+
+def recall_session_pages(script: Path, *, current: bool, session: str | None) -> tuple[dict, list[dict]]:
+    cursor = None
+    session_metadata = None
+    pages = []
+    expected_sequence = 0
+    for _page_number in range(1_000_000):
+        command = [sys.executable, str(script), "session-export", "--limit", "1000"]
+        if cursor:
+            command.extend(["--cursor", cursor])
+        elif current:
+            command.append("--current")
+        else:
+            command.extend(["--target", str(session)])
+        result = subprocess.run(
+            command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=60, check=False,
+        )
+        if result.returncode != 0:
+            raise RecapError("Recall session export failed closed")
+        try:
+            page = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise RecapError("Recall session export returned invalid JSON") from exc
+        if page.get("schema_version") != "recall.session-export.v1":
+            raise RecapError("Recall session export schema is unsupported")
+        if session_metadata is None:
+            session_metadata = dict(page.get("session") or {})
+        elif page.get("session", {}).get("boundary_receipt") != session_metadata.get("boundary_receipt"):
+            raise RecapError("Recall session boundary changed between pages")
+        page_session = page.get("session", {})
+        if "source_snapshot_stable" in page_session:
+            session_metadata["source_snapshot_stable"] = bool(
+                session_metadata.get("source_snapshot_stable", True)
+                and page_session["source_snapshot_stable"]
+            )
+        if "source_partial_record" in page_session:
+            session_metadata["source_partial_record"] = bool(
+                session_metadata.get("source_partial_record", False)
+                or page_session["source_partial_record"]
+            )
+        items = page.get("items")
+        if not isinstance(items, list):
+            raise RecapError("Recall session export page has no items")
+        sequences = [item.get("sequence") for item in items]
+        if sequences != list(range(expected_sequence, expected_sequence + len(items))):
+            raise RecapError("Recall session export sequence is discontinuous")
+        expected_sequence += len(items)
+        pages.append(page)
+        if page.get("page", {}).get("complete"):
+            return session_metadata or {}, pages
+        cursor = page.get("page", {}).get("next_cursor")
+        if not isinstance(cursor, str) or not cursor:
+            raise RecapError("incomplete Recall page has no cursor")
+    raise RecapError("Recall session export exceeded the page safety bound")
 
 
 def run_git(repo: Path, args: list[str], timeout: float = 8.0) -> tuple[int, str]:
@@ -169,7 +233,8 @@ def private_write(path: Path, value: dict[str, Any]) -> None:
         raise RecapError("refusing to write through a symlink")
     path = path.resolve()
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(path.parent, 0o700)
+    if path.parent.stat().st_mode & 0o077:
+        raise RecapError("manifest directory must have mode 0700")
     temporary = path.with_name("." + path.name + ".tmp-" + str(os.getpid()))
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     descriptor = os.open(temporary, flags, 0o600)
@@ -187,58 +252,62 @@ def private_write(path: Path, value: dict[str, Any]) -> None:
 
 def collect(args: argparse.Namespace) -> dict[str, Any]:
     started = time.monotonic()
-    path = resolve_current() if args.current else Path(args.session).expanduser().resolve()
-    if not path.is_file():
-        raise RecapError("session file does not exist")
-    before = path.stat()
-    recall, recall_path = load_recall(args.recall_script)
-    parsed = recall.direct_chunks(path)
-    after = path.stat()
-    native_id = session_id_from_path(path)
+    recall_path = find_recall_script(args.recall_script)
+    session_target = None if args.current else str(Path(args.session).expanduser().resolve())
+    session, pages = recall_session_pages(
+        recall_path, current=args.current, session=session_target,
+    )
+    native_id = session.get("native_session_id")
+    source_id = session.get("source_id")
+    if not isinstance(native_id, str) or not isinstance(source_id, str):
+        raise RecapError("Recall session export omitted exact identity")
     events = []
     redaction_count = 0
-    cwd = None
-    for ordinal, (timestamp, surface, text, entities) in enumerate(parsed):
-        safe_text, redactions = sanitize(str(text))
-        redaction_count += redactions
-        text_hash = sha256_bytes(safe_text.encode())
-        event_id = sha256_bytes(
-            f"{native_id}\0{ordinal}\0{timestamp}\0{surface}\0{text_hash}".encode()
-        )[:24]
-        events.append({
-            "ordinal": ordinal,
-            "event_id": event_id,
-            "timestamp": timestamp,
-            "surface": surface,
-            "text": safe_text,
-            "text_sha256": text_hash,
-            "entities": [{"kind": kind, "value": value} for kind, value in entities],
-        })
-    metadata = {}
-    try:
-        _ignored, metadata = recall.parse_file(path, harness_for(path))
-    except (AttributeError, OSError, ValueError, json.JSONDecodeError):
-        metadata = {}
-    cwd = metadata.get("cwd") if isinstance(metadata, dict) else None
-    stable = before.st_size == after.st_size and before.st_mtime_ns == after.st_mtime_ns
+    for page in pages:
+        for item in page["items"]:
+            safe_text, redactions = sanitize(str(item.get("text", "")))
+            redaction_count += redactions
+            if sha256_bytes(safe_text.encode()) != item.get("text_sha256"):
+                raise RecapError("Recall evidence digest changed after redaction")
+            events.append({
+                "ordinal": item["sequence"],
+                "event_id": item["evidence_id"],
+                "event_native_id": item["event_native_id"],
+                "item_ordinal": item["item_ordinal"],
+                "timestamp": item.get("occurred_at"),
+                "surface": item.get("surface"),
+                "role": item.get("role"),
+                "text": safe_text,
+                "text_sha256": item["text_sha256"],
+                "receipt": item.get("receipt"),
+            })
+    metadata = session.get("metadata") if isinstance(session.get("metadata"), dict) else {}
+    stable_value = session.get("source_snapshot_stable")
+    source_stable = stable_value if isinstance(stable_value, bool) else None
+    source_partial = bool(session.get("source_partial_record", False))
+    final_page = pages[-1]["page"]
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": utc_now(),
         "scope": {
-            "harness": harness_for(path),
+            "source_id": source_id,
+            "harness": session.get("harness"),
             "native_session_id": native_id,
-            "session_path": str(path),
-            "source_sha256": sha256_file(path),
-            "source_size_before": before.st_size,
-            "source_size_after": after.st_size,
-            "source_stable_during_collection": stable,
+            "session_path": metadata.get("original_path") or session_target,
+            "boundary_receipt": session.get("boundary_receipt"),
+            "source_snapshot_stable": source_stable,
+            "source_partial_record": source_partial,
             "children_included": False,
             "continuations_included": False,
         },
-        "session_metadata": metadata if isinstance(metadata, dict) else {},
+        "session_metadata": metadata,
         "collector": {
             "recap_version": SCHEMA_VERSION,
-            "recall_parser": str(recall_path),
+            "recall_session_export": str(recall_path),
+            "recall_projector_version": session.get("projector_version"),
+            "recall_privacy_policy_version": session.get("privacy_policy_version"),
+            "page_count": len(pages),
+            "page_receipts": [page["page"].get("page_receipt") for page in pages],
             "duration_ms": round((time.monotonic() - started) * 1000, 3),
         },
         "coverage": {
@@ -247,12 +316,13 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
             "observed_events": len(events),
             "manifest_events": len(events),
             "redacted_lines": redaction_count,
-            "source_complete": stable,
+            "export_complete": bool(final_page.get("complete")),
+            "source_complete": bool(final_page.get("complete")) and source_stable is not False,
             "structural_unaccounted_events": 0,
             "duplicate_event_ids": 0,
             "semantic_accounting": "not_performed",
         },
-        "git": git_snapshot(args.repo or cwd),
+        "git": git_snapshot(args.repo or metadata.get("cwd")),
         "events": events,
     }
     return manifest
@@ -273,6 +343,7 @@ def validate_manifest(value: dict[str, Any]) -> dict[str, Any]:
     if len(event_ids) != len(set(event_ids)):
         errors.append("event IDs are not unique")
     native_id = value.get("scope", {}).get("native_session_id")
+    source_id = value.get("scope", {}).get("source_id")
     for ordinal, event in enumerate(events):
         if not isinstance(event, dict):
             errors.append(f"event {ordinal} is not an object")
@@ -284,9 +355,9 @@ def validate_manifest(value: dict[str, Any]) -> dict[str, Any]:
         text_hash = sha256_bytes(text.encode())
         if event.get("text_sha256") != text_hash:
             errors.append(f"event {ordinal} text digest mismatch")
-        expected_id = sha256_bytes(
-            f"{native_id}\0{ordinal}\0{event.get('timestamp')}\0{event.get('surface')}\0{text_hash}".encode()
-        )[:24]
+        expected_id = "rse_" + sha256_bytes(
+            f"{source_id}\0{native_id}\0{event.get('event_native_id')}\0{event.get('item_ordinal')}\0{text_hash}".encode()
+        )
         if event.get("event_id") != expected_id:
             errors.append(f"event {ordinal} ID mismatch")
     coverage = value.get("coverage", {})
@@ -298,19 +369,21 @@ def validate_manifest(value: dict[str, Any]) -> dict[str, Any]:
         "event_count": len(events),
         "manifest_sha256": sha256_bytes(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()),
         "source_complete": bool(coverage.get("source_complete")),
+        "export_complete": bool(coverage.get("export_complete")),
     }
 
 
 def content_free_receipt(manifest: dict[str, Any], output: Path) -> dict[str, Any]:
     validation = validate_manifest(manifest)
     return {
-        "schema_version": "recap.receipt.v0.1",
+        "schema_version": "recap.receipt.v0.2",
         "manifest_sha256": validation["manifest_sha256"],
         "session_boundary_sha256": sha256_bytes(json.dumps(manifest["scope"], sort_keys=True).encode()),
         "harness": manifest["scope"]["harness"],
         "event_count": validation["event_count"],
         "redacted_lines": manifest["coverage"]["redacted_lines"],
         "source_complete": validation["source_complete"],
+        "export_complete": validation["export_complete"],
         "valid": validation["valid"],
         "duration_ms": manifest["collector"]["duration_ms"],
         "output_mode": oct(output.stat().st_mode & 0o777),
