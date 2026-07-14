@@ -507,13 +507,22 @@ class ConnectorSupervisor:
              clock: Callable[[], int | float] | None = None) -> dict[str, Any]:
         now = _finite_time(now)
         values = self._jobs(jobs)
+        runnable: list[ScheduledJob] = []
+        deferred_active = 0
         for job in values:
-            self.store.reconcile(job.definition, now=now)
+            try:
+                self.store.reconcile(job.definition, now=now)
+            except SupervisorContractError as error:
+                if str(error) != "job_active":
+                    raise
+                deferred_active += 1
+                continue
+            runnable.append(job)
         self.store.retire_absent({job.definition.job_key for job in values}, now=now)
         outcomes: dict[str, int] = {}
         ran = 0
         lost_leases = 0
-        for job in values:
+        for job in runnable:
             item = job.definition
             acquired_at = _finite_time(clock()) if clock is not None else now
             token = self.store.acquire(item, now=acquired_at)
@@ -540,6 +549,8 @@ class ConnectorSupervisor:
                   "outcomes": dict(sorted(outcomes.items()))}
         if lost_leases:
             result["lost_leases"] = lost_leases
+        if deferred_active:
+            result["deferred_active"] = deferred_active
         return result
 
     def wake(self, jobs: tuple[ScheduledJob, ...] | list[ScheduledJob], *, now: int | float) -> None:

@@ -175,6 +175,24 @@ class SupervisorSchedulingTest(unittest.TestCase):
         self.assertEqual((repaired["state"], repaired["lease_token"], repaired["generation"]),
                          ("ready", None, 2))
 
+    def test_active_job_reconfiguration_is_deferred_without_blocking_other_jobs(self) -> None:
+        item_a = schedule(KEY_A, lease_seconds=20)
+        self.store.reconcile(item_a, now=0)
+        token = self.store.acquire(item_a, now=0, lease_token="a" * 64)
+        calls: list[str] = []
+        result = self.supervisor.tick((
+            ScheduledJob(schedule(KEY_A, generation=2, lease_seconds=20),
+                         lambda: calls.append("a") or {"status": "committed"}),
+            ScheduledJob(schedule(KEY_B, connector_id="openai.export-inbox"),
+                         lambda: calls.append("b") or {"status": "committed"}),
+        ), now=1)
+        self.assertEqual(calls, ["b"])
+        self.assertEqual(result["outcomes"], {"success": 1})
+        self.assertEqual(result["deferred_active"], 1)
+        state_a = self.store.snapshot(KEY_A)
+        self.assertEqual((state_a["state"], state_a["lease_token"], state_a["generation"]),
+                         ("leased", token, 1))
+
     def test_expired_owner_cannot_complete_without_reacquiring(self) -> None:
         item = schedule(lease_seconds=20)
         self.store.reconcile(item, now=0)
