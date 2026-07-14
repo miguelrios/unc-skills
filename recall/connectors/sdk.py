@@ -285,6 +285,11 @@ class ConnectorRunner:
         self._set_meta("last_success_epoch", str(int(time.time())))
         self._clear_error()
 
+    def _purge_acknowledged_bytes(self) -> None:
+        checkpoint = self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if checkpoint is None or checkpoint[0] != 0:
+            raise ConnectorRunError("connector_spool_purge_failed")
+
     def flush(self) -> dict[str, int]:
         page = self.db.execute("SELECT * FROM pages ORDER BY id LIMIT 1").fetchone()
         if page is None:
@@ -313,6 +318,7 @@ class ConnectorRunner:
         replayed = int(bool(self._get_meta("last_error_code") == "brain_unavailable"))
         with self.db:
             self._commit_page(page["id"], json.loads(page["cursor_after"]))
+        self._purge_acknowledged_bytes()
         return {"acked": len(events), "replayed": replayed}
 
     def run_once(self) -> dict[str, Any]:
