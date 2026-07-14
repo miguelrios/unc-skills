@@ -14,6 +14,8 @@ NO_LOAD=0
 PRIVACY_MODE="off"
 EXPORT_INBOX=""
 DISABLE_EXPORT_INBOX=0
+SUPERVISOR_CONFIG=""
+DISABLE_SUPERVISOR=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -29,21 +31,28 @@ while [ "$#" -gt 0 ]; do
     --privacy-mode) PRIVACY_MODE=$2; shift 2 ;;
     --export-inbox) EXPORT_INBOX=$2; shift 2 ;;
     --disable-export-inbox) DISABLE_EXPORT_INBOX=1; shift ;;
+    --connector-supervisor-config) SUPERVISOR_CONFIG=$2; shift 2 ;;
+    --disable-connector-supervisor) DISABLE_SUPERVISOR=1; shift ;;
     --no-load) NO_LOAD=1; shift ;;
-    *) echo "usage: install.sh --endpoint URL --host-id ID --keychain-service SERVICE --visibility private|shared [--sources claude,codex] [--export-inbox PATH | --disable-export-inbox] [--privacy-mode off|scrub|drop] [--claude-root PATH] [--codex-root PATH] [--prefix PATH] [--launch-agents PATH] [--no-load]" >&2; exit 2 ;;
+    *) echo "usage: install.sh [--endpoint URL --host-id ID --keychain-service SERVICE --visibility private|shared] [--sources claude,codex] [--export-inbox PATH | --disable-export-inbox] [--connector-supervisor-config FILE | --disable-connector-supervisor] [--privacy-mode off|scrub|drop] [--claude-root PATH] [--codex-root PATH] [--prefix PATH] [--launch-agents PATH] [--no-load]" >&2; exit 2 ;;
   esac
 done
 
-case "$ENDPOINT" in https://*) ;; *) echo "endpoint must use https" >&2; exit 2 ;; esac
-case "$HOST_ID" in ""|*[!A-Za-z0-9_.-]*) echo "invalid host id" >&2; exit 2 ;; esac
-[ -n "$KEYCHAIN_SERVICE" ] || { echo "keychain service is required" >&2; exit 2; }
-case "$VISIBILITY" in private|shared) ;; *) echo "visibility must be private or shared" >&2; exit 2 ;; esac
 case "$PRIVACY_MODE" in off|scrub|drop) ;; *) echo "privacy mode must be off, scrub, or drop" >&2; exit 2 ;; esac
 if [ -n "$EXPORT_INBOX" ] && [ "$DISABLE_EXPORT_INBOX" -eq 1 ]; then
   echo "export inbox enable and disable options are mutually exclusive" >&2; exit 2
 fi
-if [ -z "$SOURCES" ] && [ -z "$EXPORT_INBOX" ] && [ "$DISABLE_EXPORT_INBOX" -eq 0 ]; then
-  echo "select at least one coding source or an explicit export inbox" >&2; exit 2
+if [ -n "$SUPERVISOR_CONFIG" ] && [ "$DISABLE_SUPERVISOR" -eq 1 ]; then
+  echo "connector supervisor enable and disable options are mutually exclusive" >&2; exit 2
+fi
+if [ -z "$SOURCES" ] && [ -z "$EXPORT_INBOX" ] && [ "$DISABLE_EXPORT_INBOX" -eq 0 ] && [ -z "$SUPERVISOR_CONFIG" ] && [ "$DISABLE_SUPERVISOR" -eq 0 ]; then
+  echo "select at least one coding source, export inbox, or connector supervisor action" >&2; exit 2
+fi
+if [ -n "$SOURCES" ] || [ -n "$EXPORT_INBOX" ]; then
+  case "$ENDPOINT" in https://*) ;; *) echo "endpoint must use https" >&2; exit 2 ;; esac
+  case "$HOST_ID" in ""|*[!A-Za-z0-9_.-]*) echo "invalid host id" >&2; exit 2 ;; esac
+  [ -n "$KEYCHAIN_SERVICE" ] || { echo "keychain service is required" >&2; exit 2; }
+  case "$VISIBILITY" in private|shared) ;; *) echo "visibility must be private or shared" >&2; exit 2 ;; esac
 fi
 if [ -n "$SOURCES" ]; then
   case ",$SOURCES," in *,claude,*|*,codex,*) ;; *) echo "sources must select claude, codex, or claude,codex" >&2; exit 2 ;; esac
@@ -185,9 +194,46 @@ PY
   fi
 }
 
+write_supervisor_plist() {
+  LABEL="ai.parcha.recall.connector-supervisor"
+  PLIST="$LAUNCH_AGENTS/$LABEL.plist"
+  STATE="$PREFIX/state/connector-supervisor.db"
+  if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
+    launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
+  fi
+  PYTHONPATH="$PREFIX/lib" "$RUNTIME" -m client.cli connector-supervisor-config-preview --config "$SUPERVISOR_CONFIG" >/dev/null
+  "$RUNTIME" - "$PLIST" "$LABEL" "$RUNTIME" "$PREFIX/lib" "$SUPERVISOR_CONFIG" "$STATE" <<'PY'
+import plistlib
+import sys
+
+path, label, program, pythonpath, config, state = sys.argv[1:]
+value = {
+    "Label": label,
+    "ProgramArguments": [
+        program, "-m", "client.cli", "connector-supervisor-run",
+        "--config", config, "--state", state,
+    ],
+    "EnvironmentVariables": {"PYTHONPATH": pythonpath},
+    "RunAtLoad": True,
+    "KeepAlive": True,
+    "ThrottleInterval": 10,
+    "ProcessType": "Background",
+    "StandardOutPath": state + ".stdout.log",
+    "StandardErrorPath": state + ".stderr.log",
+}
+with open(path, "wb") as output:
+    plistlib.dump(value, output, sort_keys=True)
+PY
+  chmod 600 "$PLIST"
+  if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
+    launchctl bootstrap "gui/$(id -u)" "$PLIST"
+  fi
+}
+
 case ",$SOURCES," in *,claude,*) write_plist claude "$CLAUDE_ROOT" ;; esac
 case ",$SOURCES," in *,codex,*) write_plist codex "$CODEX_ROOT" ;; esac
 if [ -n "$EXPORT_INBOX" ]; then write_export_inbox_plist; fi
+if [ -n "$SUPERVISOR_CONFIG" ]; then write_supervisor_plist; fi
 if [ "$DISABLE_EXPORT_INBOX" -eq 1 ]; then
   LABEL="ai.parcha.recall.chatgpt-export"
   if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
@@ -195,6 +241,15 @@ if [ "$DISABLE_EXPORT_INBOX" -eq 1 ]; then
   fi
   rm -f "$LAUNCH_AGENTS/$LABEL.plist"
 fi
+if [ "$DISABLE_SUPERVISOR" -eq 1 ]; then
+  LABEL="ai.parcha.recall.connector-supervisor"
+  if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
+    launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
+  fi
+  rm -f "$LAUNCH_AGENTS/$LABEL.plist"
+fi
 echo "installed Recall Brain Mac client in $PREFIX"
 echo "selected sources: $SOURCES; visibility: $VISIBILITY; privacy: $PRIVACY_MODE"
-echo "Keychain accounts use each selected source id as the account"
+if [ -n "$SOURCES" ] || [ -n "$EXPORT_INBOX" ]; then
+  echo "Keychain accounts use each selected source id as the account"
+fi

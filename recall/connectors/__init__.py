@@ -17,6 +17,7 @@ from .supervisor import (
     SupervisorContractError,
     SupervisorStore,
 )
+from .host import ConnectorHostConfig, ConnectorHostError, build_host, load_host_config
 
 __all__ = [
     "ConnectorContractError",
@@ -35,4 +36,8 @@ __all__ = [
     "ScheduledJob",
     "SupervisorContractError",
     "SupervisorStore",
+    "ConnectorHostConfig",
+    "ConnectorHostError",
+    "build_host",
+    "load_host_config",
 ]

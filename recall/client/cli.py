@@ -34,6 +34,14 @@ from connectors.supervisor import (
     aggregate_supervisor_status,
     preview_supervisor_policy,
 )
+from connectors.host import (
+    ConnectorHostError,
+    build_host,
+    load_host_config,
+    preview_host_config,
+    run_host_daemon,
+    run_host_once,
+)
 from privacy.policy import AgenticJudge, PrivacyPolicy, load_scoped_virtual_key
 
 
@@ -134,6 +142,12 @@ def parser() -> argparse.ArgumentParser:
     supervisor_status = commands.add_parser("connector-supervisor-status")
     supervisor_status.add_argument("--state", required=True)
     supervisor_status.add_argument("--now", type=float)
+    host_preview = commands.add_parser("connector-supervisor-config-preview")
+    host_preview.add_argument("--config", required=True)
+    host_run = commands.add_parser("connector-supervisor-run")
+    host_run.add_argument("--config", required=True)
+    host_run.add_argument("--state", required=True)
+    host_run.add_argument("--once", action="store_true")
     dry = commands.add_parser("dry-run")
     dry.add_argument("--visibility", choices=("private", "shared"), required=True)
     dry.add_argument("--claude-root")
@@ -246,6 +260,23 @@ def main() -> None:
                 Path(args.state), now=time.time() if args.now is None else args.now,
             )
         except SupervisorContractError as error:
+            raise SystemExit(str(error)) from None
+        print(json.dumps(result, sort_keys=True))
+        return
+    if args.command == "connector-supervisor-config-preview":
+        try:
+            result = preview_host_config(load_host_config(Path(args.config)))
+        except ConnectorHostError as error:
+            raise SystemExit(str(error)) from None
+        print(json.dumps(result, sort_keys=True))
+        return
+    if args.command == "connector-supervisor-run":
+        try:
+            if args.once:
+                result = run_host_once(Path(args.config), Path(args.state))
+            else:
+                result = run_host_daemon(Path(args.config), Path(args.state))
+        except ConnectorHostError as error:
             raise SystemExit(str(error)) from None
         print(json.dumps(result, sort_keys=True))
         return

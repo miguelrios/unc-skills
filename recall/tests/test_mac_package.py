@@ -161,6 +161,7 @@ class MacPackageTest(unittest.TestCase):
         self.assertIn("lib/connectors/export_inbox.py", packaged_paths)
         self.assertIn("lib/connectors/grep_ai.py", packaged_paths)
         self.assertIn("lib/connectors/supervisor.py", packaged_paths)
+        self.assertIn("lib/connectors/host.py", packaged_paths)
         self.assertIn("lib/client/capture.py", packaged_paths)
         self.assertIn("lib/client/mcp.py", packaged_paths)
 
@@ -179,6 +180,10 @@ class MacPackageTest(unittest.TestCase):
         self.assertIn('"client.cli", "export-inbox-sync"', installer)
         self.assertIn('--export-inbox', installer)
         self.assertIn('--disable-export-inbox', installer)
+        self.assertIn('--connector-supervisor-config', installer)
+        self.assertIn('--disable-connector-supervisor', installer)
+        self.assertIn('"client.cli", "connector-supervisor-run"', installer)
+        self.assertIn('"KeepAlive": True', installer)
         invalid = subprocess.run([
             "sh", str(package / "install.sh"),
             "--endpoint", "https://example.invalid", "--host-id", "test",

@@ -10,12 +10,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from client import cli as client_cli
 from connectors.host import (
     ConnectorHostConfig,
     ConnectorHostError,
     build_host,
     load_host_config,
     preview_host_config,
+    run_host_daemon,
 )
 
 
@@ -116,6 +118,85 @@ class ClosedFactoryTest(unittest.TestCase):
             value.jobs[1].brain_authority.fingerprint(),
             value.jobs[1].source_authority.fingerprint(),
         )
+        host.close()
+
+
+class HostCliTest(unittest.TestCase):
+    def private_config(self, directory: str) -> Path:
+        root = Path(directory) / "private"
+        root.mkdir(mode=0o700)
+        path = root / "host.json"
+        value = json.loads(CORPUS.read_text().splitlines()[0])["config"]
+        path.write_text(json.dumps(value)); os.chmod(path, 0o600)
+        return path
+
+    def test_preview_cli_reads_only_config_and_renders_no_private_values(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.private_config(directory)
+            output = io.StringIO()
+            with mock.patch("sys.argv", [
+                "recall-brain", "connector-supervisor-config-preview", "--config", str(path),
+            ]), mock.patch("sys.stdout", output), \
+                 mock.patch("connectors.host.load_file_token") as file_token, \
+                 mock.patch("connectors.host.load_keychain_token") as keychain, \
+                 mock.patch("connectors.host.load_private_api_key") as source_key:
+                client_cli.main()
+            file_token.assert_not_called(); keychain.assert_not_called(); source_key.assert_not_called()
+            rendered = output.getvalue()
+            self.assertNotIn(str(path), rendered)
+            self.assertNotIn("synthetic:export:c8g", rendered)
+            self.assertEqual(json.loads(rendered)["jobs"], 1)
+
+    def test_once_cli_closes_host_and_renders_only_aggregate_result(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.private_config(directory)
+            result = {
+                "schema_version": 1, "configured": 1, "ran": 1,
+                "outcomes": {"success": 1},
+            }
+            output = io.StringIO()
+            with mock.patch("sys.argv", [
+                "recall-brain", "connector-supervisor-run", "--config", str(path),
+                "--state", str(Path(directory) / "state.db"), "--once",
+            ]), mock.patch("sys.stdout", output), mock.patch("client.cli.run_host_once", return_value=result) as run:
+                client_cli.main()
+            run.assert_called_once()
+            rendered = json.loads(output.getvalue())
+            self.assertEqual(rendered["outcomes"], {"success": 1})
+            self.assertNotIn(str(path), output.getvalue())
+
+    def test_daemon_reloads_between_cycles_and_maps_hup_term_to_wake_stop(self) -> None:
+        handlers = {}
+        old_handlers = {}
+
+        def install(number, handler):
+            handlers[number] = handler
+
+        first = mock.Mock(); second = mock.Mock()
+        first.jobs = (); second.jobs = ()
+
+        def first_loop(*_args, **kwargs):
+            handlers[__import__("signal").SIGHUP](None, None)
+            self.assertTrue(kwargs["wake_event"].is_set())
+            kwargs["wake_event"].clear()
+            return 1
+
+        def second_loop(*_args, **kwargs):
+            handlers[__import__("signal").SIGTERM](None, None)
+            self.assertTrue(kwargs["stop_event"].is_set())
+            self.assertTrue(kwargs["wake_event"].is_set())
+            return 1
+
+        first.supervisor.run_loop.side_effect = first_loop
+        second.supervisor.run_loop.side_effect = second_loop
+        with mock.patch("connectors.host.signal.getsignal", side_effect=lambda number: old_handlers.setdefault(number, object())), \
+             mock.patch("connectors.host.signal.signal", side_effect=install), \
+             mock.patch("connectors.host.load_host_config", return_value=mock.Mock()) as load, \
+             mock.patch("connectors.host.build_host", side_effect=(first, second)) as build:
+            result = run_host_daemon(Path("/private/config"), Path("/private/state"), max_cycles=3, clock=lambda: 0)
+        self.assertEqual(result, {"schema_version": 1, "status": "stopped", "cycles": 2})
+        self.assertEqual(load.call_count, 2); self.assertEqual(build.call_count, 2)
+        first.close.assert_called_once(); second.close.assert_called_once()
 
 
 if __name__ == "__main__":

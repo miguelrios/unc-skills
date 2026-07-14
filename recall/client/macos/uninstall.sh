@@ -13,7 +13,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-for HARNESS in claude codex chatgpt-export; do
+for HARNESS in claude codex chatgpt-export connector-supervisor; do
   LABEL="ai.parcha.recall.$HARNESS"
   if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
     launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
