@@ -1,0 +1,57 @@
+# Recap truth contract
+
+## Observable truth
+
+Recap may claim only what is supported by visible session events, Recall metadata, observed command
+results, and repository snapshots. It never reports hidden reasoning. A visible assistant
+explanation is evidence that the assistant said something, not proof the statement is true.
+
+## Boundary
+
+The default unit is one native session file or canonical Recall session receipt. The session ID,
+harness, source digest, and observed byte range form the boundary receipt. Child agents,
+continuations, and resumed runs remain separate unless explicitly included. Nested evidence keeps
+its own session label and ordinal space.
+
+For a live session, collection records source size before and after parsing. A changed size means the
+manifest is partial even if every byte in the initial snapshot was parsed.
+
+## Evidence accounting
+
+Normalize each observed event as `(session_id, ordinal, event_id, timestamp, surface, text_sha256)`.
+An output claim lists one or more event IDs. Every event must be covered once by a claim or by one
+low-signal group. Duplicate coverage and missing ordinals are validation failures.
+
+Structural manifest completeness is not semantic recap completeness. The former means every parsed
+event has a contiguous ordinal and valid digest; the latter requires the claim/group assignment
+above. Never report semantic zero-unaccounted before that assignment exists.
+
+Low-signal grouping is semantic, not deletion. Typical candidates are repeated polls with unchanged
+state, duplicate status output, or mechanical progress notices. A group records count and ordinal
+ranges. User decisions, edits, commands with side effects, errors, tests, and final results are never
+silently treated as noise.
+
+## Git attribution
+
+Keep three facts distinct:
+
+1. **Observed action:** an event shows an edit or git command was attempted.
+2. **Observed result:** its tool result shows success, failure, or unknown status.
+3. **Current state:** a git snapshot shows the repository now contains a commit, diff, or path.
+
+Only join them into a causal claim when evidence connects them. Dirty state that predates the
+session, edits by another worktree, amended/rebased commits, and reverted changes require explicit
+qualification. Missing repositories or expired history are coverage limits, not empty results.
+
+## Verification
+
+Classify tests and checks as `passed`, `failed`, `retried`, `discussed_only`, or
+`unverifiable_now`. A passing command can support only the scope it actually ran. Current re-runs
+are new observations and must not be presented as historical session evidence.
+
+## Privacy
+
+Private manifests use mode 0600 and directories use 0700. Public receipts contain only hashes,
+counts, durations, versions, and completeness flags. Paths, prompts, transcript text, diffs,
+credentials, and external message contents stay private unless the user deliberately publishes
+them.

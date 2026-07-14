@@ -1,0 +1,4 @@
+interface:
+  display_name: "Recap"
+  short_description: "Explain everything a coding-agent session did"
+  default_prompt: "Use $recap to reconstruct this session with evidence and exact coverage."
