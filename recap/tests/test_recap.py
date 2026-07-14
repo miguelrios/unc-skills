@@ -82,6 +82,10 @@ class RecapCollectorTest(unittest.TestCase):
             self.assertNotIn("page_receipts", manifest["collector"])
             self.assertIn("page_receipt_chain_sha256", manifest["collector"])
             self.assertEqual(manifest["scope"]["source_id"], "claude:test:recap")
+            self.assertEqual(
+                manifest["collector"]["recap_privacy_policy_version"],
+                self.recap.PRIVACY_POLICY_VERSION,
+            )
             self.assertIn("boundary_receipt", manifest["scope"])
             self.assertTrue(self.recap.validate_manifest(manifest)["valid"])
 
@@ -341,6 +345,7 @@ class RecapCollectorTest(unittest.TestCase):
             validation = self.recap.validate_manifest(manifest)
             value = {
                 "schema_version": self.recap.BOUNDARY_SET_SCHEMA_VERSION,
+                "boundary_directory": str(member_path.parent.resolve()),
                 "selected_node_id": "one",
                 "requested": {"include_children": True, "chain": False},
                 "members": [{

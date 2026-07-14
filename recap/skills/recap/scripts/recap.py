@@ -29,30 +29,12 @@ from git_provenance import (
     validate_git_provenance,
 )
 from synthesis import render_markdown, validate_synthesis
+from privacy import PRIVACY_POLICY_VERSION, REDACTION_MARKERS, sanitize, sanitize_structure
 
 
 SCHEMA_VERSION = "recap.manifest.v0.4"
 BOUNDARY_SET_SCHEMA_VERSION = "recap.boundary-set.v1"
 UUID_RE = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
-SECRET_PATTERNS = (
-    re.compile(
-        r"[\"']?(?:api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|token|secret|password|bearer|authorization|\bkey)"
-        r"[\"']?\s*[=:]\s*[\"']?(?:Bearer\s+)?\S{12,}|sk-[A-Za-z0-9_-]{20,}|"
-        r"xox[baprs]-[A-Za-z0-9-]{10,}|(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}|"
-        r"AKIA[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{30,}",
-        re.I,
-    ),
-)
-PRIVATE_KEY_RE = re.compile(
-    r"-----BEGIN (?P<label>[A-Z0-9 ]*PRIVATE KEY)-----.*?-----END (?P=label)-----",
-    re.DOTALL,
-)
-REDACTION_MARKERS = {
-    "[redacted-secret-line]",
-    "[redacted-private-key-block]",
-    "[REDACTED]",
-    "[REDACTED-PRIVATE-KEY]",
-}
 
 
 class RecapError(RuntimeError):
@@ -63,44 +45,13 @@ def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def sanitize(text: str) -> tuple[str, int]:
-    text = PRIVATE_KEY_RE.sub("[redacted-private-key-block]", text)
-    redactions = 0
-    safe_lines = []
-    for part in text.splitlines(keepends=True):
-        line = part.rstrip("\r\n")
-        ending = part[len(line):]
-        if line in REDACTION_MARKERS:
-            safe_lines.append(line + ending)
-            redactions += 1
-        elif any(pattern.search(line) for pattern in SECRET_PATTERNS):
-            safe_lines.append("[redacted-secret-line]" + ending)
-            redactions += 1
-        else:
-            safe_lines.append(part)
-    return "".join(safe_lines), redactions
-
-
-def sanitize_structure(value: Any) -> tuple[Any, int]:
-    if isinstance(value, str):
-        return sanitize(value)
-    if isinstance(value, list):
-        result = []
-        count = 0
-        for item in value:
-            safe, redactions = sanitize_structure(item)
-            result.append(safe)
-            count += redactions
-        return result, count
-    if isinstance(value, dict):
-        result = {}
-        count = 0
-        for key, item in value.items():
-            safe, redactions = sanitize_structure(item)
-            result[key] = safe
-            count += redactions
-        return result, count
-    return value, 0
+def changed_leaf_count(before: Any, after: Any) -> int:
+    """Count values changed by a final defense scrub without recounting existing markers."""
+    if isinstance(before, dict) and isinstance(after, dict):
+        return sum(changed_leaf_count(value, after.get(key)) for key, value in before.items())
+    if isinstance(before, list) and isinstance(after, list):
+        return sum(changed_leaf_count(left, right) for left, right in zip(before, after))
+    return int(before != after)
 
 
 def session_id_from_path(path: Path) -> str:
@@ -126,10 +77,12 @@ def find_exact(root: Path, needle: str, codex: bool) -> Path:
 
 def resolve_current() -> Path:
     thread = os.environ.get("CODEX_THREAD_ID")
+    session = os.environ.get("CLAUDE_SESSION_ID")
+    if thread and session:
+        raise RecapError("current harness identity is ambiguous; pass --session explicitly")
     if thread:
         root = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "sessions"
         return find_exact(root, thread, codex=True)
-    session = os.environ.get("CLAUDE_SESSION_ID")
     if session:
         root = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude")) / "projects"
         return find_exact(root, session, codex=False)
@@ -290,10 +243,19 @@ def private_write_text(path: Path, value: str) -> None:
 
 
 def private_output_path(path_value: str, *, label: str) -> Path:
+    safe_value, redactions = sanitize(str(path_value))
+    if redactions or safe_value != str(path_value):
+        raise RecapError(f"{label} contains credential-shaped material")
     path = Path(path_value).expanduser()
-    if path.is_symlink():
-        raise RecapError(f"{label} must not be a symlink")
-    return path.resolve()
+    absolute = path if path.is_absolute() else Path.cwd() / path
+    for candidate in (absolute, *absolute.parents):
+        if candidate.is_symlink():
+            raise RecapError(f"{label} must not traverse a symlink")
+    resolved = path.resolve()
+    safe_resolved, resolved_redactions = sanitize(str(resolved))
+    if resolved_redactions or safe_resolved != str(resolved):
+        raise RecapError(f"{label} resolves through credential-shaped material")
+    return resolved
 
 
 def collect(args: argparse.Namespace) -> dict[str, Any]:
@@ -323,6 +285,12 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
                     raise RecapError("Recall session export omitted exact native identity")
                 if not isinstance(session.get("source_id"), str):
                     raise RecapError("Recall session export omitted exact source identity")
+                if session.get("harness") not in {"claude", "codex"}:
+                    raise RecapError("Recall session export named an unsupported harness")
+                for identity_value in (session["native_session_id"], session["source_id"]):
+                    safe_identity, identity_redactions = sanitize(identity_value)
+                    if identity_redactions or safe_identity != identity_value:
+                        raise RecapError("Recall session export contained unsafe identity metadata")
             else:
                 if "source_snapshot_stable" in page_session:
                     session["source_snapshot_stable"] = bool(
@@ -352,10 +320,17 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
                     "_redactions": redactions,
                 }
                 if isinstance(item.get("entities"), list) and item["entities"]:
-                    event["entities"] = item["entities"]
+                    safe_entities, entity_redactions = sanitize_structure(item["entities"])
+                    event["entities"] = safe_entities
+                    event["_redactions"] += entity_redactions
                 if item.get("possibly_truncated"):
                     event["possibly_truncated"] = True
-                builder.add(event)
+                safe_event, _event_redactions = sanitize_structure(event)
+                for identity_field in ("event_id", "event_native_id", "text_sha256"):
+                    if safe_event.get(identity_field) != event.get(identity_field):
+                        raise RecapError("Recall event contained unsafe identity metadata")
+                safe_event["_redactions"] += changed_leaf_count(event, safe_event)
+                builder.add(safe_event)
             final_page = page["page"]
         ledger = builder.finish()
     except Exception:
@@ -379,7 +354,13 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
     git_provenance, git_redactions = sanitize_structure(collect_git_provenance_chunks(
         chunked_events(Path(ledger["events"]["path"])), metadata, explicit_repositories,
     ))
-    redaction_count = ledger["redacted_lines"] + git_redactions
+    safe_metadata, metadata_redactions = sanitize_structure(metadata)
+    safe_target, target_redactions = sanitize(str(session_target or ""))
+    safe_recall_path, recall_path_redactions = sanitize(str(recall_path))
+    redaction_count = (
+        ledger["redacted_lines"] + git_redactions + metadata_redactions
+        + target_redactions + recall_path_redactions
+    )
     stable_value = session.get("source_snapshot_stable")
     source_stable = stable_value if isinstance(stable_value, bool) else None
     source_partial = bool(session.get("source_partial_record", False))
@@ -389,19 +370,20 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
             "source_id": source_id,
             "harness": session.get("harness"),
             "native_session_id": native_id,
-            "session_path": metadata.get("original_path") or session_target,
+            "session_path": safe_metadata.get("original_path") or safe_target or None,
             "boundary_receipt": session.get("boundary_receipt"),
             "source_snapshot_stable": source_stable,
             "source_partial_record": source_partial,
             "children_included": False,
             "continuations_included": False,
         },
-        "session_metadata": metadata,
+        "session_metadata": safe_metadata,
         "collector": {
             "recap_version": SCHEMA_VERSION,
-            "recall_session_export": str(recall_path),
+            "recall_session_export": safe_recall_path,
             "recall_projector_version": session.get("projector_version"),
             "recall_privacy_policy_version": session.get("privacy_policy_version"),
+            "recap_privacy_policy_version": PRIVACY_POLICY_VERSION,
             "page_count": page_count,
             "page_receipt_chain_sha256": page_receipt_chain.hexdigest(),
             "first_page_receipt": first_page_receipt,
@@ -426,7 +408,10 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
         "ledger": ledger,
         "git": git_provenance,
     }
-    return manifest
+    safe_manifest, manifest_redactions = sanitize_structure(manifest)
+    if manifest_redactions and safe_manifest != manifest:
+        safe_manifest["coverage"]["redacted_lines"] += changed_leaf_count(manifest, safe_manifest)
+    return safe_manifest
 
 
 def validate_manifest(value: dict[str, Any]) -> dict[str, Any]:
@@ -504,10 +489,27 @@ def _boundary_directory(output: Path) -> Path:
     return directory.resolve()
 
 
-def validate_boundary_set(value: dict[str, Any]) -> dict[str, Any]:
+def validate_boundary_set(
+    value: dict[str, Any], *, expected_output: Path | None = None,
+) -> dict[str, Any]:
     errors = []
     if value.get("schema_version") != BOUNDARY_SET_SCHEMA_VERSION:
         errors.append("unsupported schema_version")
+    boundary_directory = None
+    try:
+        boundary_directory = Path(value["boundary_directory"])
+        if (
+            not boundary_directory.is_absolute() or boundary_directory.is_symlink()
+            or not boundary_directory.is_dir() or boundary_directory.stat().st_mode & 0o077
+        ):
+            raise ValueError
+        boundary_directory = boundary_directory.resolve()
+    except (KeyError, OSError, ValueError, TypeError):
+        errors.append("boundary_directory must be an owner-private absolute directory")
+    if expected_output is not None and boundary_directory is not None:
+        expected_directory = expected_output.resolve().with_name(expected_output.name + ".boundaries")
+        if boundary_directory != expected_directory:
+            errors.append("boundary_directory does not belong to the boundary-set output")
     members = value.get("members")
     if not isinstance(members, list) or not members:
         errors.append("members must be a non-empty list")
@@ -531,6 +533,9 @@ def validate_boundary_set(value: dict[str, Any]) -> dict[str, Any]:
         try:
             path = Path(member["manifest_path"])
             if path.is_symlink() or not path.is_file() or path.stat().st_mode & 0o077:
+                raise ValueError
+            path = path.resolve()
+            if boundary_directory is None or path.parent != boundary_directory:
                 raise ValueError
             manifest = json.loads(path.read_text())
         except (KeyError, OSError, ValueError, json.JSONDecodeError):
@@ -634,12 +639,13 @@ def command_collect_set(args: argparse.Namespace) -> int:
         })
     value = {
         "schema_version": BOUNDARY_SET_SCHEMA_VERSION,
+        "boundary_directory": str(directory),
         "selected_node_id": graph["selected_node_id"],
         "requested": graph["requested"],
         "members": members,
         "edges": graph["edges"],
     }
-    validation = validate_boundary_set(value)
+    validation = validate_boundary_set(value, expected_output=output)
     if not validation["valid"]:
         raise RecapError("boundary set failed validation")
     private_write(output, value)
@@ -656,8 +662,8 @@ def command_collect_set(args: argparse.Namespace) -> int:
 
 
 def command_validate_set(args: argparse.Namespace) -> int:
-    _, value = _load_private_json(args.boundary_set, label="boundary set")
-    validation = validate_boundary_set(value)
+    path, value = _load_private_json(args.boundary_set, label="boundary set")
+    validation = validate_boundary_set(value, expected_output=path)
     print(json.dumps(validation, sort_keys=True))
     return 0 if validation["valid"] else 2
 

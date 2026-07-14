@@ -149,6 +149,16 @@ class AccountingTest(unittest.TestCase):
         self.assertEqual(score["precision"], 1.0)
         self.assertEqual(score["recall"], 1.0)
 
+    def test_secret_shaped_semantic_labels_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest = manifest_at(Path(temporary))
+            draft = valid_draft()
+            secret = "xai-" + "X" * 40
+            draft["claims"][0]["label"] = "Do not render " + secret
+            _, result = accounting.seal_accounting(manifest, draft)
+            self.assertFalse(result["valid"])
+            self.assertIn("accounting contains credential-shaped material", result["errors"])
+
 
 if __name__ == "__main__":
     unittest.main()

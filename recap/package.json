@@ -12,7 +12,7 @@
     "README.md"
   ],
   "scripts": {
-    "test": "python3 -m unittest discover -s tests -v && python3 -m py_compile skills/recap/scripts/recap.py skills/recap/scripts/accounting.py skills/recap/scripts/event_ledger.py skills/recap/scripts/git_provenance.py skills/recap/scripts/synthesis.py && python3 -m json.tool .claude-plugin/plugin.json >/dev/null && python3 -m json.tool .codex-plugin/plugin.json >/dev/null",
+    "test": "python3 -m unittest discover -s tests -v && python3 -m py_compile skills/recap/scripts/recap.py skills/recap/scripts/accounting.py skills/recap/scripts/event_ledger.py skills/recap/scripts/git_provenance.py skills/recap/scripts/privacy.py skills/recap/scripts/synthesis.py && python3 -m json.tool .claude-plugin/plugin.json >/dev/null && python3 -m json.tool .codex-plugin/plugin.json >/dev/null",
     "pack:check": "npm pack --dry-run"
   },
   "engines": {

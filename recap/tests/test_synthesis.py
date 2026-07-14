@@ -175,6 +175,16 @@ def valid_draft(manifest, accounting):
 
 
 class SynthesisTest(unittest.TestCase):
+    def test_secret_shaped_renderable_prose_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest, accounting = fixture(Path(temporary))
+            draft = valid_draft(manifest, accounting)
+            secret = "xai-" + "X" * 40
+            draft["headline"]["summary"] = "Do not render " + secret
+            result = synthesis.validate_synthesis(manifest, accounting, draft)
+            self.assertFalse(result["valid"])
+            self.assertIn("synthesis contains credential-shaped material", result["errors"])
+
     def test_valid_story_and_timeline_render_different_accounted_views(self):
         with tempfile.TemporaryDirectory() as temporary:
             manifest, accounting = fixture(Path(temporary))

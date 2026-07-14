@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from event_ledger import iter_jsonl
+from privacy import sanitize_structure
 
 
 ACCOUNTING_SCHEMA = "recap.accounting.v1"
@@ -77,6 +78,9 @@ def validate_accounting(
     errors = []
     if not isinstance(accounting, dict) or accounting.get("schema_version") != ACCOUNTING_SCHEMA:
         return {"valid": False, "errors": ["accounting schema is unsupported"]}
+    scrubbed_accounting, _privacy_redactions = sanitize_structure(accounting)
+    if scrubbed_accounting != accounting:
+        errors.append("accounting contains credential-shaped material")
     event_receipt = manifest.get("ledger", {}).get("events", {})
     if accounting.get("event_ledger_sha256") not in {None, event_receipt.get("sha256")}:
         errors.append("accounting targets a different event ledger")

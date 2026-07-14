@@ -39,6 +39,16 @@ def build(path: Path, count: int, *, heartbeat_every=0):
 
 
 class EventLedgerTest(unittest.TestCase):
+    def test_free_text_serializes_after_hash_receipts(self):
+        value = {
+            "text": "sentry token discussion",
+            "text_sha256": "a" * 64,
+            "event_id": "rse_" + "b" * 64,
+        }
+        encoded = ledger.canonical(value).decode()
+        self.assertGreater(encoded.index('"text":'), encoded.index('"text_sha256":'))
+        self.assertGreater(encoded.index('"text":'), encoded.index('"event_id":'))
+
     def test_streaming_bundle_accounts_every_event_episode_and_packet_once(self):
         with tempfile.TemporaryDirectory() as temporary:
             manifest = Path(temporary) / "private" / "manifest.json"
@@ -97,8 +107,8 @@ class EventLedgerTest(unittest.TestCase):
             second = build(root / "second.json", 1501)
             first_packets = list(ledger.iter_jsonl(Path(first["packets"]["path"])))
             second_packets = list(ledger.iter_jsonl(Path(second["packets"]["path"])))
-            self.assertEqual(first_packets[0]["cache_key"], second_packets[0]["cache_key"])
-            self.assertNotEqual(first_packets[1]["cache_key"], second_packets[1]["cache_key"])
+            self.assertEqual(first_packets[0]["content_receipt"], second_packets[0]["content_receipt"])
+            self.assertNotEqual(first_packets[1]["content_receipt"], second_packets[1]["content_receipt"])
 
     def test_same_input_same_path_is_byte_stable(self):
         with tempfile.TemporaryDirectory() as temporary:

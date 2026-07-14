@@ -27,9 +27,20 @@ class LedgerError(RuntimeError):
     pass
 
 
+def _canonical_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        keys = sorted(key for key in value if key != "text")
+        if "text" in value:
+            keys.append("text")
+        return {key: _canonical_value(value[key]) for key in keys}
+    if isinstance(value, list):
+        return [_canonical_value(item) for item in value]
+    return value
+
+
 def canonical(value: Any) -> bytes:
     return json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        _canonical_value(value), ensure_ascii=False, sort_keys=False, separators=(",", ":"),
     ).encode()
 
 
@@ -194,7 +205,7 @@ class LedgerBuilder:
                 "first_episode_id", "last_episode_id", "event_ids_sha256", "type_counts",
             )
         }
-        self.packet["cache_key"] = "rpk_" + hashlib.sha256(canonical(packet_key)).hexdigest()
+        self.packet["content_receipt"] = "rpk_" + hashlib.sha256(canonical(packet_key)).hexdigest()
         self.writers["packets"].write(self.packet)
         self.packet_number += 1
         self.packet = None

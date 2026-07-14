@@ -9,6 +9,7 @@ from typing import Any
 
 from accounting import canonical_sha256, validate_accounting
 from event_ledger import iter_jsonl
+from privacy import sanitize_structure
 
 
 SYNTHESIS_SCHEMA = "recap.synthesis-draft.v1"
@@ -245,6 +246,9 @@ def validate_synthesis(
         return {"valid": False, "errors": ["accounting overlay is invalid"]}
     if not isinstance(draft, dict) or draft.get("schema_version") != SYNTHESIS_SCHEMA:
         return {"valid": False, "errors": ["synthesis schema is unsupported"]}
+    scrubbed_draft, _privacy_redactions = sanitize_structure(draft)
+    if scrubbed_draft != draft:
+        errors.append("synthesis contains credential-shaped material")
     if set(draft) != TOP_FIELDS:
         errors.append("synthesis top-level fields are not the closed contract")
     expected_manifest_sha = canonical_sha256(manifest)

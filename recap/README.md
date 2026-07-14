@@ -39,7 +39,11 @@ state verified now as separate evidence surfaces, so a pre-existing branch diff 
 as work performed by the selected agent.
 
 Recap never calls a model provider itself, never dumps private transcripts into a repository, and
-never labels a session complete until every exported page has been consumed.
+never labels a session complete until every exported page has been consumed. Recall performs the
+primary transcript redaction; Recap adds an independent fail-closed scrub across native identity,
+session metadata, event entities, git observations, accounting, and rendered prose. Private files
+are owner-only, relationship members are confined to their boundary-set directory, and hostile
+transcript instructions never become git actions.
 
 ## Inspiration
 

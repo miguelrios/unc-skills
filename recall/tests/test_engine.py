@@ -217,6 +217,48 @@ class RecallEngineTest(unittest.TestCase):
         self.assertNotIn(secret, rendered)
         self.assertIn("redacted", rendered.lower())
 
+    def test_session_redaction_covers_deep_sweep_provider_formats(self):
+        values = (
+            "sk-" + "O" * 48,
+            "sk-ant-api03-" + "A" * 90 + "AA",
+            "AIza" + "G" * 35,
+            "sk-or-v1-" + "R" * 40,
+            "gsk_" + "Q" * 40,
+            "xai-" + "X" * 40,
+            "pplx-" + "P" * 40,
+            "csk-" + "C" * 40,
+            "github_pat_" + "J" * 60,
+            "xoxb-" + "S" * 40,
+            "ops_" + "W" * 40,
+            "AKIA" + "Z" * 16,
+            "sk_live_" + "T" * 32,
+            "hf_" + "F" * 40,
+            "pcsk_" + "N" * 40,
+            "lsv2_" + "L" * 40,
+        )
+        for value in values:
+            with self.subTest(prefix=value[:10]):
+                self.assertNotIn(value, engine.clean_text("prefix " + value + " suffix"))
+        fireworks = "FireworksSynthetic" + "8" * 40
+        self.assertNotIn(
+            fireworks,
+            engine.clean_text("FIREWORKS_API_KEY=" + fireworks),
+        )
+        nested = "NestedSynthetic" + "7" * 40
+        self.assertNotIn(
+            nested,
+            engine.clean_text('{"service":{"fireworks_api_key_value":"' + nested + '"}}'),
+        )
+        multiline = "MultilineSynthetic" + "6" * 40
+        self.assertNotIn(
+            multiline,
+            engine.clean_text("| OP_SERVICE_ACCOUNT_TOKEN\n=\n" + multiline),
+        )
+        self.assertNotIn(multiline, engine.clean_text("| deployment_key = " + multiline))
+        proximity = "a" * 63 + "7"
+        self.assertNotIn(proximity, engine.clean_text("_sentry token " + proximity))
+        self.assertNotIn(proximity, engine.clean_text("other_access_token " + proximity))
+
     def test_ambiguous_current_error_uses_content_free_ranked_receipts(self):
         session = self.claude / "candidate-secret-token-value.jsonl"
         session.write_text(json.dumps({"type": "user", "message": {"content": "private"}}) + "\n")
@@ -237,6 +279,12 @@ class RecallEngineTest(unittest.TestCase):
         duplicate = self.claude / f"duplicate-{session_id}.jsonl"
         duplicate.write_text(session.read_text())
         with self.assertRaisesRegex(ValueError, "resolved to 2"):
+            engine.resolve_current_session()
+
+    def test_current_identity_fails_when_codex_and_claude_are_both_present(self):
+        os.environ["CODEX_THREAD_ID"] = "codex-id"
+        os.environ["CLAUDE_SESSION_ID"] = "claude-id"
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
             engine.resolve_current_session()
 
     def test_session_relations_selects_codex_children_and_fork_chain_exactly(self):
@@ -314,6 +362,40 @@ class RecallEngineTest(unittest.TestCase):
         graph = json.loads(out.getvalue())
         self.assertEqual(graph["incomplete_relations"][0]["reason"], "missing_agent_id")
         self.assertNotIn(str(child), out.getvalue())
+
+    def test_session_relations_remote_only_mode_fails_without_local_fallback(self):
+        target = self.codex / "rollout-remote.jsonl"
+        target.write_text(json.dumps({
+            "type": "session_meta", "payload": {"id": "remote-id"},
+        }) + "\n")
+        previous_mode = os.environ.get("RECALL_MODE")
+        os.environ["RECALL_MODE"] = "remote"
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                with self.assertRaises(SystemExit) as raised:
+                    engine.main(["session-relations", "--target", str(target), "--chain"])
+        finally:
+            if previous_mode is None:
+                os.environ.pop("RECALL_MODE", None)
+            else:
+                os.environ["RECALL_MODE"] = previous_mode
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("requires local native transcript metadata", err.getvalue())
+
+    def test_session_relations_rejects_credential_shaped_native_identity(self):
+        secret = "xai-" + "X" * 40
+        target = self.codex / "rollout-unsafe-id.jsonl"
+        target.write_text(json.dumps({
+            "type": "session_meta", "payload": {"id": secret},
+        }) + "\n")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with self.assertRaises(SystemExit) as raised:
+                engine.main(["session-relations", "--target", str(target)])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertNotIn(secret, out.getvalue() + err.getvalue())
 
     def test_secret_redaction_tool_cap_and_fts_injection(self):
         secret = "sk-ABCDEFGHIJKLMNOPQRSTUVWX"
