@@ -16,6 +16,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from . import PROJECTOR_VERSION
+from .federation import SourceProfile, freshness_score, normalized_evidence
 from .projectors import advisory_lock_key, canonical_json, event_receipt, legacy_engine, partial_lexical_probes, phrase_query_spec, preferred_phrase_probes, project, redact_text, validate_envelope
 from .ranking import DEFAULT_SEARCH_DEADLINE_MS, evidence_rank_components, should_run_partial
 
@@ -75,6 +76,83 @@ class BrainStore:
                 ("success" if row else "not_found", json.dumps({"name": name})),
             )
             return bool(row)
+
+    def set_source_profile(self, value: SourceProfile | dict[str, Any]) -> dict[str, Any]:
+        profile = value if isinstance(value, SourceProfile) else SourceProfile.from_mapping(value)
+        with self.connect() as conn:
+            if not conn.execute("SELECT 1 FROM sources WHERE id=%s", (profile.source_id,)).fetchone():
+                raise ValueError("source profile source does not exist")
+            conn.execute(
+                """INSERT INTO source_profiles(source_id,family,quality,freshness_half_life_days)
+                   VALUES (%s,%s,%s,%s)
+                   ON CONFLICT(source_id) DO UPDATE SET
+                     family=excluded.family,quality=excluded.quality,
+                     freshness_half_life_days=excluded.freshness_half_life_days,
+                     updated_at=now()""",
+                (
+                    profile.source_id, profile.family, profile.quality,
+                    profile.freshness_half_life_days,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO audit_events(operation,source_id,status,metadata)
+                   VALUES ('source.profile',%s,'success',%s)""",
+                (profile.source_id, json.dumps({
+                    "family": profile.family, "quality": profile.quality,
+                    "freshness_half_life_days": profile.freshness_half_life_days,
+                })),
+            )
+        return {"status": "configured", **profile.to_mapping()}
+
+    def federation_scoreboard(self) -> dict[str, Any]:
+        with self.connect() as conn:
+            groups = conn.execute(
+                """SELECT profile.family,profile.quality,count(*) AS sources,
+                          coalesce(sum(events.n),0) AS source_events,
+                          coalesce(sum(live.n),0) AS live_items
+                   FROM source_profiles profile
+                   LEFT JOIN (
+                     SELECT source_id,count(*) AS n FROM source_events GROUP BY source_id
+                   ) events ON events.source_id=profile.source_id
+                   LEFT JOIN (
+                     SELECT source_id,count(*) AS n FROM items
+                     WHERE deleted_at IS NULL GROUP BY source_id
+                   ) live ON live.source_id=profile.source_id
+                   GROUP BY profile.family,profile.quality
+                   ORDER BY profile.family,profile.quality"""
+            ).fetchall()
+            age_rows = conn.execute(
+                """SELECT CASE
+                            WHEN latest.created_at IS NULL THEN 'empty'
+                            WHEN latest.created_at >= now()-interval '1 day' THEN 'fresh_1d'
+                            WHEN latest.created_at >= now()-interval '30 days' THEN 'active_30d'
+                            ELSE 'stale_30d'
+                          END AS bucket,count(*) AS sources
+                   FROM source_profiles profile
+                   LEFT JOIN (
+                     SELECT source_id,max(created_at) AS created_at
+                     FROM source_events GROUP BY source_id
+                   ) latest ON latest.source_id=profile.source_id
+                   GROUP BY bucket ORDER BY bucket"""
+            ).fetchall()
+            totals = conn.execute(
+                """SELECT count(*) FILTER (WHERE profile.source_id IS NOT NULL) AS profiled,
+                          count(*) FILTER (WHERE profile.source_id IS NULL) AS unprofiled
+                   FROM sources source LEFT JOIN source_profiles profile
+                     ON profile.source_id=source.id"""
+            ).fetchone()
+        return {
+            "schema_version": 1,
+            "profiled_sources": int(totals["profiled"]),
+            "unprofiled_sources": int(totals["unprofiled"]),
+            "groups": [{
+                "family": row["family"], "quality": row["quality"],
+                "sources": int(row["sources"]),
+                "source_events": int(row["source_events"]),
+                "live_items": int(row["live_items"]),
+            } for row in groups],
+            "age_buckets": {row["bucket"]: int(row["sources"]) for row in age_rows},
+        }
 
     def authenticate_bearer(self, plaintext: str, required_scope: str) -> dict | None:
         digest = hashlib.sha256(plaintext.encode()).hexdigest()
@@ -366,11 +444,16 @@ class BrainStore:
             SELECT i.id,i.source_id,i.session_native_id,i.event_native_id,i.occurred_at,i.surface,
                    i.text_redacted,i.receipt,i.projector_version,s.started_at,s.ended_at,s.metadata,
                    se.envelope #>> '{{provenance,original_path}}' AS path,se.observed_at,
+                   coalesce(sp.family,'unclassified') AS source_family,
+                   coalesce(sp.quality,'unrated') AS source_quality,
+                   coalesce(sp.freshness_half_life_days,180) AS freshness_half_life_days,
+                   (sp.source_id IS NOT NULL) AS source_profiled,
                    ts_rank_cd(to_tsvector('simple',i.text_redacted),
                               {query_function}('simple',%s),32) AS lexical_rank
             FROM items i
             JOIN sessions s ON s.source_id=i.source_id AND s.native_id=i.session_native_id
             JOIN source_events se ON se.id=i.event_id
+            LEFT JOIN source_profiles sp ON sp.source_id=i.source_id
             WHERE to_tsvector('simple',i.text_redacted) @@ {query_function}('simple',%s)
               AND {where}{exact_sql}
             ORDER BY lexical_rank DESC,i.occurred_at DESC NULLS LAST,i.id DESC
@@ -410,11 +493,16 @@ class BrainStore:
             SELECT DISTINCT i.id,i.source_id,i.session_native_id,i.event_native_id,i.occurred_at,i.surface,
                    i.text_redacted,i.receipt,i.projector_version,s.started_at,s.ended_at,s.metadata,
                    se.envelope #>> '{{provenance,original_path}}' AS path,se.observed_at,
+                   coalesce(sp.family,'unclassified') AS source_family,
+                   coalesce(sp.quality,'unrated') AS source_quality,
+                   coalesce(sp.freshness_half_life_days,180) AS freshness_half_life_days,
+                   (sp.source_id IS NOT NULL) AS source_profiled,
                    1.0::real AS lexical_rank
             FROM entities e
             JOIN items i ON i.id=e.item_id
             JOIN sessions s ON s.source_id=i.source_id AND s.native_id=i.session_native_id
             JOIN source_events se ON se.id=i.event_id
+            LEFT JOIN source_profiles sp ON sp.source_id=i.source_id
             WHERE octet_length(e.normalized) <= 512 AND e.normalized = ANY(%s) AND {where}
             ORDER BY i.id DESC
             LIMIT %s
@@ -540,7 +628,14 @@ class BrainStore:
         except SearchDeadlineExceeded:
             pass
 
-        now = datetime.now(timezone.utc).timestamp()
+        now_datetime = datetime.now(timezone.utc)
+        now = now_datetime.timestamp()
+        families_by_evidence: dict[str, set[str]] = {}
+        for row in candidates.values():
+            if row["source_profiled"]:
+                families_by_evidence.setdefault(
+                    normalized_evidence(row["text_redacted"]), set(),
+                ).add(row["source_family"])
         grouped: dict[tuple[str, str], tuple[tuple[float, ...], dict]] = {}
         for row in candidates.values():
             matched = [term for term in informative if term.casefold() in row["text_redacted"].casefold()]
@@ -548,11 +643,20 @@ class BrainStore:
                 continue
             occurred = row["occurred_at"] or row["started_at"]
             epoch = occurred.timestamp() if occurred else now
-            recency_factor = 1 / (1 + max(0, now - epoch) / 86400 / 180)
+            recency_factor = freshness_score(
+                occurred or datetime.fromtimestamp(epoch, timezone.utc),
+                now=now_datetime,
+                half_life_days=row["freshness_half_life_days"],
+            )
+            corroborating_families = max(
+                1, len(families_by_evidence.get(normalized_evidence(row["text_redacted"]), set())),
+            )
             evidence = evidence_rank_components(
                 legs=row["legs"], surface=row["surface"], lexical_rank=float(row["lexical_rank"]),
                 matched_count=len(matched), informative_count=len(informative),
                 has_identifier=bool(identifiers), recency_factor=recency_factor,
+                quality=row["source_quality"],
+                corroborating_families=corroborating_families,
             )
             key = (row["source_id"], row["session_native_id"])
             rank_key = tuple(evidence["rank_key"])
@@ -574,6 +678,11 @@ class BrainStore:
                 "receipt": row["receipt"], "matched_terms": row["matched_terms"],
                 "legs": sorted(row["legs"]), "tier": row["evidence"]["class_priority"],
                 "evidence": row["evidence"],
+                "source_profile": {
+                    "profiled": row["source_profiled"],
+                    "family": row["source_family"],
+                    "quality": row["source_quality"],
+                },
                 "projector_version": row["projector_version"],
             })
         diagnostics = {

@@ -1,0 +1,28 @@
+{
+  "contamination_guard": "pass",
+  "counts": {
+    "corpus_records": 50,
+    "corroboration": 6,
+    "no-answer": 6,
+    "privacy-canary": 4,
+    "queries": 30,
+    "source-quality": 8,
+    "source_families": 4,
+    "source_profiles": 5,
+    "stale-conflict": 6
+  },
+  "freeze_epoch": 1783987200,
+  "generator_sha256": "255ebc870f5cc0c70537753729a70e1675b8195aec76daf75f5e92594c6a7c5a",
+  "privacy_canary_sha256": [
+    "e0348f71b19cf201391472c605bffbf0e4e9b1b3b4746fb23e07bb4b17e5c4e2",
+    "2dd6c55e5f74a82483d9feadce002792d6a2b6fbdadaa9582a55c5bf1cf97acb",
+    "f0e8d16ae38b67fcedebc5f1a1c13d824c8f26b70c3421f5d946a587487c0a56",
+    "ad4f3630674d66525e6920ea3ab5a3a08f55c5be089210a30c2d418d37ae2ec7"
+  ],
+  "schema_version": 1,
+  "sha256": {
+    "corpus.jsonl": "eb558ad70312806840f0aa18f9b71bd173c652386c3506cef714b0b68b82713d",
+    "profiles.jsonl": "0c8d6af868b0c1144cb880ed655bcda10f45620c02921e46d589b724ae6c4d2d",
+    "queries.jsonl": "34b3733bafd7155fe4ba0b13bbd30735ecf565fda04b14b91f2fb79b0705e16b"
+  }
+}
