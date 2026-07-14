@@ -437,7 +437,7 @@ class CredentialBoundaryTest(unittest.TestCase):
             return_value={"pane_command_hash": "expected"},
         ) as identity, mock.patch.object(self.runtime.subprocess, "run", side_effect=run) as invoked, mock.patch.object(
             self.runtime.time, "sleep"
-        ):
+        ), mock.patch.object(self.runtime, "_resolve_executable", return_value="/usr/bin/zellij"):
             self.runtime.deliver_zellij(bridge, text)
 
         commands = [call.args[0] for call in invoked.call_args_list]
