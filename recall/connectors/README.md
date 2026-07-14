@@ -70,3 +70,35 @@ recall-brain export-inbox-remove --inbox "$HOME/Recall Inbox" --catalog "$STATE/
 
 The next scheduled `export-inbox-sync` ACKs reference-safe tombstones. If another
 active export still owns the same upstream message, that message remains live.
+
+## Read-only Grep AI completed research
+
+`GrepAIConnector` imports completed work from the official Grep API v2. It uses
+only authenticated `GET /api/v2/research` list and exact job-detail requests.
+It cannot create research, spend credits, mutate sharing, use public-capability
+reads, upload attachments, or download signed files.
+
+Grep authority and Brain authority are separate. Supply the Grep
+`research:read` key through Keychain or a regular mode-0600 file; its value never
+belongs in argv, config previews, cursors, receipts, errors, or the Brain. The
+preview reads neither credential and performs no writes or network calls:
+
+```bash
+recall-brain grep-ai-config-preview \
+  --endpoint https://brain.example.ts.net \
+  --source-id grep-ai:tenant:mine \
+  --keychain-service ai.parcha.recall.grep-ai \
+  --keychain-account grep-ai:tenant:mine \
+  --grep-keychain-service ai.parcha.grep.research-read \
+  --grep-keychain-account research-read \
+  --spool "$HOME/.local/state/recall/grep-ai.db"
+```
+
+Each invocation fetches one bounded keyset page. The private cursor resets to
+the list head after a historical sweep, so a job inserted above an in-progress
+page walk is found on the next pass. Brain acknowledgement gates cursor commit;
+a lost acknowledgement replays the staged batch without refetching Grep.
+Completed reports cross the shared privacy boundary before SQLite or Brain.
+Failed, blocked, cancelled, queued, and running jobs advance inventory without
+becoming memories. List absence, 404, retention, and authorization failure never
+infer deletion—forget an imported result explicitly with its Brain receipt.

@@ -19,6 +19,7 @@ from collector.collector import Collector
 from client.capture import CaptureClient
 from client.mcp import McpServer, serve as serve_mcp
 from connectors.export_inbox import ExportInboxConnector
+from connectors.grep_ai import GrepAIConnector, load_private_api_key, validate_api_key
 from connectors.sdk import ConnectorRunner
 from privacy.policy import AgenticJudge, PrivacyPolicy, load_scoped_virtual_key
 
@@ -52,8 +53,8 @@ def _mcp_connection(parser: argparse.ArgumentParser) -> None:
     _auth(parser)
 
 
-def _privacy(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--privacy-mode", choices=("off", "scrub", "drop"), default=os.environ.get("RECALL_PRIVACY_MODE", "off"))
+def _privacy(parser: argparse.ArgumentParser, *, choices=("off", "scrub", "drop"), default=None) -> None:
+    parser.add_argument("--privacy-mode", choices=choices, default=default or os.environ.get("RECALL_PRIVACY_MODE", "off"))
     parser.add_argument("--privacy-judge-base-url", default=os.environ.get("RECALL_PRIVACY_JUDGE_BASE_URL"))
     parser.add_argument("--privacy-judge-key-file", default=os.environ.get("RECALL_PRIVACY_JUDGE_KEY_FILE"))
     parser.add_argument("--privacy-judge-model", default=os.environ.get("RECALL_PRIVACY_JUDGE_MODEL"))
@@ -63,6 +64,24 @@ def _privacy(parser: argparse.ArgumentParser) -> None:
 def _export_inbox(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--inbox", required=True)
     parser.add_argument("--catalog", required=True)
+
+
+def _private_connection(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--endpoint", required=True)
+    parser.add_argument("--source-id", required=True)
+    parser.add_argument("--principal-id", default="owner")
+    parser.set_defaults(visibility="private")
+    _auth(parser)
+
+
+def _grep_ai(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--grep-api-key-file")
+    group.add_argument("--grep-keychain-service")
+    parser.add_argument("--grep-keychain-account")
+    parser.add_argument("--spool", required=True)
+    parser.add_argument("--max-pages", type=int, default=100)
+    parser.add_argument("--page-size", type=int, default=10)
 
 
 def _privacy_policy(args) -> PrivacyPolicy:
@@ -127,6 +146,17 @@ def parser() -> argparse.ArgumentParser:
     _privacy(inbox_sync)
     _export_inbox(inbox_sync)
     inbox_sync.add_argument("--spool", required=True)
+
+    grep_preview = commands.add_parser("grep-ai-config-preview")
+    _private_connection(grep_preview)
+    _privacy(grep_preview, choices=("scrub", "drop"), default="drop")
+    _grep_ai(grep_preview)
+    grep_preview.add_argument("--executable", default="recall-brain")
+
+    grep_sync = commands.add_parser("grep-ai-sync")
+    _private_connection(grep_sync)
+    _privacy(grep_sync, choices=("scrub", "drop"), default="drop")
+    _grep_ai(grep_sync)
 
     mcp_preview = commands.add_parser("mcp-config-preview")
     _mcp_connection(mcp_preview)
@@ -221,9 +251,45 @@ def main() -> None:
         }
         print(json.dumps(result, sort_keys=True))
         return
+    if args.command == "grep-ai-config-preview":
+        if args.keychain_service and not args.keychain_account:
+            raise SystemExit("--keychain-account is required with --keychain-service")
+        if args.grep_keychain_service and not args.grep_keychain_account:
+            raise SystemExit("--grep-keychain-account is required with --grep-keychain-service")
+        auth = ["--token-file", args.token_file] if args.token_file else [
+            "--keychain-service", args.keychain_service,
+            "--keychain-account", args.keychain_account,
+        ]
+        grep_auth = ["--grep-api-key-file", args.grep_api_key_file] if args.grep_api_key_file else [
+            "--grep-keychain-service", args.grep_keychain_service,
+            "--grep-keychain-account", args.grep_keychain_account,
+        ]
+        command_args = [
+            "grep-ai-sync", "--endpoint", args.endpoint,
+            "--source-id", args.source_id, "--principal-id", args.principal_id,
+            *auth, *grep_auth,
+            "--spool", args.spool, "--max-pages", str(args.max_pages),
+            "--page-size", str(args.page_size),
+            "--privacy-mode", args.privacy_mode,
+            "--privacy-judge-failure", args.privacy_judge_failure,
+        ]
+        if args.privacy_judge_base_url:
+            command_args.extend([
+                "--privacy-judge-base-url", args.privacy_judge_base_url,
+                "--privacy-judge-key-file", args.privacy_judge_key_file,
+                "--privacy-judge-model", args.privacy_judge_model,
+            ])
+        print(json.dumps({
+            "schema_version": 1, "mode": "grep-ai-config-preview",
+            "network_requests": 0, "writes": 0, "visibility": "private",
+            "command": args.executable, "args": command_args,
+        }, sort_keys=True))
+        return
 
     if args.keychain_service and not args.keychain_account:
         raise SystemExit("--keychain-account is required with --keychain-service")
+    if getattr(args, "grep_keychain_service", None) and not args.grep_keychain_account:
+        raise SystemExit("--grep-keychain-account is required with --grep-keychain-service")
     token = _token(args)
     common = {
         "endpoint": args.endpoint,
@@ -232,7 +298,7 @@ def main() -> None:
         "principal_id": args.principal_id,
         "visibility": args.visibility,
     }
-    privacy = _privacy_policy(args) if args.command in {"collect", "export", "put", "export-inbox-sync", "mcp-serve"} else PrivacyPolicy(mode="off")
+    privacy = _privacy_policy(args) if args.command in {"collect", "export", "put", "export-inbox-sync", "mcp-serve", "grep-ai-sync"} else PrivacyPolicy(mode="off")
     if args.command == "mcp-serve":
         backend = CaptureClient(**common, privacy=privacy)
         serve_mcp(McpServer(backend), sys.stdin, sys.stdout, sys.stderr)
@@ -275,6 +341,22 @@ def main() -> None:
         finally:
             runner.close()
             connector.close()
+    elif args.command == "grep-ai-sync":
+        grep_key = load_private_api_key(Path(args.grep_api_key_file)) if args.grep_api_key_file else validate_api_key(
+            load_keychain_token(args.grep_keychain_service, args.grep_keychain_account)
+        )
+        connector = GrepAIConnector(
+            api_key=grep_key,
+            source_id=args.source_id, max_pages=args.max_pages, page_size=args.page_size,
+        )
+        runner = ConnectorRunner(
+            connector=connector, brain=BrainClient(**common),
+            spool_path=Path(args.spool), privacy=privacy,
+        )
+        try:
+            result = {"sync": runner.run_once(), "doctor": runner.doctor()}
+        finally:
+            runner.close()
     elif args.command == "put":
         text = args.text if args.text is not None else sys.stdin.read()
         result = MemoryClient(**common, privacy=privacy).put(text, provenance={"uri": args.provenance_uri})

@@ -1,0 +1,14 @@
+{
+  "schema_version": 2,
+  "corpus": "corpus.jsonl",
+  "corpus_sha256": "bf9358faec381148ba9f1bfcec91972f3aed379be372ee7f41c842bad6a9ba9f",
+  "cases": 9,
+  "thresholds": {
+    "completed_projection": 1.0,
+    "nonterminal_projection": 0.0,
+    "invalid_acceptance": 0.0,
+    "sensitive_survival": 0.0,
+    "duplicate_live_items": 0,
+    "raw_response_persistence_bytes": 0
+  }
+}
