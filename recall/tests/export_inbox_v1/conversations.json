@@ -1,0 +1,78 @@
+[
+  {
+    "id": "synthetic-conversation-alpha",
+    "title": "Synthetic cobalt planning",
+    "create_time": 1783987200,
+    "mapping": {
+      "root-alpha": {
+        "id": "root-alpha",
+        "parent": null,
+        "children": ["user-alpha"],
+        "message": null
+      },
+      "user-alpha": {
+        "id": "user-alpha",
+        "parent": "root-alpha",
+        "children": ["assistant-alpha", "assistant-alpha-branch"],
+        "message": {
+          "id": "message-user-alpha",
+          "author": {"role": "user"},
+          "create_time": 1783987201,
+          "content": {
+            "content_type": "text",
+            "parts": ["Plan the synthetic cobalt release and keep this context"]
+          },
+          "metadata": {}
+        }
+      },
+      "assistant-alpha": {
+        "id": "assistant-alpha",
+        "parent": "user-alpha",
+        "children": ["tool-alpha"],
+        "message": {
+          "id": "message-assistant-alpha",
+          "author": {"role": "assistant"},
+          "create_time": 1783987202,
+          "content": {
+            "content_type": "code",
+            "parts": ["print('synthetic cobalt')"]
+          },
+          "metadata": {"model_slug": "synthetic-model"}
+        }
+      },
+      "assistant-alpha-branch": {
+        "id": "assistant-alpha-branch",
+        "parent": "user-alpha",
+        "children": [],
+        "message": {
+          "id": "message-assistant-alpha-branch",
+          "author": {"role": "assistant"},
+          "create_time": 1783987203,
+          "content": {
+            "content_type": "text",
+            "parts": ["Alternate synthetic branch"]
+          },
+          "metadata": {}
+        }
+      },
+      "tool-alpha": {
+        "id": "tool-alpha",
+        "parent": "assistant-alpha",
+        "children": [],
+        "message": {
+          "id": "message-tool-alpha",
+          "author": {"role": "tool"},
+          "create_time": 1783987204,
+          "content": {
+            "content_type": "multimodal_text",
+            "parts": [
+              "tool result api_key=synthetic-chatgpt-secret-canary-91 keep aftermath",
+              {"content_type": "image_asset_pointer", "asset_pointer": "file-service://synthetic-private-pointer", "name": "private-name.png"}
+            ]
+          },
+          "metadata": {"invoked_by": "synthetic-tool"}
+        }
+      }
+    }
+  }
+]

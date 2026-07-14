@@ -59,6 +59,24 @@ transcript; deletion still requires the canonical receipt. Never enable the
 optional contextual-PII judge without consent, and route it only through staging
 LiteLLM with a short-lived scoped virtual key—never a master key or direct provider.
 
+## Consented ChatGPT/Cowork exports
+
+When the packaged Brain client is installed, use its explicit export inbox for
+ChatGPT/Cowork history. Never scrape application databases, caches, browser
+storage, Desktop, or Downloads. Inventory only the directory the user selected:
+
+```bash
+recall-brain export-inbox-dry-run --inbox "$HOME/Recall Inbox" \
+  --catalog "$HOME/Library/Application Support/RecallBrain/state/chatgpt-export-catalog.db" \
+  --privacy-mode scrub
+```
+
+`export-inbox-list` returns opaque export IDs. `export-inbox-remove ... exp_...`
+queues reference-safe tombstones; deleting a local file alone deliberately does
+not delete central memory. Use `--export-inbox` during Mac package installation
+to opt into scheduled sync, and `--disable-export-inbox` to unload that agent
+without destroying its recoverable catalog/spool.
+
 ## First: pick the outcome
 
 1. **Find / verify** — answer "did we…", "which session…", "how did we…".

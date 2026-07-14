@@ -8,6 +8,7 @@ from .sdk import (
     ConnectorRunError,
     ConnectorRunner,
 )
+from .export_inbox import ExportInboxConnector, ExportInboxError
 
 __all__ = [
     "ConnectorContractError",
@@ -16,4 +17,6 @@ __all__ = [
     "ConnectorRecord",
     "ConnectorRunError",
     "ConnectorRunner",
+    "ExportInboxConnector",
+    "ExportInboxError",
 ]

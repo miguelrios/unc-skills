@@ -12,6 +12,8 @@ CLAUDE_ROOT="$HOME/.claude/projects"
 CODEX_ROOT="$HOME/.codex/sessions"
 NO_LOAD=0
 PRIVACY_MODE="off"
+EXPORT_INBOX=""
+DISABLE_EXPORT_INBOX=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -25,8 +27,10 @@ while [ "$#" -gt 0 ]; do
     --claude-root) CLAUDE_ROOT=$2; shift 2 ;;
     --codex-root) CODEX_ROOT=$2; shift 2 ;;
     --privacy-mode) PRIVACY_MODE=$2; shift 2 ;;
+    --export-inbox) EXPORT_INBOX=$2; shift 2 ;;
+    --disable-export-inbox) DISABLE_EXPORT_INBOX=1; shift ;;
     --no-load) NO_LOAD=1; shift ;;
-    *) echo "usage: install.sh --endpoint URL --host-id ID --keychain-service SERVICE --visibility private|shared --sources claude,codex [--privacy-mode off|scrub|drop] [--claude-root PATH] [--codex-root PATH] [--prefix PATH] [--launch-agents PATH] [--no-load]" >&2; exit 2 ;;
+    *) echo "usage: install.sh --endpoint URL --host-id ID --keychain-service SERVICE --visibility private|shared [--sources claude,codex] [--export-inbox PATH | --disable-export-inbox] [--privacy-mode off|scrub|drop] [--claude-root PATH] [--codex-root PATH] [--prefix PATH] [--launch-agents PATH] [--no-load]" >&2; exit 2 ;;
   esac
 done
 
@@ -35,14 +39,22 @@ case "$HOST_ID" in ""|*[!A-Za-z0-9_.-]*) echo "invalid host id" >&2; exit 2 ;; e
 [ -n "$KEYCHAIN_SERVICE" ] || { echo "keychain service is required" >&2; exit 2; }
 case "$VISIBILITY" in private|shared) ;; *) echo "visibility must be private or shared" >&2; exit 2 ;; esac
 case "$PRIVACY_MODE" in off|scrub|drop) ;; *) echo "privacy mode must be off, scrub, or drop" >&2; exit 2 ;; esac
-case ",$SOURCES," in
-  *,claude,*|*,codex,*) ;;
-  *) echo "sources must select claude, codex, or claude,codex" >&2; exit 2 ;;
-esac
-case ",$SOURCES," in *,,*|*,claude,claude,*|*,codex,codex,*|*,claude,codex,claude,*|*,codex,claude,codex,*) echo "invalid duplicate or empty source selection" >&2; exit 2 ;; esac
+if [ -n "$EXPORT_INBOX" ] && [ "$DISABLE_EXPORT_INBOX" -eq 1 ]; then
+  echo "export inbox enable and disable options are mutually exclusive" >&2; exit 2
+fi
+if [ -z "$SOURCES" ] && [ -z "$EXPORT_INBOX" ] && [ "$DISABLE_EXPORT_INBOX" -eq 0 ]; then
+  echo "select at least one coding source or an explicit export inbox" >&2; exit 2
+fi
+if [ -n "$SOURCES" ]; then
+  case ",$SOURCES," in *,claude,*|*,codex,*) ;; *) echo "sources must select claude, codex, or claude,codex" >&2; exit 2 ;; esac
+  case ",$SOURCES," in *,,*|*,claude,claude,*|*,codex,codex,*|*,claude,codex,claude,*|*,codex,claude,codex,*) echo "invalid duplicate or empty source selection" >&2; exit 2 ;; esac
+fi
 for SOURCE_NAME in $(echo "$SOURCES" | tr ',' ' '); do
   case "$SOURCE_NAME" in claude|codex) ;; *) echo "unsupported source: $SOURCE_NAME" >&2; exit 2 ;; esac
 done
+if [ -n "$EXPORT_INBOX" ]; then
+  [ -d "$EXPORT_INBOX" ] && [ ! -L "$EXPORT_INBOX" ] || { echo "export inbox must be an explicit non-symlink directory" >&2; exit 2; }
+fi
 
 SOURCE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 mkdir -p "$PREFIX" "$PREFIX/bin" "$PREFIX/lib" "$PREFIX/state" "$LAUNCH_AGENTS"
@@ -131,8 +143,58 @@ PY
   fi
 }
 
+write_export_inbox_plist() {
+  SOURCE_ID="chatgpt-export:mac:$HOST_ID"
+  LABEL="ai.parcha.recall.chatgpt-export"
+  PLIST="$LAUNCH_AGENTS/$LABEL.plist"
+  SPOOL="$PREFIX/state/chatgpt-export-runner.db"
+  CATALOG="$PREFIX/state/chatgpt-export-catalog.db"
+  if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
+    launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
+  fi
+  "$RUNTIME" - "$PLIST" "$LABEL" "$RUNTIME" "$PREFIX/lib" "$ENDPOINT" "$SOURCE_ID" "$EXPORT_INBOX" "$CATALOG" "$SPOOL" "$KEYCHAIN_SERVICE" "$PRIVACY_MODE" <<'PY'
+import plistlib
+import sys
+
+path, label, program, pythonpath, endpoint, source_id, inbox, catalog, spool, service, privacy_mode = sys.argv[1:]
+value = {
+    "Label": label,
+    "ProgramArguments": [
+        program, "-m", "client.cli", "export-inbox-sync", "--endpoint", endpoint,
+        "--source-id", source_id, "--principal-id", "owner", "--visibility", "private",
+        "--inbox", inbox, "--catalog", catalog, "--spool", spool,
+        "--keychain-service", service, "--keychain-account", source_id,
+        "--privacy-mode", privacy_mode,
+    ],
+    "EnvironmentVariables": {
+        "PYTHONPATH": pythonpath,
+        "RECALL_KEYCHAIN_REFERENCE": "Keychain service/account only",
+    },
+    "RunAtLoad": True,
+    "StartInterval": 30,
+    "ProcessType": "Background",
+    "StandardOutPath": spool + ".stdout.log",
+    "StandardErrorPath": spool + ".stderr.log",
+}
+with open(path, "wb") as output:
+    plistlib.dump(value, output, sort_keys=True)
+PY
+  chmod 600 "$PLIST"
+  if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
+    launchctl bootstrap "gui/$(id -u)" "$PLIST"
+  fi
+}
+
 case ",$SOURCES," in *,claude,*) write_plist claude "$CLAUDE_ROOT" ;; esac
 case ",$SOURCES," in *,codex,*) write_plist codex "$CODEX_ROOT" ;; esac
+if [ -n "$EXPORT_INBOX" ]; then write_export_inbox_plist; fi
+if [ "$DISABLE_EXPORT_INBOX" -eq 1 ]; then
+  LABEL="ai.parcha.recall.chatgpt-export"
+  if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
+    launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
+  fi
+  rm -f "$LAUNCH_AGENTS/$LABEL.plist"
+fi
 echo "installed Recall Brain Mac client in $PREFIX"
 echo "selected sources: $SOURCES; visibility: $VISIBILITY; privacy: $PRIVACY_MODE"
 echo "Keychain accounts use each selected source id as the account"
