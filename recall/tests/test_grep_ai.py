@@ -107,6 +107,7 @@ class GrepAIFrozenEvalTest(unittest.TestCase):
             is_nonterminal = row["case"] in {
                 "failed-not-memory", "nonterminal-not-memory", "all-nonmemory-statuses",
                 "official-planning-statuses", "observed-paused-status",
+                "observed-in-progress-statuses",
             }
             nonterminal += int(is_nonterminal)
             nonterminal_projected += len(page.records) if is_nonterminal else 0
@@ -160,7 +161,10 @@ class GrepAIFrozenEvalTest(unittest.TestCase):
         self.assertEqual(TERMINAL_MEMORY, {"complete", "completed"})
         self.assertEqual(
             NONTERMINAL,
-            {"queued", "moderation", "planning", "running", "paused"},
+            {
+                "queued", "moderation", "planning", "running", "paused",
+                "in progress", "in_progress",
+            },
         )
         self.assertEqual(
             TERMINAL_NO_MEMORY,
