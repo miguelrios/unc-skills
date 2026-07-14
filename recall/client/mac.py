@@ -249,6 +249,11 @@ def _envelope(*, source_id: str, native_id: str, kind: str, content: Any,
     }
 
 
+# Public shared builder for explicitly installed adapters. Existing client paths
+# retain the private name while connector code depends on a stable seam.
+canonical_envelope = _envelope
+
+
 class BrainClient:
     def __init__(self, *, endpoint: str, token: str, source_id: str,
                  principal_id: str = "owner", visibility: str = "private",

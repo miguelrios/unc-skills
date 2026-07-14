@@ -110,3 +110,11 @@ to the Brain or copies retained in original source transcripts/backups. Delete
 already-committed evidence by its canonical receipt before relying on the new
 policy. Roll back by reinstalling with `--privacy-mode off`; uninstall removes the
 client, LaunchAgents, and entire local spool.
+
+## External connectors
+
+The bundle includes the versioned connector SDK, but installs no external source
+and discovers no plugins automatically. A connector must be explicitly installed
+and constructed. It owns only source fetching; the shared runner owns privacy,
+durable ACK recovery, cursor commits, tombstones, and content-free health state.
+See `connectors/README.md` before adding a source.

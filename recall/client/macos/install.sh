@@ -46,9 +46,10 @@ done
 
 SOURCE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 mkdir -p "$PREFIX" "$PREFIX/bin" "$PREFIX/lib" "$PREFIX/state" "$LAUNCH_AGENTS"
-rm -rf "$PREFIX/lib/client" "$PREFIX/lib/collector" "$PREFIX/lib/privacy" "$PREFIX/runtime"
+rm -rf "$PREFIX/lib/client" "$PREFIX/lib/collector" "$PREFIX/lib/connectors" "$PREFIX/lib/privacy" "$PREFIX/runtime"
 cp -R "$SOURCE/lib/client" "$PREFIX/lib/client"
 cp -R "$SOURCE/lib/collector" "$PREFIX/lib/collector"
+cp -R "$SOURCE/lib/connectors" "$PREFIX/lib/connectors"
 cp -R "$SOURCE/lib/privacy" "$PREFIX/lib/privacy"
 cp -R "$SOURCE/runtime" "$PREFIX/runtime"
 cp "$SOURCE/bin/recall-brain" "$PREFIX/bin/recall-brain"
