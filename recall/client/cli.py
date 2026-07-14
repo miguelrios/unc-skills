@@ -44,6 +44,14 @@ def _connection(parser: argparse.ArgumentParser) -> None:
     _auth(parser)
 
 
+def _mcp_connection(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--endpoint", required=True)
+    parser.add_argument("--source-id", required=True)
+    parser.add_argument("--principal-id", default="owner")
+    parser.add_argument("--visibility", choices=("private", "shared"), default="private")
+    _auth(parser)
+
+
 def _privacy(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--privacy-mode", choices=("off", "scrub", "drop"), default=os.environ.get("RECALL_PRIVACY_MODE", "off"))
     parser.add_argument("--privacy-judge-base-url", default=os.environ.get("RECALL_PRIVACY_JUDGE_BASE_URL"))
@@ -121,12 +129,12 @@ def parser() -> argparse.ArgumentParser:
     inbox_sync.add_argument("--spool", required=True)
 
     mcp_preview = commands.add_parser("mcp-config-preview")
-    _connection(mcp_preview)
+    _mcp_connection(mcp_preview)
     _privacy(mcp_preview)
     mcp_preview.add_argument("--executable", default="recall-brain")
 
     mcp_serve = commands.add_parser("mcp-serve")
-    _connection(mcp_serve)
+    _mcp_connection(mcp_serve)
     _privacy(mcp_serve)
 
     delete = commands.add_parser("delete")

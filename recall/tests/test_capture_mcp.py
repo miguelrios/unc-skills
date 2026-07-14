@@ -194,7 +194,6 @@ class McpProtocolTest(unittest.TestCase):
             "recall-brain", "mcp-config-preview",
             "--endpoint", "https://brain.example.ts.net",
             "--source-id", "capture:mac:synthetic",
-            "--visibility", "private",
             "--keychain-service", "ai.parcha.recall.synthetic",
             "--keychain-account", "capture:mac:synthetic",
             "--privacy-mode", "scrub",
@@ -214,6 +213,7 @@ class McpProtocolTest(unittest.TestCase):
         self.assertIn("mcp-serve", rendered)
         self.assertIn("capture:mac:synthetic", rendered)
         self.assertIn("ai.parcha.recall.synthetic", rendered)
+        self.assertIn("private", rendered)
         self.assertNotIn("synthetic-transport-token", rendered)
 
     def test_mcp_serve_loads_credential_only_inside_backend_process(self) -> None:
