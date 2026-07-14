@@ -33,15 +33,14 @@ def call(process: subprocess.Popen, request_id: int, name: str, arguments: dict)
     return json.loads(response["result"]["content"][0]["text"])
 
 
-def capture(origin: str, nonce: str, index: int, body: str) -> dict:
+def capture(label: str, nonce: str, index: int, body: str) -> dict:
     return {
         "schema_version": 1,
-        "title": f"Synthetic {origin} capture",
+        "title": f"Synthetic {label} capture",
         "body": body,
-        "origin": origin,
         "occurred_at": f"2026-07-14T14:0{index}:00Z",
         "tags": ["synthetic", "c8c"],
-        "provenance": {"uri": f"manual://c8c-{origin}"},
+        "provenance": {"uri": f"manual://c8c-{label}"},
     }
 
 
@@ -71,6 +70,7 @@ def main() -> None:
         preview = subprocess.run([
             str(args.wrapper), "mcp-config-preview",
             "--endpoint", args.endpoint, "--source-id", args.source_id,
+            "--capture-origin", "synthetic-c8c",
             "--visibility", "private", "--token-file", str(token_file),
             "--privacy-mode", "scrub",
         ], check=True, text=True, capture_output=True)
@@ -81,6 +81,7 @@ def main() -> None:
         process = subprocess.Popen([
             str(args.wrapper), "mcp-serve",
             "--endpoint", args.endpoint, "--source-id", args.source_id,
+            "--capture-origin", "synthetic-c8c",
             "--visibility", "private", "--token-file", str(token_file),
             "--privacy-mode", "scrub",
         ], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -150,7 +151,7 @@ def main() -> None:
             "status": "pass",
             "summary": {
                 "protocol_version": "2025-11-25", "tools": 3,
-                "origins": 4, "retry_added_events": 0,
+                "source_labels": 4, "bound_origins": 1, "retry_added_events": 0,
                 "same_retry_receipt": True, "canary_search_hits": 0,
                 "resolved_canary_hits": 0, "forgotten": 4,
                 "live_items_after_forget": 0,

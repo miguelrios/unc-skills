@@ -17,7 +17,7 @@ from client.mac import (
     store_keychain_token,
 )
 from collector.collector import Collector
-from client.capture import CaptureClient
+from client.capture import CaptureClient, ORIGIN
 from client.mcp import McpServer, serve as serve_mcp
 from connectors.export_inbox import ExportInboxConnector
 from connectors.grep_ai import GrepAIConnector, load_private_api_key, validate_api_key
@@ -72,6 +72,12 @@ def _mcp_connection(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--principal-id", default="owner")
     parser.add_argument("--visibility", choices=("private", "shared"), default="private")
     _auth(parser)
+
+
+def _capture_origin(value: str) -> str:
+    if not ORIGIN.fullmatch(value):
+        raise argparse.ArgumentTypeError("capture origin is invalid")
+    return value
 
 
 def _privacy(parser: argparse.ArgumentParser, *, choices=("off", "scrub", "drop"), default=None) -> None:
@@ -213,11 +219,13 @@ def parser() -> argparse.ArgumentParser:
     mcp_preview = commands.add_parser("mcp-config-preview")
     _mcp_connection(mcp_preview)
     _privacy(mcp_preview)
+    mcp_preview.add_argument("--capture-origin", required=True, type=_capture_origin)
     mcp_preview.add_argument("--executable", default="recall-brain")
 
     mcp_serve = commands.add_parser("mcp-serve")
     _mcp_connection(mcp_serve)
     _privacy(mcp_serve)
+    mcp_serve.add_argument("--capture-origin", required=True, type=_capture_origin)
 
     delete = commands.add_parser("delete")
     _connection(delete)
@@ -343,6 +351,7 @@ def main() -> None:
         command_args = [
             "mcp-serve", "--endpoint", args.endpoint,
             "--source-id", args.source_id, "--principal-id", args.principal_id,
+            "--capture-origin", args.capture_origin,
             "--visibility", args.visibility, *auth,
             "--privacy-mode", args.privacy_mode,
             "--privacy-judge-failure", args.privacy_judge_failure,
@@ -429,7 +438,10 @@ def main() -> None:
     privacy = _privacy_policy(args) if args.command in {"collect", "export", "put", "export-inbox-sync", "mcp-serve", "grep-ai-sync"} else PrivacyPolicy(mode="off")
     if args.command == "mcp-serve":
         backend = CaptureClient(**common, privacy=privacy)
-        serve_mcp(McpServer(backend), sys.stdin, sys.stdout, sys.stderr)
+        serve_mcp(
+            McpServer(backend, capture_origin=args.capture_origin),
+            sys.stdin, sys.stdout, sys.stderr,
+        )
         return
     if args.command == "collect":
         collector = Collector(

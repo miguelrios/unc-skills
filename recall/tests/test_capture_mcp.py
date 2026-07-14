@@ -10,7 +10,7 @@ from unittest import mock
 
 from client import cli as client_cli
 from client.capture import CaptureClient, CaptureContractError
-from client.mcp import McpServer, serve
+from client.mcp import McpProtocolError, McpServer, serve
 from privacy.policy import PrivacyPolicy
 
 
@@ -152,7 +152,7 @@ class McpProtocolTest(unittest.TestCase):
 
     def test_initialize_list_and_three_tools_are_closed(self) -> None:
         backend = FakeCapture()
-        server = McpServer(backend)
+        server = McpServer(backend, capture_origin="synthetic-client")
         initialized = server.handle(self.initialize())
         self.assertEqual(initialized["result"]["protocolVersion"], "2025-11-25")
         compatible = server.handle(self.initialize(9, "2025-06-18"))
@@ -163,13 +163,67 @@ class McpProtocolTest(unittest.TestCase):
         self.assertFalse(tools["recall_capture"]["inputSchema"].get("additionalProperties", True))
 
         capture = json.loads((FIXTURES / "corpus.jsonl").read_text().splitlines()[0])["capture"]
+        arguments = {key: value for key, value in capture.items() if key != "origin"}
         called = server.handle({
             "jsonrpc": "2.0", "id": 3, "method": "tools/call",
-            "params": {"name": "recall_capture", "arguments": capture},
+            "params": {"name": "recall_capture", "arguments": arguments},
         })
         rendered = json.dumps(called)
         self.assertIn("recall://", rendered)
         self.assertNotIn(capture["body"], rendered)
+
+    def test_capture_origin_is_bound_by_host_and_cannot_be_spoofed(self) -> None:
+        backend = FakeCapture()
+        server = McpServer(backend, capture_origin="openai-codex")
+        listed = server.handle({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {},
+        })
+        schema = next(
+            tool["inputSchema"] for tool in listed["result"]["tools"]
+            if tool["name"] == "recall_capture"
+        )
+        self.assertNotIn("origin", schema["properties"])
+        self.assertNotIn("origin", schema["required"])
+
+        capture = json.loads((FIXTURES / "corpus.jsonl").read_text().splitlines()[0])["capture"]
+        arguments = {key: value for key, value in capture.items() if key != "origin"}
+        server.handle({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "recall_capture", "arguments": arguments},
+        })
+        self.assertEqual(backend.calls[-1][1]["origin"], "openai-codex")
+
+        with self.assertRaisesRegex(McpProtocolError, "capture_invalid"):
+            server.handle({
+                "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": {
+                    "name": "recall_capture",
+                    "arguments": {**arguments, "origin": "anthropic-claude"},
+                },
+            })
+        self.assertEqual(len(backend.calls), 1)
+
+    def test_invalid_bound_origin_fails_before_authority_or_network(self) -> None:
+        with self.assertRaises(CaptureContractError):
+            McpServer(FakeCapture(), capture_origin="caller supplied origin")
+        arguments = [
+            "recall-brain", "mcp-serve",
+            "--endpoint", "https://brain.example.ts.net",
+            "--source-id", "capture:mac:synthetic",
+            "--capture-origin", "caller supplied origin",
+            "--visibility", "private",
+            "--token-file", "/synthetic/private-reference.json",
+            "--privacy-mode", "drop",
+        ]
+        errors = io.StringIO()
+        with mock.patch("sys.argv", arguments), mock.patch("sys.stderr", errors), \
+             mock.patch("client.cli.load_file_token") as loaded, \
+             mock.patch("urllib.request.urlopen") as opened, \
+             self.assertRaises(SystemExit):
+            client_cli.main()
+        loaded.assert_not_called()
+        opened.assert_not_called()
+        self.assertNotIn("/synthetic/private-reference.json", errors.getvalue())
 
     def test_stdio_protocol_never_echoes_invalid_sensitive_arguments(self) -> None:
         canary = "synthetic-mcp-invalid-canary-102"
@@ -182,7 +236,10 @@ class McpProtocolTest(unittest.TestCase):
         ]) + "\n"
         output = io.StringIO()
         errors = io.StringIO()
-        serve(McpServer(FakeCapture()), io.StringIO(requests), output, errors)
+        serve(
+            McpServer(FakeCapture(), capture_origin="synthetic-client"),
+            io.StringIO(requests), output, errors,
+        )
         lines = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual(len(lines), 2)
         self.assertIn("error", lines[1])
@@ -194,6 +251,7 @@ class McpProtocolTest(unittest.TestCase):
             "recall-brain", "mcp-config-preview",
             "--endpoint", "https://brain.example.ts.net",
             "--source-id", "capture:mac:synthetic",
+            "--capture-origin", "openai-codex",
             "--keychain-service", "ai.parcha.recall.synthetic",
             "--keychain-account", "capture:mac:synthetic",
             "--privacy-mode", "scrub",
@@ -212,6 +270,7 @@ class McpProtocolTest(unittest.TestCase):
         rendered = json.dumps(server)
         self.assertIn("mcp-serve", rendered)
         self.assertIn("capture:mac:synthetic", rendered)
+        self.assertIn("openai-codex", rendered)
         self.assertIn("ai.parcha.recall.synthetic", rendered)
         self.assertIn("private", rendered)
         self.assertNotIn("synthetic-transport-token", rendered)
@@ -221,6 +280,7 @@ class McpProtocolTest(unittest.TestCase):
             "recall-brain", "mcp-serve",
             "--endpoint", "https://brain.example.ts.net",
             "--source-id", "capture:mac:synthetic",
+            "--capture-origin", "openai-codex",
             "--visibility", "private",
             "--token-file", "/synthetic/private-reference.json",
             "--privacy-mode", "drop",
@@ -234,6 +294,7 @@ class McpProtocolTest(unittest.TestCase):
         self.assertEqual(backend.source_id, "capture:mac:synthetic")
         self.assertEqual(backend.visibility, "private")
         self.assertEqual(backend.privacy.mode, "drop")
+        self.assertEqual(served.call_args.args[0].capture_origin, "openai-codex")
 
 
 if __name__ == "__main__":

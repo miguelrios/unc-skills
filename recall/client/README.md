@@ -129,25 +129,33 @@ See `connectors/README.md` before adding a source.
 
 ## Deliberate agent capture over MCP
 
-The bundled stdio MCP server lets Codex, Claude Code, ChatGPT/Cowork, or another
-MCP host deliberately save one selected evidence item without giving the model a
-Brain credential. Preview a config object; Recall does not edit harness config:
+The bundled stdio MCP server lets Codex, Claude Code, Claude Desktop, or another
+local MCP host deliberately save one selected evidence item without giving the
+model a Brain credential. Preview one source-scoped config per host; Recall does
+not edit harness config:
 
 ```bash
 recall-brain mcp-config-preview \
   --endpoint https://brain.example.ts.net \
-  --source-id capture:mac:my-mac \
+  --source-id capture:mac:my-mac:codex \
+  --capture-origin openai-codex \
   --visibility private \
   --keychain-service ai.parcha.recall \
-  --keychain-account capture:mac:my-mac \
+  --keychain-account capture:mac:my-mac:codex \
   --privacy-mode scrub
 ```
 
-Review the JSON and install it through the host's normal MCP settings. The
-process resolves Keychain only after launch; stdout carries newline-delimited
-MCP JSON-RPC and never logs arguments. The tools are `recall_capture`,
-`recall_forget`, and content-free `recall_doctor`. Capture retries are
-content-identity stable and return the same receipt. `shared` visibility is
-available only when explicitly selected in the process config, never in a tool
-call. The current stable MCP revision is `2025-11-25`, with negotiation support
-for `2025-06-18` clients.
+Review the JSON and install it through the host's normal MCP settings. Give each
+host its own source-scoped Brain credential and fixed `--capture-origin`; the
+model cannot set or override origin in a tool call. The process resolves
+Keychain only after launch; stdout carries newline-delimited MCP JSON-RPC and
+never logs arguments. The tools are `recall_capture`, `recall_forget`, and
+content-free `recall_doctor`. Capture retries are content-identity stable and
+return the same receipt. `shared` visibility is available only when explicitly
+selected in the process config, never in a tool call. The current stable MCP
+revision is `2025-11-25`, with negotiation support for `2025-06-18` clients.
+
+ChatGPT does not connect directly to a local MCP server. Use an approved remote
+MCP deployment or OpenAI's Secure MCP Tunnel adapter instead; do not reuse a
+local host's source credential for that bridge. See OpenAI's
+[developer mode and MCP documentation](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt).
