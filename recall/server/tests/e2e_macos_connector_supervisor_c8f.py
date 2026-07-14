@@ -148,6 +148,7 @@ def main() -> None:
         for field in ("credential_reads", "source_reads", "network_requests", "writes"):
             assert preview[field] == 0
 
+        os.chmod(args.workspace, 0o700)
         env = {**os.environ, "PYTHONPATH": str(prefix / "lib")}
         result = run_json([
             str(prefix / "runtime" / "bin" / "python3"), str(Path(__file__).resolve()),
