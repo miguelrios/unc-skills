@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+from datetime import datetime
+from dataclasses import dataclass
 import hashlib
 import json
 import math
@@ -11,7 +13,6 @@ from pathlib import Path
 import re
 import ssl
 import stat
-from dataclasses import dataclass
 from typing import Any, Mapping, Protocol
 import urllib.error
 import urllib.parse
@@ -39,6 +40,7 @@ JOB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{7,127}\Z")
 CURSOR_PREFIX = "gai2_"
 TERMINAL_MEMORY = {"complete", "completed"}
 KNOWN_STATUSES = TERMINAL_MEMORY | {"queued", "running", "failed", "blocked", "cancelled", "canceled"}
+NONTERMINAL = {"queued", "running"}
 LIST_FIELDS = {"job_id", "status", "created_at", "updated_at", "completed_at", "effort", "question", "slug"}
 LIST_REQUIRED = {"job_id", "status", "created_at", "updated_at"}
 DETAIL_FIELDS = {
@@ -126,6 +128,14 @@ def load_private_api_key(path: Path) -> str:
     try:
         descriptor = os.open(key_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         try:
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or stat.S_IMODE(opened.st_mode) & 0o077
+                or opened.st_size > 256
+                or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
+            ):
+                raise PermissionError("grep_ai_key_invalid")
             value = os.read(descriptor, 257).decode("utf-8", errors="strict").strip()
         finally:
             os.close(descriptor)
@@ -168,6 +178,29 @@ def _string(value: Any, label: str, *, maximum: int = 4096, nullable: bool = Fal
     if any(ord(char) < 32 and char not in "\n\r\t" for char in value):
         raise ConnectorContractError(f"grep_ai_invalid_{label}")
     return value
+
+
+def _content_string(value: Any, label: str, *, maximum: int, allow_empty: bool = False) -> str:
+    """Validate projected prose and normalize JSON-valid transport controls."""
+    if not isinstance(value, str) or (not value and not allow_empty) or len(value) > maximum:
+        raise ConnectorContractError(f"grep_ai_invalid_{label}")
+    return "".join(
+        character if ord(character) >= 32 or character in "\n\r\t" else "\ufffd"
+        for character in value
+    )
+
+
+def _timestamp_string(value: Any, label: str, *, nullable: bool = False) -> str | None:
+    raw = _string(value, label, maximum=64, nullable=nullable)
+    if raw is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        raise ConnectorContractError(f"grep_ai_invalid_{label}") from None
+    if parsed.tzinfo is None:
+        raise ConnectorContractError(f"grep_ai_invalid_{label}")
+    return raw
 
 
 def _job_id(value: Any) -> str:
@@ -274,14 +307,15 @@ def _list_page(value: Any) -> tuple[list[dict[str, Any]], str | None, bool]:
         if status not in KNOWN_STATUSES:
             raise ConnectorContractError("grep_ai_invalid_status")
         for key in ("created_at", "updated_at"):
-            _string(item[key], key, maximum=64)
+            _timestamp_string(item[key], key)
         for key in set(item) - LIST_REQUIRED:
             if key == "completed_at":
-                _string(item[key], key, maximum=64, nullable=True)
+                _timestamp_string(item[key], key, nullable=True)
             elif key in {"effort", "slug"}:
                 _string(item[key], key, maximum=256, nullable=True)
             elif key == "question":
-                _string(item[key], key, maximum=100_000, nullable=True)
+                if item[key] is not None:
+                    _content_string(item[key], key, maximum=100_000)
         normalized.append(item)
     return normalized, next_cursor, has_more
 
@@ -295,11 +329,13 @@ def _project_detail(value: Any, expected_job_id: str) -> ConnectorRecord:
     status = _string(value["status"], "status", maximum=32)
     if status not in TERMINAL_MEMORY:
         raise ConnectorContractError("grep_ai_detail_not_complete")
-    question = _string(value["question"], "question", maximum=100_000)
+    question = _content_string(value["question"], "question", maximum=100_000)
     report = value["report"]
     if not isinstance(report, dict) or set(report) != {"markdown", "revision_sha", "widgets"}:
         raise ConnectorContractError("grep_ai_invalid_report")
-    markdown = _string(report["markdown"], "report", maximum=MAX_REPORT_CHARS)
+    markdown = _content_string(
+        report["markdown"], "report", maximum=MAX_REPORT_CHARS, allow_empty=True,
+    )
     markdown = _normalize_urls(markdown)
     if report["widgets"] is not None and not isinstance(report["widgets"], list):
         raise ConnectorContractError("grep_ai_invalid_report")
@@ -310,10 +346,10 @@ def _project_detail(value: Any, expected_job_id: str) -> ConnectorRecord:
     effort = _string(value["effort"], "effort", maximum=64, nullable=True)
     expert = _string(value["expert_id"], "expert_id", maximum=256, nullable=True)
     language = _string(value["response_language"], "response_language", maximum=64, nullable=True)
-    completed_at = _string(value["completed_at"], "completed_at", maximum=64)
-    _string(value["created_at"], "created_at", maximum=64)
-    _string(value["updated_at"], "updated_at", maximum=64)
-    _string(value["started_at"], "started_at", maximum=64, nullable=True)
+    completed_at = _timestamp_string(value["completed_at"], "completed_at")
+    _timestamp_string(value["created_at"], "created_at")
+    _timestamp_string(value["updated_at"], "updated_at")
+    _timestamp_string(value["started_at"], "started_at", nullable=True)
     if not isinstance(value["is_public"], bool):
         raise ConnectorContractError("grep_ai_invalid_visibility")
     content = {
@@ -393,14 +429,14 @@ class GrepAIConnector:
 
     def pull(self, cursor: str | None) -> ConnectorPage:
         if cursor is None:
-            stop = head = after = None
+            stop = boundary = after = None
             pages = 0
         else:
             state = decode_cursor(cursor)
             if state["phase"] == "head":
-                stop, head, after, pages = state["watermark"], None, None, 0
+                stop, boundary, after, pages = state["watermark"], None, None, 0
             else:
-                stop, head, after, pages = state["stop"], state["head"], state["after"], state["pages"]
+                stop, boundary, after, pages = state["stop"], state["head"], state["after"], state["pages"]
         query = {"limit": str(self.page_size)}
         if after is not None:
             query["cursor"] = after
@@ -408,20 +444,29 @@ class GrepAIConnector:
         pages += 1
         if pages > self.max_pages:
             raise ConnectorContractError("grep_ai_page_cap_exceeded")
-        if head is None and items:
-            head = _fingerprint(items[0]["job_id"])
         records = []
         reached_stop = False
         for item in items:
             job_id = item["job_id"]
-            if stop is not None and _fingerprint(job_id) == stop:
+            fingerprint = _fingerprint(job_id)
+            if stop is not None and fingerprint == stop:
                 reached_stop = True
+                if boundary is None:
+                    boundary = stop
                 break
+            if item["status"] in NONTERMINAL:
+                # Keep the checkpoint behind every unfinished job. This makes a
+                # created-newest list revisit state transitions without storing
+                # private job IDs or rescanning settled history indefinitely.
+                boundary = None
+                continue
+            if boundary is None:
+                boundary = fingerprint
             if item["status"] in TERMINAL_MEMORY:
                 detail_path = LIST_PATH + "/" + urllib.parse.quote(job_id, safe="")
                 records.append(_project_detail(self._request(detail_path, {}), job_id))
         if reached_stop or not upstream_has_more:
-            next_cursor = encode_cursor({"v": 2, "phase": "head", "watermark": head or stop})
+            next_cursor = encode_cursor({"v": 2, "phase": "head", "watermark": boundary or stop})
             return ConnectorPage(records=tuple(records), next_cursor=next_cursor, has_more=False)
         if pages >= self.max_pages:
             raise ConnectorContractError("grep_ai_page_cap_exceeded")
@@ -429,6 +474,6 @@ class GrepAIConnector:
             raise ConnectorContractError("grep_ai_cursor_did_not_advance")
         next_cursor = encode_cursor({
             "v": 2, "phase": "sweep", "after": next_upstream,
-            "stop": stop, "head": head, "pages": pages,
+            "stop": stop, "head": boundary, "pages": pages,
         })
         return ConnectorPage(records=tuple(records), next_cursor=next_cursor, has_more=True)

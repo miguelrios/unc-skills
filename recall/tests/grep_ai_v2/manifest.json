@@ -1,8 +1,15 @@
 {
   "schema_version": 2,
   "corpus": "corpus.jsonl",
-  "corpus_sha256": "bf9358faec381148ba9f1bfcec91972f3aed379be372ee7f41c842bad6a9ba9f",
-  "cases": 9,
+  "corpus_sha256": "88e2a60cf0ce9653e2db6d1e6f0917ffa5edde2de9bd8defb05b7b4fb8adb9d5",
+  "cases": 15,
+  "unit_contract_matrix": {
+    "pagination": ["empty", "multi_page", "new_head", "opaque_cursor", "cursor_stall", "page_cap"],
+    "bodies": ["malformed_json", "non_utf8", "oversized", "wrong_content_type", "redirect", "alternate_host"],
+    "errors": [401, 402, 403, 404, 409, 422, 429, 500, 503],
+    "retry_after": ["absent", "malformed", "bounded"],
+    "privacy": ["credential_canary", "pii_canary", "private_path_canary", "raw_response_zero_bytes"]
+  },
   "thresholds": {
     "completed_projection": 1.0,
     "nonterminal_projection": 0.0,

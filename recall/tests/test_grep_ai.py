@@ -13,6 +13,7 @@ from connectors.grep_ai import (
     GrepAIConnector,
     GrepAIResponse,
     GrepAIUpstreamError,
+    MAX_RESPONSE_BYTES,
     decode_cursor,
     load_private_api_key,
 )
@@ -92,10 +93,15 @@ class GrepAIFrozenEvalTest(unittest.TestCase):
                 continue
             invalid_accepted += int(not row["valid"])
             self.assertEqual(len(page.records), row["expected_records"], row["case"])
-            is_completed = row["case"] in {"complete", "completed-structured", "sensitive-complete", "live-null-widgets"}
+            is_completed = row["case"] in {
+                "complete", "completed-structured", "sensitive-complete",
+                "live-null-widgets", "control-normalized-complete", "empty-report-complete",
+            }
             completed += int(is_completed)
             projected += len(page.records) if is_completed else 0
-            is_nonterminal = row["case"] in {"failed-not-memory", "nonterminal-not-memory"}
+            is_nonterminal = row["case"] in {
+                "failed-not-memory", "nonterminal-not-memory", "all-nonmemory-statuses",
+            }
             nonterminal += int(is_nonterminal)
             nonterminal_projected += len(page.records) if is_nonterminal else 0
             duplicates += len(page.records) - len({record.native_id for record in page.records})
@@ -124,6 +130,16 @@ class GrepAIFrozenEvalTest(unittest.TestCase):
         self.assertNotIn("fragment", rendered)
         self.assertTrue(record.native_id.startswith("grep-ai-"))
 
+    def test_live_json_control_characters_are_normalized_before_projection(self):
+        row = next(
+            json.loads(line) for line in CORPUS.read_text().splitlines()
+            if json.loads(line)["case"] == "control-normalized-complete"
+        )
+        record = connector(FakeTransport(pages={None: row["list"]}, details=row["details"])).pull(None).records[0]
+        rendered = json.dumps(record.content, ensure_ascii=False)
+        self.assertNotIn("\x00", rendered)
+        self.assertIn("\ufffdcontrol", rendered)
+
 
 class GrepAICursorTest(unittest.TestCase):
     def test_head_reset_finds_concurrent_insert_without_reimporting_watermark(self):
@@ -150,6 +166,39 @@ class GrepAICursorTest(unittest.TestCase):
         self.assertEqual(len(head.records), 1)
         self.assertFalse(head.has_more)
         self.assertEqual(decode_cursor(head.next_cursor)["phase"], "head")
+
+    def test_nonterminal_job_remains_ahead_of_checkpoint_until_completion(self):
+        rows = {row["case"]: row for row in map(json.loads, CORPUS.read_text().splitlines())}
+        complete = rows["complete"]
+        pending = json.loads(json.dumps(rows["nonterminal-not-memory"]["list"]["items"][0]))
+        boundary = json.loads(json.dumps(rows["failed-not-memory"]["list"]["items"][0]))
+        first_transport = FakeTransport(pages={None: {
+            "items": [complete["list"]["items"][0], pending, boundary],
+            "next_cursor": None, "has_more": False,
+        }}, details=complete["details"])
+        adapter = connector(first_transport)
+        first = adapter.pull(None)
+        self.assertEqual(len(first.records), 1)
+        self.assertEqual(
+            decode_cursor(first.next_cursor)["watermark"],
+            hashlib.sha256(boundary["job_id"].encode()).hexdigest(),
+        )
+
+        pending["status"] = "complete"
+        detail = json.loads(json.dumps(next(iter(complete["details"].values()))))
+        detail["job_id"] = pending["job_id"]
+        detail["question"] = pending["question"]
+        second_transport = FakeTransport(
+            pages={None: {"items": [complete["list"]["items"][0], pending, boundary],
+                          "next_cursor": None, "has_more": False}},
+            details={**complete["details"], pending["job_id"]: detail},
+        )
+        adapter.transport = second_transport
+        second = adapter.pull(first.next_cursor)
+        self.assertIn(
+            "grep-ai-" + hashlib.sha256(pending["job_id"].encode()).hexdigest()[:48],
+            {record.native_id for record in second.records},
+        )
 
     def test_lost_ack_replays_without_api_refetch_or_raw_spool(self):
         row = next(json.loads(line) for line in CORPUS.read_text().splitlines() if json.loads(line)["case"] == "complete")
@@ -222,6 +271,9 @@ class GrepAITransportAndConfigTest(unittest.TestCase):
             (401, "unauthenticated", "grep_ai_unauthenticated"),
             (402, "insufficient_credits", "grep_ai_insufficient_credits"),
             (403, "forbidden", "grep_ai_forbidden"),
+            (404, "job_not_found", "grep_ai_job_not_found"),
+            (409, "conflict", "grep_ai_conflict"),
+            (422, "validation_error", "grep_ai_validation_error"),
             (500, "internal_error", "grep_ai_internal_error"),
             (503, "upstream_unavailable", "grep_ai_upstream_unavailable"),
         ):
@@ -235,6 +287,40 @@ class GrepAITransportAndConfigTest(unittest.TestCase):
         with self.assertRaises(ConnectorRateLimited) as raised:
             adapter.pull(None)
         self.assertEqual(raised.exception.retry_after_seconds, 120)
+        for retry, expected in ((None, 60), ("later", 60), ("99999", 3600), ("0", 1)):
+            with self.subTest(retry=retry):
+                adapter = connector(FakeTransport(failures=[failure(429, "rate_limited", retry)]))
+                with self.assertRaises(ConnectorRateLimited) as raised:
+                    adapter.pull(None)
+                self.assertEqual(raised.exception.retry_after_seconds, expected)
+
+    def test_body_redirect_host_and_content_type_fail_closed(self):
+        valid = encoded({"items": [], "next_cursor": None, "has_more": False})
+        cases = (
+            GrepAIResponse(200, {"content-type": "application/json"}, b"{", "https://api.grep.ai/api/v2/research"),
+            GrepAIResponse(200, {"content-type": "application/json"}, b"\xff", "https://api.grep.ai/api/v2/research"),
+            GrepAIResponse(200, {"content-type": "application/json"}, b"x" * (MAX_RESPONSE_BYTES + 1), "https://api.grep.ai/api/v2/research"),
+            GrepAIResponse(200, {"content-type": "text/html"}, valid, "https://api.grep.ai/api/v2/research"),
+            GrepAIResponse(200, {"content-type": "application/json"}, valid, "https://redirect.invalid/api/v2/research"),
+            GrepAIResponse(200, {"content-type": "application/json"}, valid, "https://api.grep.ai:443/api/v2/research"),
+        )
+        for index, response in enumerate(cases):
+            with self.subTest(case=index):
+                with self.assertRaises((ConnectorContractError, GrepAIUpstreamError)):
+                    connector(FakeTransport(failures=[response])).pull(None)
+
+    def test_cursor_stall_and_page_cap_fail_before_checkpoint(self):
+        page = {"items": [], "next_cursor": "repeat", "has_more": True}
+        transport = FakeTransport(pages={None: page, "repeat": page})
+        adapter = connector(transport)
+        first = adapter.pull(None)
+        with self.assertRaisesRegex(ConnectorContractError, "cursor_did_not_advance"):
+            adapter.pull(first.next_cursor)
+        with self.assertRaisesRegex(ConnectorContractError, "page_cap"):
+            GrepAIConnector(
+                api_key=KEY, source_id="grep-ai:synthetic:c8d",
+                transport=FakeTransport(pages={None: page}), max_pages=1,
+            ).pull(None)
 
     def test_config_preview_does_not_read_credentials_or_call_network_and_is_private(self):
         arguments = [
