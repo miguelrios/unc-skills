@@ -39,20 +39,16 @@ API_KEY = re.compile(r"parcha-[a-z0-9_-]+-[0-9a-fA-F]{32}\Z")
 JOB_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{7,127}\Z")
 CURSOR_PREFIX = "gai2_"
 TERMINAL_MEMORY = {"complete", "completed"}
-KNOWN_STATUSES = TERMINAL_MEMORY | {"queued", "running", "failed", "blocked", "cancelled", "canceled"}
-NONTERMINAL = {"queued", "running"}
+NONTERMINAL = {"queued", "moderation", "planning", "running"}
+KNOWN_STATUSES = TERMINAL_MEMORY | NONTERMINAL | {"failed", "blocked", "cancelled", "canceled"}
 LIST_FIELDS = {"job_id", "status", "created_at", "updated_at", "completed_at", "effort", "question", "slug"}
-LIST_REQUIRED = {"job_id", "status", "created_at", "updated_at"}
+LIST_REQUIRED = {"job_id", "status", "question"}
 DETAIL_FIELDS = {
     "attachments", "completed_at", "context", "created_at", "effort", "expert_id",
     "is_public", "job_id", "json_schema", "question", "report", "response_language",
     "revisions", "slug", "started_at", "status", "structured_output", "updated_at",
 }
-DETAIL_REQUIRED = {
-    "completed_at", "created_at", "effort", "expert_id", "is_public", "job_id",
-    "question", "report", "response_language", "started_at", "status", "structured_output",
-    "updated_at",
-}
+DETAIL_REQUIRED = {"job_id", "status", "question"}
 ERROR_CODES = {
     "invalid_request", "unauthenticated", "insufficient_credits", "forbidden",
     "job_not_found", "resource_not_found", "conflict", "validation_error",
@@ -306,21 +302,18 @@ def _list_page(value: Any) -> tuple[list[dict[str, Any]], str | None, bool]:
         status = _string(item["status"], "status", maximum=32)
         if status not in KNOWN_STATUSES:
             raise ConnectorContractError("grep_ai_invalid_status")
-        for key in ("created_at", "updated_at"):
-            _timestamp_string(item[key], key)
+        _content_string(item["question"], "question", maximum=100_000, allow_empty=True)
         for key in set(item) - LIST_REQUIRED:
-            if key == "completed_at":
+            if key in {"completed_at", "created_at", "updated_at"}:
                 _timestamp_string(item[key], key, nullable=True)
             elif key in {"effort", "slug"}:
-                _string(item[key], key, maximum=256, nullable=True)
-            elif key == "question":
                 if item[key] is not None:
-                    _content_string(item[key], key, maximum=100_000)
+                    _content_string(item[key], key, maximum=256, allow_empty=True)
         normalized.append(item)
     return normalized, next_cursor, has_more
 
 
-def _project_detail(value: Any, expected_job_id: str) -> ConnectorRecord:
+def _project_detail(value: Any, expected_job_id: str, list_item: Mapping[str, Any] | None = None) -> ConnectorRecord:
     if not isinstance(value, dict) or not DETAIL_REQUIRED.issubset(value) or set(value) - DETAIL_FIELDS:
         raise ConnectorContractError("grep_ai_invalid_detail")
     job_id = _job_id(value["job_id"])
@@ -329,38 +322,55 @@ def _project_detail(value: Any, expected_job_id: str) -> ConnectorRecord:
     status = _string(value["status"], "status", maximum=32)
     if status not in TERMINAL_MEMORY:
         raise ConnectorContractError("grep_ai_detail_not_complete")
-    question = _content_string(value["question"], "question", maximum=100_000)
-    report = value["report"]
-    if not isinstance(report, dict) or set(report) != {"markdown", "revision_sha", "widgets"}:
-        raise ConnectorContractError("grep_ai_invalid_report")
-    markdown = _content_string(
-        report["markdown"], "report", maximum=MAX_REPORT_CHARS, allow_empty=True,
-    )
-    markdown = _normalize_urls(markdown)
-    if report["widgets"] is not None and not isinstance(report["widgets"], list):
-        raise ConnectorContractError("grep_ai_invalid_report")
-    _string(report["revision_sha"], "revision", maximum=256)
-    structured = value["structured_output"]
+    question = _content_string(value["question"], "question", maximum=100_000, allow_empty=True)
+    report = value.get("report")
+    if report is None:
+        markdown = ""
+    else:
+        if not isinstance(report, dict) or "markdown" not in report or set(report) - {"markdown", "revision_sha", "widgets"}:
+            raise ConnectorContractError("grep_ai_invalid_report")
+        markdown = _normalize_urls(_content_string(
+            report["markdown"], "report", maximum=MAX_REPORT_CHARS, allow_empty=True,
+        ))
+        if report.get("widgets") is not None and not isinstance(report["widgets"], list):
+            raise ConnectorContractError("grep_ai_invalid_report")
+        if report.get("revision_sha") is not None:
+            _content_string(report["revision_sha"], "revision", maximum=256, allow_empty=True)
+    structured = value.get("structured_output")
+    if structured is not None and not isinstance(structured, dict):
+        raise ConnectorContractError("grep_ai_invalid_structured_output")
     if structured is not None and len(_canonical(structured)) > MAX_STRUCTURED_BYTES:
         raise ConnectorContractError("grep_ai_structured_output_too_large")
-    effort = _string(value["effort"], "effort", maximum=64, nullable=True)
-    expert = _string(value["expert_id"], "expert_id", maximum=256, nullable=True)
-    language = _string(value["response_language"], "response_language", maximum=64, nullable=True)
-    completed_at = _timestamp_string(value["completed_at"], "completed_at")
-    _timestamp_string(value["created_at"], "created_at")
-    _timestamp_string(value["updated_at"], "updated_at")
-    _timestamp_string(value["started_at"], "started_at", nullable=True)
-    if not isinstance(value["is_public"], bool):
+
+    def optional_text(key: str, maximum: int) -> str | None:
+        candidate = value.get(key)
+        return None if candidate is None else _content_string(
+            candidate, key, maximum=maximum, allow_empty=True,
+        )
+
+    effort = optional_text("effort", 64)
+    expert = optional_text("expert_id", 256)
+    language = optional_text("response_language", 64)
+    completed_at = _timestamp_string(value.get("completed_at"), "completed_at", nullable=True)
+    created_at = _timestamp_string(value.get("created_at"), "created_at", nullable=True)
+    updated_at = _timestamp_string(value.get("updated_at"), "updated_at", nullable=True)
+    _timestamp_string(value.get("started_at"), "started_at", nullable=True)
+    if "is_public" in value and not isinstance(value["is_public"], bool):
         raise ConnectorContractError("grep_ai_invalid_visibility")
+    if list_item is not None:
+        completed_at = completed_at or _timestamp_string(list_item.get("completed_at"), "completed_at", nullable=True)
+        created_at = created_at or _timestamp_string(list_item.get("created_at"), "created_at", nullable=True)
+        updated_at = updated_at or _timestamp_string(list_item.get("updated_at"), "updated_at", nullable=True)
+    occurred_at = completed_at or updated_at or created_at or "1970-01-01T00:00:00Z"
     content = {
         "provider": "grep.ai", "status": status, "question": question,
         "report_markdown": markdown, "structured_output": structured,
         "effort": effort, "expert_id": expert, "response_language": language,
-        "created_at": value["created_at"], "completed_at": completed_at,
+        "created_at": created_at, "completed_at": completed_at,
     }
     native_id = "grep-ai-" + _fingerprint(job_id)[:48]
     return ConnectorRecord(
-        schema_version=1, native_id=native_id, occurred_at=completed_at,
+        schema_version=1, native_id=native_id, occurred_at=occurred_at,
         content=content,
         provenance={"uri": "connector://grep-ai/completed-research", "provider": "grep.ai"},
         deleted=False,
@@ -464,7 +474,7 @@ class GrepAIConnector:
                 boundary = fingerprint
             if item["status"] in TERMINAL_MEMORY:
                 detail_path = LIST_PATH + "/" + urllib.parse.quote(job_id, safe="")
-                records.append(_project_detail(self._request(detail_path, {}), job_id))
+                records.append(_project_detail(self._request(detail_path, {}), job_id, item))
         if reached_stop or not upstream_has_more:
             next_cursor = encode_cursor({"v": 2, "phase": "head", "watermark": boundary or stop})
             return ConnectorPage(records=tuple(records), next_cursor=next_cursor, has_more=False)

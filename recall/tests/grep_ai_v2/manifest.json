@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
   "corpus": "corpus.jsonl",
-  "corpus_sha256": "88e2a60cf0ce9653e2db6d1e6f0917ffa5edde2de9bd8defb05b7b4fb8adb9d5",
-  "cases": 15,
+  "corpus_sha256": "a8ad4b21d854a6b1bd5821bd0899f71aa557c03e0b8eb2a1ac83300bdcdc6c05",
+  "cases": 17,
   "unit_contract_matrix": {
     "pagination": ["empty", "multi_page", "new_head", "opaque_cursor", "cursor_stall", "page_cap"],
     "bodies": ["malformed_json", "non_utf8", "oversized", "wrong_content_type", "redirect", "alternate_host"],

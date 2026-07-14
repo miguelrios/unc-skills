@@ -96,11 +96,13 @@ class GrepAIFrozenEvalTest(unittest.TestCase):
             is_completed = row["case"] in {
                 "complete", "completed-structured", "sensitive-complete",
                 "live-null-widgets", "control-normalized-complete", "empty-report-complete",
+                "official-minimal-completed",
             }
             completed += int(is_completed)
             projected += len(page.records) if is_completed else 0
             is_nonterminal = row["case"] in {
                 "failed-not-memory", "nonterminal-not-memory", "all-nonmemory-statuses",
+                "official-planning-statuses",
             }
             nonterminal += int(is_nonterminal)
             nonterminal_projected += len(page.records) if is_nonterminal else 0
@@ -139,6 +141,16 @@ class GrepAIFrozenEvalTest(unittest.TestCase):
         rendered = json.dumps(record.content, ensure_ascii=False)
         self.assertNotIn("\x00", rendered)
         self.assertIn("\ufffdcontrol", rendered)
+
+    def test_official_minimal_completed_shape_is_deterministic(self):
+        row = next(
+            json.loads(line) for line in CORPUS.read_text().splitlines()
+            if json.loads(line)["case"] == "official-minimal-completed"
+        )
+        record = connector(FakeTransport(pages={None: row["list"]}, details=row["details"])).pull(None).records[0]
+        self.assertEqual(record.occurred_at, "1970-01-01T00:00:00Z")
+        self.assertEqual(record.content["report_markdown"], "")
+        self.assertEqual(record.content["question"], "Synthetic minimal completed research")
 
 
 class GrepAICursorTest(unittest.TestCase):
