@@ -50,6 +50,13 @@ native ID. Writes require remote mode and fail closed if `RECALL_URL`, the
 source-scoped credential, or the exact source ID is unavailable. Never infer a
 shared visibility choice: default to `private`, and use `shared` only when the
 user deliberately selects it. Secret-shaped lines are redacted before ingest.
+
+Completed Grep AI research can be imported through the packaged read-only v2
+connector. Use `grep-ai-config-preview` to inspect the private one-shot command,
+then `grep-ai-sync`; Grep `research:read` authority and Brain source authority
+must use separate Keychain or mode-0600 references. The connector never creates
+jobs or infers deletion from list absence. Use the returned Brain receipt for an
+explicit `delete`.
 When the packaged Brain client is available, offer its opt-in pre-ingest privacy
 policy for transcript/export/memory writes: `off` preserves compatibility,
 `scrub` retains safe context, and `drop` omits the classified record before spool

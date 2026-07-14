@@ -44,6 +44,16 @@ class ConnectorRunError(RuntimeError):
         super().__init__(error_code)
 
 
+class ConnectorUpstreamError(RuntimeError):
+    """A connector-owned, stable, content-free upstream condition."""
+
+    def __init__(self, error_code: str):
+        if not isinstance(error_code, str) or not re.fullmatch(r"[a-z][a-z0-9_]{2,63}", error_code):
+            raise ConnectorContractError("upstream error code is invalid")
+        self.error_code = error_code
+        super().__init__(error_code)
+
+
 def _json_copy(value: Any, label: str) -> Any:
     try:
         return json.loads(json.dumps(value, ensure_ascii=False, allow_nan=False))
@@ -322,6 +332,9 @@ class ConnectorRunner:
                 "status": "backoff", "error_code": "connector_rate_limited",
                 "retry_after_seconds": min(3600, max(1, int(base * jitter))),
             }
+        except ConnectorUpstreamError as error:
+            self._record_error(error.error_code)
+            raise ConnectorRunError(error.error_code) from None
         except ConnectorContractError:
             self._record_error("connector_invalid_page")
             raise
