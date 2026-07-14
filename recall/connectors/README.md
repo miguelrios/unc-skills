@@ -99,9 +99,11 @@ the list head after a historical sweep, so a job inserted above an in-progress
 page walk is found on the next pass. Brain acknowledgement gates cursor commit;
 a lost acknowledgement replays the staged batch without refetching Grep.
 Completed reports cross the shared privacy boundary before SQLite or Brain.
-Failed, blocked, cancelled, queued, and running jobs advance inventory without
-becoming memories. List absence, 404, retention, and authorization failure never
-infer deletion—forget an imported result explicitly with its Brain receipt.
+Failed, blocked, and cancelled jobs advance the settled boundary without becoming
+memories. Queued, moderation, planning, running, and paused jobs also remain out of
+memory, but hold that boundary behind them so a later status transition is revisited.
+List absence, 404, retention, and authorization failure never infer deletion—forget
+an imported result explicitly with its Brain receipt.
 
 ## Declarative registry and content-free status
 
