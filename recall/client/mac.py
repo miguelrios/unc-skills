@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -19,6 +20,8 @@ try:
     from collector.collector import canonical_json, sanitize
 except ModuleNotFoundError:  # installed bundle imports sibling package
     from ..collector.collector import canonical_json, sanitize
+
+from privacy.policy import PrivacyPolicy, summarize_receipts
 
 
 FORBIDDEN_PRIVATE_PATHS = (
@@ -248,7 +251,8 @@ def _envelope(*, source_id: str, native_id: str, kind: str, content: Any,
 
 class BrainClient:
     def __init__(self, *, endpoint: str, token: str, source_id: str,
-                 principal_id: str = "owner", visibility: str = "private"):
+                 principal_id: str = "owner", visibility: str = "private",
+                 privacy: PrivacyPolicy | None = None):
         if not endpoint.startswith(("https://", "http://127.0.0.1:", "http://localhost:")):
             raise ValueError("endpoint must use HTTPS except for loopback tests")
         self.endpoint = endpoint.rstrip("/")
@@ -256,6 +260,7 @@ class BrainClient:
         self.source_id = _validate_source_id(source_id)
         self.principal_id = principal_id
         self.visibility = _validate_visibility(visibility)
+        self.privacy = privacy or PrivacyPolicy(mode="off")
 
     def _request(self, path: str, *, body: dict | None = None,
                  idempotency_key: str | None = None, method: str | None = None) -> dict:
@@ -277,10 +282,34 @@ class BrainClient:
     def ingest(self, events: list[dict]) -> dict:
         if not events:
             raise ValueError("cannot ingest an empty event list")
-        if len(canonical_json({"events": events})) > MAX_INGEST_BYTES:
+        prepared = []
+        receipts = []
+        for event in events:
+            decision = (
+                PrivacyPolicy(mode="off").apply(event["content"])
+                if event.get("kind") == "tombstone"
+                else self.privacy.apply(event["content"])
+            )
+            receipts.append(decision.receipt())
+            if decision.action == "drop":
+                continue
+            candidate = copy.deepcopy(event)
+            candidate["content"] = decision.value
+            candidate["content_sha256"] = hashlib.sha256(canonical_json(decision.value)).hexdigest()
+            prepared.append(candidate)
+        privacy = summarize_receipts(receipts, self.privacy.mode)
+        if not prepared:
+            return {"status": "privacy_filtered", "inserted": 0, "duplicate_events": 0, "receipts": [], "replay": False, "privacy": privacy}
+        return self._ingest_prepared(prepared, privacy)
+
+    def _ingest_prepared(self, prepared: list[dict], privacy: dict[str, Any] | None = None) -> dict:
+        if len(canonical_json({"events": prepared})) > MAX_INGEST_BYTES:
             raise ValueError("ingest batch exceeds client size limit")
-        key = "client-v1-" + hashlib.sha256(canonical_json(events)).hexdigest()
-        return self._request("/v1/ingest/batches", body={"events": events}, idempotency_key=key)
+        key = "client-v1-" + hashlib.sha256(canonical_json(prepared)).hexdigest()
+        acknowledgement = self._request("/v1/ingest/batches", body={"events": prepared}, idempotency_key=key)
+        if privacy is not None and self.privacy.mode != "off":
+            acknowledgement["privacy"] = privacy
+        return acknowledgement
 
     def search(self, query: str, *, limit: int = 10) -> dict:
         return self._request("/v1/search", body={"query": query, "limit": limit, "filters": {}})
@@ -297,17 +326,38 @@ class MemoryClient(BrainClient):
         if not text.strip():
             raise ValueError("memory text must not be empty")
         native_id = "memory-" + uuid.uuid4().hex
+        decision = self.privacy.apply({"text": text})
+        privacy = summarize_receipts([decision.receipt()], self.privacy.mode)
+        if decision.action == "drop":
+            acknowledgement = {
+                "status": "privacy_filtered", "inserted": 0, "duplicate_events": 0,
+                "receipts": [], "replay": False, "privacy": privacy,
+            }
+            return {
+                "kind": "memory", "native_id": native_id,
+                "privacy": {**privacy, "action": "drop"},
+                "acknowledgement": acknowledgement,
+            }
         event = _envelope(
             source_id=self.source_id,
             native_id=native_id,
             kind="memory",
-            content={"text": text},
+            content=decision.value,
             principal_id=self.principal_id,
             visibility=self.visibility,
             provenance=provenance or {"uri": "manual://recall_put"},
         )
-        acknowledgement = self.ingest([event])
-        return {"kind": "memory", "native_id": native_id, "receipt": acknowledgement["receipts"][0], "acknowledgement": acknowledgement}
+        acknowledgement = self._ingest_prepared(
+            [event], privacy if self.privacy.mode != "off" else None
+        )
+        result = {"kind": "memory", "native_id": native_id, "acknowledgement": acknowledgement}
+        if acknowledgement["receipts"]:
+            result["receipt"] = acknowledgement["receipts"][0]
+        if "privacy" in acknowledgement:
+            actions = acknowledgement["privacy"]["actions"]
+            action = next(iter(actions)) if len(actions) == 1 else "mixed"
+            result["privacy"] = {**acknowledgement["privacy"], "action": action}
+        return result
 
     def delete(self, receipt: str) -> dict:
         event_part = receipt.split("#", 1)[0]
@@ -359,14 +409,17 @@ def _records_from_bytes(data: bytes, suffix: str) -> list[Any]:
 
 
 class ExportImporter:
-    def __init__(self, *, source_id: str, principal_id: str, visibility: str):
+    def __init__(self, *, source_id: str, principal_id: str, visibility: str,
+                 privacy: PrivacyPolicy | None = None):
         self.source_id = _validate_source_id(source_id)
         self.principal_id = principal_id
         self.visibility = _validate_visibility(visibility)
+        self.privacy = privacy or PrivacyPolicy(mode="off")
 
     def inventory(self, inputs: Iterable[Path]) -> dict:
         records = []
         files = []
+        privacy_receipts = []
         for supplied in inputs:
             requested = Path(supplied).expanduser().absolute()
             if requested.is_symlink():
@@ -384,13 +437,20 @@ class ExportImporter:
                         if info.is_dir() or suffix not in SAFE_EXPORT_SUFFIXES:
                             continue
                         for index, content in enumerate(_records_from_bytes(archive.read(info), suffix)):
-                            records.append(self._export_envelope(path, file_sha, f"{member.as_posix()}#record={index}", index, content))
+                            decision = self.privacy.apply(content)
+                            privacy_receipts.append(decision.receipt())
+                            if decision.action != "drop":
+                                records.append(self._export_envelope(path, file_sha, f"{member.as_posix()}#record={index}", index, decision.value))
             elif path.suffix.casefold() in SAFE_EXPORT_SUFFIXES:
                 for index, content in enumerate(_records_from_bytes(path.read_bytes(), path.suffix.casefold())):
-                    records.append(self._export_envelope(path, file_sha, f"{path.name}#record={index}", index, content))
+                    decision = self.privacy.apply(content)
+                    privacy_receipts.append(decision.receipt())
+                    if decision.action != "drop":
+                        records.append(self._export_envelope(path, file_sha, f"{path.name}#record={index}", index, decision.value))
             else:
                 raise PrivacyError(f"unsupported export type: {path.suffix}")
-        return {"schema_version": 1, "mode": "export-inventory", "network_requests": 0, "files": files, "records": records}
+        return {"schema_version": 1, "mode": "export-inventory", "network_requests": 0, "files": files, "records": records,
+                "privacy": summarize_receipts(privacy_receipts, self.privacy.mode)}
 
     def _export_envelope(self, path: Path, file_sha: str, member: str, index: int, content: Any) -> dict:
         native_key = f"{file_sha}\x1f{member}\x1f{index}"
@@ -430,8 +490,21 @@ class ExportImporter:
         if current:
             batches.append(current)
         if not batches:
+            if inventory["privacy"]["actions"].get("drop", 0):
+                return {
+                    "inventory": {key: value for key, value in inventory.items() if key != "records"},
+                    "records": 0,
+                    "acknowledgement": {
+                        "status": "privacy_filtered", "inserted": 0,
+                        "duplicate_events": 0, "receipts": [], "replay": False,
+                        "batches": 0, "privacy": inventory["privacy"],
+                    },
+                }
             raise ValueError("supported export contains no JSON records")
-        acknowledgements = [client.ingest(batch) for batch in batches]
+        if self.privacy.mode == "off":
+            acknowledgements = [client.ingest(batch) for batch in batches]
+        else:
+            acknowledgements = [client._ingest_prepared(batch, inventory["privacy"]) for batch in batches]
         acknowledgement = {
             "status": "committed",
             "inserted": sum(item.get("inserted", 0) for item in acknowledgements),

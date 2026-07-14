@@ -50,6 +50,14 @@ native ID. Writes require remote mode and fail closed if `RECALL_URL`, the
 source-scoped credential, or the exact source ID is unavailable. Never infer a
 shared visibility choice: default to `private`, and use `shared` only when the
 user deliberately selects it. Secret-shaped lines are redacted before ingest.
+When the packaged Brain client is available, offer its opt-in pre-ingest privacy
+policy for transcript/export/memory writes: `off` preserves compatibility,
+`scrub` retains safe context, and `drop` omits the classified record before spool
+or network. Run `privacy-preview` for a content-free category/action receipt.
+Explain that this does not delete evidence already committed or alter the original
+transcript; deletion still requires the canonical receipt. Never enable the
+optional contextual-PII judge without consent, and route it only through staging
+LiteLLM with a short-lived scoped virtual key—never a master key or direct provider.
 
 ## First: pick the outcome
 

@@ -46,7 +46,8 @@ printf '%s' "$SCOPED_CODEX_TOKEN" | recall-brain keychain-store \
 ```
 
 `--sources`, `--visibility`, `--claude-root`, and `--codex-root` are explicit
-consent controls. Re-running the installer is an in-place upgrade. Remove the
+consent controls. `--privacy-mode off|scrub|drop` is also explicit and defaults
+to `off` for compatibility. Re-running the installer is an in-place upgrade. Remove the
 client and its spool with:
 
 ```bash
@@ -71,3 +72,41 @@ endpoint, exact source ID, principal, visibility, and a Keychain service/account
 reference. Export native IDs are content/member stable, so replay is idempotent.
 Delete writes a canonical tombstone; deleted evidence no longer appears in
 search and its prior receipt no longer resolves.
+
+## Pre-ingest privacy policy
+
+Privacy policy version `recall-privacy-v1` runs on parsed content before a
+collector writes version hashes or outbox rows and before export or memory code
+makes an HTTP request:
+
+- `off` preserves existing behavior and is the default.
+- `scrub` replaces classified spans with category-labelled redactions while
+  retaining safe context and provenance.
+- `drop` omits the entire classified record. Its receipt contains only action,
+  category counts, policy version, and a reason code.
+
+Preview a value without printing it or writing a spool. Structural-only preview
+makes no request; configuring the optional judge explicitly sends the value to
+the approved router:
+
+```bash
+printf '%s' "$VALUE" | recall-brain privacy-preview --privacy-mode scrub
+```
+
+The local structural policy covers credential assignments and structured email,
+phone, postal, government, financial, and medical identifiers. Contextual names
+and meaning require the optional agentic judge. It accepts only an HTTPS staging
+LiteLLM URL, a model alias, and a mode-0600 file containing a short-lived scoped
+virtual key as `{"virtual_key":"...","scope":"recall-privacy-judge",`
+`"expires_at":"...Z"}`; provider-direct URLs, wrong scopes, and expired files are
+rejected. Never give it the LiteLLM master
+key. Judge failure defaults to `drop`; `ignore` is an explicit availability-over-
+privacy choice. The judge sees the text being classified, so enable it only with
+informed consent and a router retention policy you accept.
+
+Enabling `scrub` or `drop` compacts pre-existing pending spool rows once with
+SQLite secure deletion. It cannot retroactively remove evidence already committed
+to the Brain or copies retained in original source transcripts/backups. Delete
+already-committed evidence by its canonical receipt before relying on the new
+policy. Roll back by reinstalling with `--privacy-mode off`; uninstall removes the
+client, LaunchAgents, and entire local spool.

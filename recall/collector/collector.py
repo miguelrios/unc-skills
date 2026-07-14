@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from privacy.policy import PrivacyPolicy, summarize_receipts
+
 COLLECTOR_VERSION = 1
 MAX_BATCH_BYTES = 8_000_000
 SENSITIVE_KEY = re.compile(r"(?:litellm.*master.*key|api[_-]?key|password|secret|authorization|bearer|token)", re.I)
@@ -65,7 +67,8 @@ def normalized_timestamp(value: Any, fallback_epoch: float) -> str:
 class Collector:
     def __init__(self, *, root: Path, harness: str, source_id: str, spool_path: Path,
                  endpoint: str, token: str, principal_id: str = "owner",
-                 visibility: str = "private", batch_size: int = 500):
+                 visibility: str = "private", batch_size: int = 500,
+                 privacy: PrivacyPolicy | None = None):
         if harness not in {"claude", "codex"}:
             raise ValueError("harness must be claude or codex")
         if visibility not in {"private", "shared"}:
@@ -79,6 +82,7 @@ class Collector:
         self.principal_id = principal_id
         self.visibility = visibility
         self.batch_size = batch_size
+        self.privacy = privacy or PrivacyPolicy(mode="off")
         self.shard_count = 1
         self.shard_index = 0
         self.spool_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -90,6 +94,7 @@ class Collector:
         self.db.execute("PRAGMA busy_timeout=30000")
         self.db.execute("PRAGMA synchronous=FULL")
         self._migrate()
+        self._migrate_privacy_state()
 
     def _migrate(self) -> None:
         self.db.executescript("""
@@ -133,6 +138,24 @@ class Collector:
         self.db.execute("CREATE INDEX IF NOT EXISTS outbox_shard_state_id ON outbox(shard_key,state,id)")
         self.db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('collector_version',?)", (str(COLLECTOR_VERSION),))
         self.db.commit()
+
+    def _migrate_privacy_state(self) -> None:
+        state = f"{self.privacy.mode}:{self.privacy.apply({}).policy_version}"
+        previous = self.db.execute("SELECT value FROM meta WHERE key='privacy_policy_state'").fetchone()
+        if previous is not None and previous["value"] == state:
+            return
+        if self.privacy.mode != "off":
+            self.db.execute("PRAGMA secure_delete=ON")
+            for row in list(self.db.execute("SELECT * FROM outbox WHERE state='pending' ORDER BY id")):
+                self._repair_pending_envelope(row)
+            self.db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('privacy_policy_state',?)", (state,))
+            self.db.commit()
+            self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self.db.execute("VACUUM")
+            self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        else:
+            self.db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('privacy_policy_state',?)", (state,))
+            self.db.commit()
 
     def close(self) -> None:
         self.db.close()
@@ -211,6 +234,7 @@ class Collector:
         scan_id = hashlib.sha256(f"{time.time_ns()}:{os.getpid()}".encode()).hexdigest()[:16]
         summary = {"files_seen": 0, "records_queued": 0, "tombstones_queued": 0,
                    "parse_errors": 0, "partial_files": 0}
+        privacy_receipts = []
         for path in self.discover():
             summary["files_seen"] += 1
             stat = path.stat()
@@ -260,6 +284,14 @@ class Collector:
                         )
                         continue
                     occurred_at = normalized_timestamp(content.get("timestamp"), stat.st_mtime)
+                    privacy = self.privacy.apply(content)
+                    privacy_receipts.append(privacy.receipt())
+                    if privacy.action == "drop":
+                        seen_native.add(native_id)
+                        if not append:
+                            self.db.execute("INSERT OR IGNORE INTO scan_members(path,native_id) VALUES (?,?)", (path_text, native_id))
+                        continue
+                    content = privacy.value
                     versioned_content = self._versioned_record_content(native_id, content, was_active=native_id in old_active)
                     envelope = self._envelope(path, native_id, "transcript_record", versioned_content, occurred_at, line_start, complete_end)
                     if self._queue(path, envelope, complete_end):
@@ -286,6 +318,8 @@ class Collector:
                     self.db.execute("DELETE FROM active_records WHERE path=? AND native_id=?", (path_text, native_id))
             status = "partial" if complete_end < stat.st_size else "ok"
             self._save_file_progress(path_text, stat, current_fingerprint, complete_end, status, scan_id)
+            if not self.db.execute("SELECT 1 FROM outbox WHERE path=? AND state='pending' LIMIT 1", (path_text,)).fetchone():
+                self.db.execute("UPDATE files SET committed_offset=scanned_offset WHERE path=?", (path_text,))
             self.db.execute("DELETE FROM scan_members WHERE path=?", (path_text,))
             # Bound crash recovery to one source file; acknowledged offsets still move only in flush().
             self.db.commit()
@@ -300,6 +334,7 @@ class Collector:
             self.db.execute("UPDATE files SET status='tombstone',last_scan_id=? WHERE path=?", (scan_id, item["path"]))
         self.db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('last_scan_at',?)", (str(time.time()),))
         self.db.commit()
+        summary["privacy"] = summarize_receipts(privacy_receipts, self.privacy.mode)
         return summary
 
     def pending_envelopes(self) -> list[dict]:
@@ -322,7 +357,12 @@ class Collector:
                 content = json.loads(raw)
                 if not isinstance(content, dict):
                     raise ValueError("record is not an object")
-                versioned = self._versioned_record_content(row["native_id"], content, was_active=True)
+                privacy = self.privacy.apply(content)
+                if privacy.action == "drop":
+                    self.db.execute("DELETE FROM outbox WHERE id=?", (row["id"],))
+                    result["recovered"] += 1
+                    continue
+                versioned = self._versioned_record_content(row["native_id"], privacy.value, was_active=True)
                 envelope = self._envelope(
                     path, row["native_id"], "transcript_record", versioned,
                     normalized_timestamp(content.get("timestamp"), path.stat().st_mtime),
@@ -348,7 +388,14 @@ class Collector:
 
     def _repair_pending_envelope(self, row: sqlite3.Row) -> dict | None:
         envelope = json.loads(row["envelope_json"])
-        clean = sanitize(envelope["content"])
+        if envelope.get("kind") == "tombstone":
+            clean = sanitize(envelope["content"])
+        else:
+            privacy = self.privacy.apply(envelope["content"])
+            if privacy.action == "drop":
+                self.db.execute("DELETE FROM outbox WHERE id=?", (row["id"],))
+                return None
+            clean = sanitize(privacy.value)
         if clean == envelope["content"]:
             return dict(row)
         old_sha = envelope["content_sha256"]
@@ -497,6 +544,8 @@ class Collector:
             "committed_files": self.db.execute("SELECT count(*) AS n FROM files WHERE status != 'tombstone' AND committed_offset=scanned_offset").fetchone()["n"],
             "ack_latency_p95_seconds": p95,
             "dead_letter_count": parse_errors,
+            "privacy_mode": self.privacy.mode,
+            "privacy_policy_version": self.privacy.apply({}).policy_version,
         }
         if include_dead_letters:
             result["dead_letters"] = [dict(row) for row in self.db.execute("SELECT path,byte_offset,error_code,error_summary FROM dead_letters ORDER BY id")]
