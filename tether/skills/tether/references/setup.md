@@ -22,6 +22,8 @@ Completion criterion: `tether doctor` reports a private live broker, at least on
 
 Tether automatically reuses Hermes's `SLACK_ALLOWED_USERS`, `GATEWAY_ALLOWED_USERS`, and `SLACK_HOME_CHANNEL` runtime settings. Do not duplicate them in Tether config.
 
+For agent-to-agent conversation, set `SLACK_ALLOW_BOTS=all` and set `SLACK_TRUSTED_BOT_IDS` to a comma-separated list of trusted peer Slack bot IDs or bot user IDs. Tether rejects every unlisted bot before Hermes authorization; an empty list rejects all bots. Restart the gateway and rerun `tether doctor` after changing either setting.
+
 The generated `${XDG_CONFIG_HOME:-~/.config}/tether/config.toml` is for optional overrides only:
 
 - use `default_channel`, `default_owner`, `team_id`, or `allowed_users` for a Tether-specific policy;

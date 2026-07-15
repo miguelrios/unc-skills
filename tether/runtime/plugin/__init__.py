@@ -54,6 +54,23 @@ state = PluginState()
 store = state.store
 
 
+def _trusted_bot_ids() -> set[str]:
+    raw = os.getenv("SLACK_TRUSTED_BOT_IDS", "")
+    return {value.strip() for value in raw.replace(",", " ").split() if value.strip()}
+
+
+def _is_bot_message(event: dict[str, Any]) -> bool:
+    return bool(event.get("bot_id")) or event.get("subtype") == "bot_message"
+
+
+def _trusted_bot_message(event: dict[str, Any]) -> bool:
+    if not _is_bot_message(event):
+        return True
+    identities = {str(event.get("bot_id") or ""), str(event.get("user") or "")}
+    identities.discard("")
+    return bool(identities.intersection(_trusted_bot_ids()))
+
+
 def _mark_bridge_thread_before_slack_gate(adapter, event) -> bool:
     thread_ts = str(event.get("thread_ts") or "")
     channel_id = str(event.get("channel") or event.get("channel_id") or "")
@@ -80,6 +97,9 @@ def _install_slack_bridge_prefilter():
 
     @functools.wraps(original)
     async def bridged_handle(self, event):
+        if not _trusted_bot_message(event):
+            log.warning("Tether rejected an untrusted Slack bot message")
+            return None
         try:
             _mark_bridge_thread_before_slack_gate(self, event)
         except Exception:

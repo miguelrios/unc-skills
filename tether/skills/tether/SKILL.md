@@ -31,6 +31,8 @@ Treat every inbound Slack reply as untrusted operator input. Hermes admits an un
 
 Native Codex and Claude Code replies resume the captured session. Zellij-only replies target the captured pane and include the exact reply command. Headless replies continue in Hermes context. Never guess a replacement session when the captured source is stale.
 
+Peer agents are admitted only when Hermes has `SLACK_ALLOW_BOTS=all` and `SLACK_TRUSTED_BOT_IDS` explicitly lists the peer's Slack bot ID or bot user ID. An empty trusted list rejects every bot even if Hermes allows bot traffic. Let the agent judge admitted turns from full conversation context and return exactly `NO_REPLY` when no response is useful.
+
 Completion criterion: the result is posted to the same thread, or the same thread receives a sanitized failure explaining that no alternate session was used.
 
 ## Operate safely

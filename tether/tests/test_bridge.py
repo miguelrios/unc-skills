@@ -470,6 +470,19 @@ class PluginRoutingTest(unittest.TestCase):
             "thread_ts": "999.999", "channel": "C12345678",
         }))
 
+    def test_bot_messages_require_explicit_trusted_identity(self):
+        event = {"subtype": "bot_message", "bot_id": "BTRUSTED", "user": "UTRUSTED"}
+        with mock.patch.dict(os.environ, {"SLACK_TRUSTED_BOT_IDS": "BTRUSTED,UOTHER"}, clear=False):
+            self.assertTrue(self.plugin._trusted_bot_message(event))
+        with mock.patch.dict(os.environ, {"SLACK_TRUSTED_BOT_IDS": "BOTHER"}, clear=False):
+            self.assertFalse(self.plugin._trusted_bot_message(event))
+        with mock.patch.dict(os.environ, {"SLACK_TRUSTED_BOT_IDS": ""}, clear=False):
+            self.assertFalse(self.plugin._trusted_bot_message(event))
+
+    def test_human_messages_do_not_use_bot_allowlist(self):
+        with mock.patch.dict(os.environ, {"SLACK_TRUSTED_BOT_IDS": ""}, clear=False):
+            self.assertTrue(self.plugin._trusted_bot_message({"user": "UHUMAN"}))
+
     def test_native_delta_drops_synthetic_thread_history(self):
         text = "old transcript\n[End of thread context]\nplease continue"
         self.assertEqual(self.plugin._reply_delta(text), "please continue")
