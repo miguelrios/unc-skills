@@ -85,6 +85,23 @@ class EnvelopeContractTest(unittest.TestCase):
         self.assertIn({"kind": "uuid", "value": marker.lower(), "normalized": marker.lower()}, items[0]["entities"])
         self.assertIn({"kind": "error", "value": "ConnectTimeout", "normalized": "connecttimeout"}, items[0]["entities"])
 
+    def test_projection_redacts_secret_shaped_native_tool_entity(self) -> None:
+        secret = "Z" * 40
+        value = envelope(
+            kind="transcript_record",
+            provenance={"harness": "claude"},
+            content={
+                "type": "assistant", "timestamp": "2026-07-12T20:00:00Z",
+                "message": {"content": [{
+                    "type": "tool_use", "name": "api_key=" + secret, "input": {"path": "safe.txt"},
+                }]},
+            },
+        )
+        items, _ = project(value, 1)
+        rendered = json.dumps(items)
+        self.assertNotIn(secret, rendered)
+        self.assertIn("REDACTED", rendered)
+
     def test_redaction_does_not_use_semantic_matching(self) -> None:
         self.assertEqual(redact_text("a harmless discussion about password rotation"), "a harmless discussion about password rotation")
 
