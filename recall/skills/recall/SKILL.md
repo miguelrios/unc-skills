@@ -90,11 +90,11 @@ transcript; deletion still requires the canonical receipt. Never enable the
 optional contextual-PII judge without consent, and route it only through staging
 LiteLLM with a short-lived scoped virtual key—never a master key or direct provider.
 
-## Consented ChatGPT/Cowork exports
+## Consented ChatGPT exports and Cowork local project logs
 
 When the packaged Brain client is installed, use its explicit export inbox for
-ChatGPT/Cowork history. Never scrape application databases, caches, browser
-storage, Desktop, or Downloads. Inventory only the directory the user selected:
+ChatGPT exports. Never scrape application databases, caches, browser storage,
+Desktop, or Downloads. Inventory only the directory the user selected:
 
 ```bash
 recall-brain export-inbox-dry-run --inbox "$HOME/Recall Inbox" \
@@ -107,6 +107,23 @@ queues reference-safe tombstones; deleting a local file alone deliberately does
 not delete central memory. Use `--export-inbox` during Mac package installation
 to opt into scheduled sync, and `--disable-export-inbox` to unload that agent
 without destroying its recoverable catalog/spool.
+
+For Claude Cowork, the user may separately opt into the packaged `cowork`
+collector. This is a narrow exception for Cowork's local project-log surface
+beneath an explicitly selected `local-agent-mode-sessions` root; it is
+not permission to inspect a Claude application database, cache, audit log,
+attachment store, browser store, session metadata file, Desktop, or Downloads.
+Only user/assistant natural-language records under the nested
+`.claude/projects` logs are eligible. Privacy must be `scrub` or `drop` and is
+applied before spool or network writes. Local absence and archive state never
+imply deletion.
+
+Install the unified utility with explicit selections such as
+`--sources claude-code,codex,cowork` and `--export-inbox <selected-directory>`.
+Use `recall-brain mac-status` for a content-free enabled/health/lag/checkpoint
+view. Use `recall-brain mac-disable --source <class>` to unload one source while
+retaining its recoverable state; uninstall also retains state unless the user
+explicitly selects `--delete-state`.
 
 ## Deliberate capture from any MCP host
 
@@ -188,13 +205,11 @@ python3 scripts/recall.py session-export --target <exact-path-or-receipt> --limi
 python3 scripts/recall.py session-export --cursor <opaque-next-cursor> --limit 1000
 ```
 
-Each JSON page contains stable evidence IDs, redacted text and digests, sanitized typed entities
-(including native tool identity when observed), native session identity, projection/privacy
-versions, a boundary receipt, a content-free page receipt, and `complete` plus `next_cursor`.
-Consume pages in sequence and accept immutable-snapshot completeness only on the final page; inspect
-`source_snapshot_stable` before claiming a live source did not advance. Local cursors are stored
-owner-private under `~/.recall`; central cursors are random, source-authorized server state. Neither
-cursor encodes transcript text or a path.
+Each JSON page contains stable evidence IDs, redacted text and digests, native session/parent
+identity, projection/privacy versions, a boundary receipt, a content-free page receipt, and
+`complete` plus `next_cursor`. Consume pages in sequence and accept completeness only on the final
+page. Local cursors are stored owner-private under `~/.recall`; central cursors are random,
+source-authorized server state. Neither cursor encodes transcript text or a path.
 
 `--current` resolves Codex only through exact `CODEX_THREAD_ID`, and Claude through exact
 `CLAUDE_SESSION_ID` when the harness exposes it. Otherwise it fails closed with content-free ranked
@@ -202,19 +217,6 @@ candidate receipts; pass the exact path found by Recall rather than guessing. Ch
 sessions are separate boundaries by default. For local/central evidence-ID parity, collectors set
 the source ID; a standalone local export uses `RECALL_EXPORT_SOURCE_ID` when configured and an
 explicit `local:<harness>` source otherwise.
-
-To resolve a local native relationship graph for Recap without reading transcript prose, use:
-
-```bash
-python3 scripts/recall.py session-relations --current --include-children
-python3 scripts/recall.py session-relations --target <exact-path> --chain
-python3 scripts/recall.py session-relations --target <exact-path> --chain --include-children
-```
-
-The closed `recall.session-relations.v1` JSON uses Claude `sessionId`/`agentId` sidechain metadata
-and Codex `parent_thread_id`/`forked_from_id` metadata. It excludes merely adjacent or similar
-sessions and fails when a requested native link is missing or ambiguous. This command is local-only
-until the central Recall service implements the same graph contract.
 
 ## Related work (no query needed)
 

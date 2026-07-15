@@ -408,10 +408,6 @@ def main() -> None:
                         )[0])
                 assert [item["evidence_id"] for item in export_page["items"]] == expected_evidence
                 assert len(export_page["items"]) == len(projected)
-                assert [item.get("entities", []) for item in export_page["items"]] == [
-                    [{"kind": entity["kind"], "value": entity["value"]} for entity in item["entities"]]
-                    for item in projected
-                ]
 
             # A 1,001-item snapshot cannot claim completion on page one. The opaque
             # cursor replays the same final page and remains source-authorized.

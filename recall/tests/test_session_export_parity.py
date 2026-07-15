@@ -71,19 +71,13 @@ class SessionExportParityTest(unittest.TestCase):
 
                 parser = engine.claude_record if harness == "claude" else engine.codex_record
                 expected = []
-                expected_tools = []
                 for envelope in envelopes:
                     projected, _metadata = parser(envelope["content"])
-                    for ordinal, (_timestamp, _surface, text, entities) in enumerate(projected):
+                    for ordinal, (_timestamp, _surface, text, _entities) in enumerate(projected):
                         expected.append(engine.session_evidence_id(
                             source_id, envelope["native_parent_id"], envelope["native_id"], ordinal, text,
                         )[0])
-                        expected_tools.append(sorted(value for kind, value in entities if kind == "tool"))
                 self.assertEqual([item["evidence_id"] for item in page["items"]], expected)
-                self.assertEqual([
-                    sorted(entity["value"] for entity in item.get("entities", []) if entity["kind"] == "tool")
-                    for item in page["items"]
-                ], expected_tools)
                 self.assertEqual(page["session"]["native_session_id"], envelopes[0]["native_parent_id"])
 
 
