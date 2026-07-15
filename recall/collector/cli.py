@@ -3,24 +3,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import stat
 import time
 from pathlib import Path
 
 from .collector import Collector
+from client.mac import load_file_token
 from privacy.policy import AgenticJudge, PrivacyPolicy, load_scoped_virtual_key
 
 
 def token_from_file(path: str) -> str:
-    token_path = Path(path).expanduser()
-    mode = stat.S_IMODE(token_path.stat().st_mode)
-    if mode & 0o077:
-        raise PermissionError("collector token file must not be accessible by group or other")
-    data = json.loads(token_path.read_text())
-    token = data.get("token")
-    if not isinstance(token, str) or not token:
-        raise ValueError("token file has no token")
-    return token
+    return load_file_token(Path(path))
 
 
 def main() -> None:
@@ -73,7 +65,10 @@ def main() -> None:
         elif args.command == "flush":
             print(json.dumps(collector.flush(), sort_keys=True))
         elif args.command == "run":
-            print(json.dumps({"scan": collector.scan(), "flush": collector.flush(), "doctor": collector.doctor()}, sort_keys=True))
+            print(json.dumps({
+                "scan": collector.scan(), "flush": collector.flush(),
+                "doctor": collector.doctor(include_dead_letters=False),
+            }, sort_keys=True))
         elif args.command == "doctor":
             print(json.dumps(collector.doctor(), sort_keys=True))
         elif args.command == "recover":

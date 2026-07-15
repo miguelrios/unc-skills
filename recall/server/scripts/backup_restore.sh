@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 MODE=${1:-}
 BACKUP_DIR=${2:-}
@@ -41,6 +42,7 @@ case "$MODE" in
   backup)
     [ -n "$BACKUP_DIR" ] && [ -n "${RECALL_DATABASE_URL:-}" ] || usage
     mkdir -p "$BACKUP_DIR"
+    chmod 700 "$BACKUP_DIR"
     stage=$(mktemp -d "$BACKUP_DIR/.backup.XXXXXX")
     snapshot_pid=''
     snapshot_release="$stage/snapshot-release"
@@ -76,8 +78,8 @@ SQL
     case "$database_snapshot" in ''|*[!A-Fa-f0-9-]*) echo "invalid exported database snapshot" >&2; exit 1;; esac
     source_fingerprint=$(fingerprint "$RECALL_DATABASE_URL" "$database_snapshot")
     newest_epoch=$(snapshot_newest_epoch "$RECALL_DATABASE_URL" "$database_snapshot")
-    docker run --rm --network host -v "$stage:/backup" "$TOOLS_IMAGE" \
-      pg_dump "$RECALL_DATABASE_URL" --snapshot="$database_snapshot" --format=custom --no-owner --file=/backup/brain.dump
+    docker run --rm --network host "$TOOLS_IMAGE" \
+      pg_dump "$RECALL_DATABASE_URL" --snapshot="$database_snapshot" --format=custom --no-owner >"$stage/brain.dump"
     printf 'release\n' >&9
     wait "$snapshot_pid"
     snapshot_pid=''
@@ -107,6 +109,7 @@ print(json.dumps(manifest, sort_keys=True))
 PY
     mv -f "$stage/brain.dump" "$BACKUP_DIR/brain.dump"
     mv -f "$stage/manifest.json" "$BACKUP_DIR/manifest.json"
+    chmod 600 "$BACKUP_DIR/brain.dump" "$BACKUP_DIR/manifest.json"
     rm -f "$stage/snapshot-release" "$stage/snapshot-id"
     rmdir "$stage"
     exec 9>&- 9<&-

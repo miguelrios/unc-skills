@@ -20,6 +20,14 @@ Setting `RECALL_URL` selects the tailnet central service for read commands (`sea
 `related`, and `doctor`) and enables deliberate writes (`put` and `delete`). The same flags and output shapes remain valid, and every displayed remote
 hit includes its resolvable receipt on the `WHY` line.
 
+For a persistent per-device read profile, use a mode-0600 regular file at
+`~/.config/recall-brain/client.json` with the exact shape
+`{"schema_version":1,"url":"https://brain.example.ts.net:9443",`
+`"token_file":"/absolute/private/read-token.json"}`. The referenced token file
+must also be a non-symlink mode-0600 regular file. Environment variables override
+the profile field by field; `RECALL_MODE=local` remains the instant rollback.
+Neither config validation nor transport errors render either private path.
+
 Use `RECALL_MODE=local|remote|shadow` when the mode must be explicit:
 
 - `local` is the config-only rollback switch and never calls the central service.

@@ -18,14 +18,21 @@ from typing import Any
 class SourceSpec:
     label: str
     spool_name: str
+    surface: str
 
 
 SOURCE_SPECS = {
-    "claude-code": SourceSpec("ai.parcha.recall.claude", "claude.db"),
-    "codex": SourceSpec("ai.parcha.recall.codex", "codex.db"),
-    "cowork": SourceSpec("ai.parcha.recall.cowork", "cowork.db"),
+    "claude-code": SourceSpec(
+        "ai.parcha.recall.claude", "claude.db", "claude-code-project-jsonl"
+    ),
+    "codex": SourceSpec(
+        "ai.parcha.recall.codex", "codex.db", "chatgpt-codex-desktop-rollouts"
+    ),
+    "cowork": SourceSpec(
+        "ai.parcha.recall.cowork", "cowork.db", "claude-cowork-project-jsonl"
+    ),
     "chatgpt-export": SourceSpec(
-        "ai.parcha.recall.chatgpt-export", "chatgpt-export-runner.db"
+        "ai.parcha.recall.chatgpt-export", "chatgpt-export-runner.db", "chatgpt-export-inbox"
     ),
 }
 
@@ -118,6 +125,7 @@ def _source_status(*, prefix: Path, launch_agents: Path, name: str, now: float) 
         "checkpointed": checkpointed,
         "state_present": metadata is not None,
         "privacy_mode": privacy_mode,
+        "surface": spec.surface,
     }
 
 
@@ -157,12 +165,12 @@ def disable_source(name: str, *, launch_agents: Path, no_load: bool = False) -> 
         target = f"gui/{os.getuid()}/{spec.label}"
         try:
             subprocess.run(
-                ["launchctl", "bootout", target], check=False,
+                ["/bin/launchctl", "bootout", target], check=False,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
             for _ in range(100):
                 result = subprocess.run(
-                    ["launchctl", "print", target], check=False,
+                    ["/bin/launchctl", "print", target], check=False,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
                 if result.returncode != 0:

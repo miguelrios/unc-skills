@@ -1,15 +1,34 @@
 from __future__ import annotations
 
 import hashlib
+import contextlib
+import io
 import json
+import os
 import sys
+import tempfile
+import types
 import unittest
+from unittest import mock
 from pathlib import Path
 
 SERVER = Path(__file__).resolve().parents[2] / "server"
 sys.path.insert(0, str(SERVER))
 
+try:
+    import psycopg  # noqa: F401
+except ModuleNotFoundError:
+    psycopg = types.ModuleType("psycopg")
+    psycopg_rows = types.ModuleType("psycopg.rows")
+    psycopg_rows.dict_row = object()
+    psycopg.rows = psycopg_rows
+    sys.modules["psycopg"] = psycopg
+    sys.modules["psycopg.rows"] = psycopg_rows
+
 from recall_server import SCHEMA_VERSION
+from recall_server import cli as server_cli
+from recall_server.app import Handler, serve, serve_unix
+from recall_server.db import BrainStore
 from recall_server.projectors import advisory_lock_key, canonical_json, partial_lexical_probes, phrase_query_spec, preferred_phrase_probe, preferred_phrase_probes, project, redact_text, validate_envelope
 from recall_server.ranking import DEFAULT_SEARCH_DEADLINE_MS, evidence_rank_components, retrieval_leg_order, should_run_partial
 
@@ -46,6 +65,76 @@ class SchemaMigrationContractTest(unittest.TestCase):
             )
 
 
+class SourceScopedReadContractTest(unittest.TestCase):
+    def test_resolve_filters_by_the_authenticated_collector_source(self) -> None:
+        connection = mock.MagicMock()
+        connection.execute.return_value.fetchone.return_value = None
+        context = mock.MagicMock()
+        context.__enter__.return_value = connection
+        store = BrainStore("postgresql://synthetic.invalid/recall")
+        store.connect = mock.MagicMock(return_value=context)
+
+        self.assertIsNone(
+            store.resolve(
+                "recall://source-a/item-1?rev=1",
+                authorized_source="source-a",
+            )
+        )
+        sql, params = connection.execute.call_args.args
+        self.assertIn("event.source_id=%s", sql)
+        self.assertEqual(params, ("source-a", "item-1", 1, "source-a", "source-a"))
+
+    def test_http_resolve_passes_the_principal_source_scope(self) -> None:
+        handler = object.__new__(Handler)
+        handler.path = "/v1/receipts/resolve?receipt=recall%3A%2F%2Fsource-a%2Fitem-1%3Frev%3D1"
+        handler.require = mock.MagicMock(return_value={"source_id": "source-a"})
+        handler.store = mock.MagicMock()
+        handler.store.resolve.return_value = None
+        handler.send_json = mock.MagicMock()
+
+        Handler.do_GET(handler)
+
+        handler.store.resolve.assert_called_once_with(
+            "recall://source-a/item-1?rev=1", authorized_source="source-a",
+        )
+        handler.send_json.assert_called_once_with(404, {"error": "not found"})
+
+
+class HttpBoundaryContractTest(unittest.TestCase):
+    def test_malformed_content_length_is_a_closed_client_error(self) -> None:
+        handler = object.__new__(Handler)
+        handler.headers = {"Content-Length": "not-an-integer"}
+        handler.send_json = mock.MagicMock()
+        self.assertIsNone(handler.body_length(1024))
+        handler.send_json.assert_called_once_with(400, {"error": "invalid body size"})
+
+    def test_unauthenticated_tcp_cannot_bind_beyond_loopback(self) -> None:
+        with mock.patch.dict(os.environ, {"RECALL_AUTH_REQUIRED": "0"}):
+            with self.assertRaisesRegex(RuntimeError, "authentication"):
+                serve("postgresql://synthetic.invalid/recall", "0.0.0.0", 8788)
+
+    def test_unix_server_refuses_to_replace_a_regular_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "recall.sock"
+            path.write_text("do not delete")
+            with self.assertRaisesRegex(RuntimeError, "non-socket"):
+                serve_unix("postgresql://synthetic.invalid/recall", str(path))
+            self.assertEqual(path.read_text(), "do not delete")
+
+
+class AdminCliSafetyTest(unittest.TestCase):
+    def test_token_creation_requires_a_private_output_file(self) -> None:
+        errors = io.StringIO()
+        with mock.patch.object(sys, "argv", [
+            "recall-server", "--dsn", "postgresql://synthetic.invalid/db",
+            "token-create", "synthetic-collector",
+        ]), contextlib.redirect_stderr(errors), self.assertRaises(SystemExit) as raised:
+            server_cli.main()
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("--output", errors.getvalue())
+        self.assertNotIn("rcl_", errors.getvalue())
+
+
 class EnvelopeContractTest(unittest.TestCase):
     def test_default_deadline_fits_below_tailnet_slo_with_client_headroom(self) -> None:
         self.assertEqual(DEFAULT_SEARCH_DEADLINE_MS, 300)
@@ -67,6 +156,26 @@ class EnvelopeContractTest(unittest.TestCase):
             validate_envelope(mutated)
         with self.assertRaisesRegex(ValueError, "visibility"):
             validate_envelope(envelope(visibility="public"))
+
+    def test_validation_rejects_ambiguous_identifiers_nonfinite_json_and_bad_tombstones(self) -> None:
+        for updates in (
+            {"source_id": "bad/source"},
+            {"native_id": "ambiguous?rev=7"},
+            {"native_id": "ambiguous#item=2"},
+            {"occurred_at": "not-a-timestamp"},
+            {"extra": "open-schema"},
+        ):
+            with self.subTest(updates=updates), self.assertRaises(ValueError):
+                validate_envelope(envelope(**updates))
+        nonfinite = envelope()
+        nonfinite["content"] = {"value": float("nan")}
+        with self.assertRaisesRegex(ValueError, "finite JSON"):
+            validate_envelope(nonfinite)
+        with self.assertRaisesRegex(ValueError, "tombstone target"):
+            validate_envelope(envelope(
+                kind="tombstone", native_id="memory-one",
+                content={"target_native_id": "memory-two"},
+            ))
 
     def test_projection_redacts_secret_line_and_preserves_safe_lines(self) -> None:
         value = envelope(content={"role": "user", "text": "safe line\nAuthorization=supersecretvalue123\nlast line"})

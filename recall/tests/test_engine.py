@@ -11,6 +11,7 @@ import shutil
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -34,20 +35,26 @@ class RecallEngineTest(unittest.TestCase):
         self.claude.mkdir(); self.codex.mkdir()
         self.db = self.root / "state/index.db"
         self.old_env = {key: os.environ.get(key) for key in (
-            "RECALL_CLAUDE_ROOT", "RECALL_CODEX_ROOT", "RECALL_DB", "RECALL_SESSION_CURSOR_DB",
-            "RECALL_EXPORT_SOURCE_ID", "CODEX_THREAD_ID", "CLAUDE_SESSION_ID",
-            "CLAUDE_CODE_SESSION_ID", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT",
+            "RECALL_CLAUDE_ROOT", "RECALL_CODEX_ROOT", "RECALL_DB", "RECALL_URL",
+            "RECALL_MODE", "RECALL_TOKEN_FILE", "RECALL_CONFIG_FILE",
+            "RECALL_SESSION_CURSOR_DB", "RECALL_EXPORT_SOURCE_ID", "CODEX_THREAD_ID",
+            "CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CLAUDECODE",
+            "CLAUDE_CODE_ENTRYPOINT",
         )}
         os.environ.update(
-            RECALL_CLAUDE_ROOT=str(self.claude), RECALL_CODEX_ROOT=str(self.codex), RECALL_DB=str(self.db),
+            RECALL_CLAUDE_ROOT=str(self.claude),
+            RECALL_CODEX_ROOT=str(self.codex),
+            RECALL_DB=str(self.db),
+            RECALL_MODE="local",
+            RECALL_CONFIG_FILE=str(self.root / "absent-client.json"),
             RECALL_SESSION_CURSOR_DB=str(self.root / "state/session-cursors.db"),
             RECALL_EXPORT_SOURCE_ID="claude:linux:test",
         )
-        os.environ.pop("CODEX_THREAD_ID", None)
-        os.environ.pop("CLAUDE_SESSION_ID", None)
-        os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
-        os.environ.pop("CLAUDECODE", None)
-        os.environ.pop("CLAUDE_CODE_ENTRYPOINT", None)
+        for key in (
+            "RECALL_URL", "RECALL_TOKEN_FILE", "CODEX_THREAD_ID", "CLAUDE_SESSION_ID",
+            "CLAUDE_CODE_SESSION_ID", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT",
+        ):
+            os.environ.pop(key, None)
 
     def tearDown(self):
         for key, value in self.old_env.items():
@@ -785,6 +792,18 @@ class RemoteHandler(BaseHTTPRequestHandler):
             self.send_json(404, {"error": "not found"})
 
 
+class RedirectOnlyHandler(BaseHTTPRequestHandler):
+    destination = ""
+
+    def log_message(self, *_args):
+        pass
+
+    def do_GET(self):
+        self.send_response(302)
+        self.send_header("Location", type(self).destination)
+        self.end_headers()
+
+
 class RemoteTransportTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -796,6 +815,7 @@ class RemoteTransportTest(unittest.TestCase):
         self.old_env = {key: os.environ.get(key) for key in (
             "RECALL_CLAUDE_ROOT", "RECALL_CODEX_ROOT", "RECALL_DB", "RECALL_URL",
             "RECALL_MODE", "RECALL_TOKEN_FILE", "RECALL_SHADOW_LOG", "RECALL_REMOTE_TRACE",
+            "RECALL_CONFIG_FILE",
         )}
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), RemoteHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True); self.thread.start()
@@ -804,6 +824,7 @@ class RemoteTransportTest(unittest.TestCase):
         os.environ.update(
             RECALL_CLAUDE_ROOT=str(self.claude), RECALL_CODEX_ROOT=str(self.codex), RECALL_DB=str(self.db),
             RECALL_URL=f"http://127.0.0.1:{self.server.server_port}", RECALL_SHADOW_LOG=str(self.shadow),
+            RECALL_CONFIG_FILE=str(self.root / "absent-client.json"),
         )
 
     def tearDown(self):
@@ -903,6 +924,36 @@ class RemoteTransportTest(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertIn("remote recall unavailable", err)
 
+    def test_remote_redirect_never_forwards_bearer_to_destination(self):
+        token_file = self.root / "redirect-token.json"
+        token_file.write_text(json.dumps({"token": "redirect-secret-token"}))
+        token_file.chmod(0o600)
+        os.environ["RECALL_TOKEN_FILE"] = str(token_file)
+        redirect = ThreadingHTTPServer(("127.0.0.1", 0), RedirectOnlyHandler)
+        RedirectOnlyHandler.destination = f"http://127.0.0.1:{self.server.server_port}/v1/doctor"
+        thread = threading.Thread(target=redirect.serve_forever, daemon=True)
+        thread.start()
+        RemoteHandler.requests = []
+        os.environ["RECALL_URL"] = f"http://127.0.0.1:{redirect.server_port}"
+        try:
+            code, output, error = self.call("doctor")
+            self.assertNotEqual(code, 0)
+            self.assertEqual(output, "")
+            self.assertIn("HTTP 302", error)
+            self.assertEqual(RemoteHandler.requests, [])
+        finally:
+            redirect.shutdown()
+            redirect.server_close()
+
+    def test_environment_url_is_validated_before_authority_or_network(self):
+        os.environ["RECALL_URL"] = "file:///tmp/not-http"
+        with mock.patch.object(engine, "_open_remote") as opened:
+            code, output, error = self.call("doctor")
+        self.assertNotEqual(code, 0)
+        self.assertEqual(output, "")
+        self.assertIn("remote URL is invalid", error)
+        opened.assert_not_called()
+
     def test_shadow_returns_local_and_records_receipt_level_comparison(self):
         self.seed_local(); os.environ["RECALL_MODE"] = "shadow"
         RemoteHandler.target_path = str(self.claude / "remote-other.jsonl")
@@ -942,6 +993,92 @@ class RemoteTransportTest(unittest.TestCase):
         code, _, err = self.call("doctor")
         self.assertEqual((code, err), (0, ""))
         self.assertEqual(RemoteHandler.requests[-1]["authorization"], "Bearer scoped-test-token")
+
+    def test_token_file_rejects_symlinks_and_oversized_content_without_network(self):
+        target = self.root / "actual-token.json"
+        target.write_text(json.dumps({"token": "private-synthetic-token"}))
+        target.chmod(0o600)
+        linked = self.root / "linked-token.json"
+        linked.symlink_to(target)
+        os.environ["RECALL_TOKEN_FILE"] = str(linked)
+        with mock.patch.object(engine, "_open_remote") as opened:
+            code, output, error = self.call("doctor")
+        self.assertNotEqual(code, 0)
+        self.assertEqual(output, "")
+        self.assertIn("regular file", error)
+        opened.assert_not_called()
+
+        oversized = self.root / "oversized-token.json"
+        oversized.write_bytes(b"{" + b" " * engine.MAX_TOKEN_FILE_BYTES + b"}")
+        oversized.chmod(0o600)
+        os.environ["RECALL_TOKEN_FILE"] = str(oversized)
+        with mock.patch.object(engine, "_open_remote") as opened:
+            code, output, error = self.call("doctor")
+        self.assertNotEqual(code, 0)
+        self.assertEqual(output, "")
+        self.assertIn("too large", error)
+        opened.assert_not_called()
+
+    def test_private_default_client_config_enables_remote_and_env_overrides_it(self):
+        token_file = self.root / "read-token.json"
+        token_file.write_text(json.dumps({"token": "configured-read-token"}))
+        token_file.chmod(0o600)
+        config = self.root / "client.json"
+        config.write_text(json.dumps({
+            "schema_version": 1,
+            "url": f"http://127.0.0.1:{self.server.server_port}",
+            "token_file": str(token_file),
+        }))
+        config.chmod(0o600)
+        os.environ.pop("RECALL_URL", None)
+        os.environ.pop("RECALL_TOKEN_FILE", None)
+        os.environ["RECALL_CONFIG_FILE"] = str(config)
+
+        code, output, error = self.call("doctor")
+
+        self.assertEqual((code, error), (0, ""))
+        self.assertIn("OK remote", output)
+        self.assertEqual(RemoteHandler.requests[-1]["authorization"], "Bearer configured-read-token")
+
+        override = self.root / "override-token.json"
+        override.write_text(json.dumps({"token": "environment-read-token"}))
+        override.chmod(0o600)
+        os.environ["RECALL_URL"] = f"http://127.0.0.1:{self.server.server_port}"
+        os.environ["RECALL_TOKEN_FILE"] = str(override)
+        self.assertEqual(self.call("doctor")[0], 0)
+        self.assertEqual(RemoteHandler.requests[-1]["authorization"], "Bearer environment-read-token")
+
+    def test_client_config_rejects_open_mode_symlink_and_unknown_fields_without_path_echo(self):
+        token_file = self.root / "read-token.json"
+        token_file.write_text(json.dumps({"token": "configured-read-token"}))
+        token_file.chmod(0o600)
+        config = self.root / "private-config-canary.json"
+        config.write_text(json.dumps({
+            "schema_version": 1,
+            "url": f"http://127.0.0.1:{self.server.server_port}",
+            "token_file": str(token_file),
+            "secret_extra": "private-config-content-canary",
+        }))
+        config.chmod(0o644)
+        os.environ.pop("RECALL_URL", None)
+        os.environ.pop("RECALL_TOKEN_FILE", None)
+        os.environ["RECALL_CONFIG_FILE"] = str(config)
+
+        code, output, error = self.call("doctor")
+
+        self.assertNotEqual(code, 0)
+        self.assertEqual(output, "")
+        self.assertNotIn(str(config), error)
+        self.assertNotIn("private-config-content-canary", error)
+
+        config.chmod(0o600)
+        target = self.root / "target.json"
+        config.rename(target)
+        config.symlink_to(target)
+        code, output, error = self.call("doctor")
+        self.assertNotEqual(code, 0)
+        self.assertEqual(output, "")
+        self.assertNotIn(str(target), error)
 
     def test_explicit_memory_put_and_delete_are_remote_scoped_and_receipted(self):
         os.environ["RECALL_WRITE_SOURCE_ID"] = "memory:mac:test"

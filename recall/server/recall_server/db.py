@@ -361,7 +361,7 @@ class BrainStore:
             (PROJECTOR_VERSION, event_id),
         )
 
-    def resolve(self, receipt: str) -> dict | None:
+    def resolve(self, receipt: str, authorized_source: str | None = None) -> dict | None:
         event_part = receipt.split("#", 1)[0]
         try:
             base, query = event_part.rsplit("?rev=", 1)
@@ -386,6 +386,7 @@ class BrainStore:
                    )) AS provenance
                    FROM source_events event
                    WHERE source_id=%s AND native_id=%s AND revision=%s
+                     AND (%s::text IS NULL OR event.source_id=%s)
                      AND NOT EXISTS (
                        SELECT 1 FROM source_events later
                        WHERE later.source_id=event.source_id
@@ -393,7 +394,7 @@ class BrainStore:
                          AND later.revision>event.revision
                          AND later.is_tombstone
                      )""",
-                (source_id, native_id, revision),
+                (source_id, native_id, revision, authorized_source, authorized_source),
             ).fetchone()
             if not event:
                 return None
@@ -789,7 +790,8 @@ class BrainStore:
                 after_item_id = state["after_item_id"]
                 after_sequence = state["after_sequence"]
             else:
-                assert target is not None
+                if target is None:
+                    raise ValueError("session export target is required")
                 if target.startswith("recall://"):
                     event_part = target.split("#", 1)[0]
                     try:

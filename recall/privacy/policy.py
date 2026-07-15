@@ -6,13 +6,14 @@ from itertools import pairwise
 import json
 import os
 import re
-import ssl
 import stat
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
 from pathlib import Path
+
+from .transport import open_no_redirect
 
 
 POLICY_VERSION = "recall-privacy-v1"
@@ -185,7 +186,7 @@ class AgenticJudge:
             self.endpoint, data=body, method="POST",
             headers={"Authorization": "Bearer " + self.virtual_key, "Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(request, timeout=self.timeout, context=ssl.create_default_context()) as response:
+        with open_no_redirect(request, timeout=self.timeout) as response:
             outer = json.loads(response.read())
         content = outer["choices"][0]["message"]["content"]
         payload = json.loads(content)
@@ -196,9 +197,34 @@ class AgenticJudge:
 
 def load_scoped_virtual_key(path: Path) -> str:
     key_path = Path(path).expanduser()
-    if stat.S_IMODE(key_path.stat().st_mode) & 0o077:
+    try:
+        metadata = key_path.lstat()
+    except OSError:
+        raise PermissionError("privacy judge virtual-key file is unavailable") from None
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise PermissionError("privacy judge virtual-key file must be a regular non-symlink file")
+    if stat.S_IMODE(metadata.st_mode) & 0o077:
         raise PermissionError("privacy judge virtual-key file must be private")
-    raw = key_path.read_text().strip()
+    if metadata.st_size > 65_536:
+        raise PermissionError("privacy judge virtual-key file exceeds maximum byte count")
+    try:
+        descriptor = os.open(key_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or stat.S_IMODE(opened.st_mode) & 0o077
+                or opened.st_size > 65_536
+                or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
+            ):
+                raise PermissionError("privacy judge virtual-key file changed during validation")
+            raw = os.read(descriptor, 65_537).decode("utf-8", errors="strict").strip()
+        finally:
+            os.close(descriptor)
+    except PermissionError:
+        raise
+    except (OSError, UnicodeDecodeError):
+        raise PermissionError("privacy judge virtual-key file could not be read safely") from None
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as error:

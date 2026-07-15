@@ -18,6 +18,7 @@ from connectors.host import (
     load_host_config,
     preview_host_config,
     run_host_daemon,
+    validate_reserved_export_inbox,
 )
 
 
@@ -106,6 +107,17 @@ class FrozenHostConfigTest(unittest.TestCase):
         self.assertEqual(preview["network_requests"], 0)
         self.assertEqual(preview["writes"], 0)
 
+    def test_reserved_export_inbox_rejects_a_second_owner_without_source_reads(self) -> None:
+        value = ConnectorHostConfig.from_mapping(
+            json.loads(CORPUS.read_text().splitlines()[0])["config"]
+        )
+        inbox = value.jobs[0].connector.inbox
+        with mock.patch("pathlib.Path.iterdir") as source_read:
+            with self.assertRaisesRegex(ConnectorHostError, "duplicate_export_inbox_owner"):
+                validate_reserved_export_inbox(value, inbox)
+            validate_reserved_export_inbox(value, inbox.parent / "different-inbox")
+        source_read.assert_not_called()
+
 
 class ClosedFactoryTest(unittest.TestCase):
     def test_factory_uses_only_bundled_types_and_separate_authorities(self) -> None:
@@ -162,6 +174,17 @@ class HostCliTest(unittest.TestCase):
             self.assertNotIn(str(path), rendered)
             self.assertNotIn("synthetic:export:c8g", rendered)
             self.assertEqual(json.loads(rendered)["jobs"], 1)
+
+    def test_preview_cli_rejects_reserved_export_inbox_overlap_content_free(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.private_config(directory)
+            value = load_host_config(path)
+            inbox = value.jobs[0].connector.inbox
+            with mock.patch("sys.argv", [
+                "recall-brain", "connector-supervisor-config-preview", "--config", str(path),
+                "--reserved-export-inbox", str(inbox),
+            ]), self.assertRaisesRegex(SystemExit, "duplicate_export_inbox_owner"):
+                client_cli.main()
 
     def test_once_cli_closes_host_and_renders_only_aggregate_result(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

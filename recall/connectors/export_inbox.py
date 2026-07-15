@@ -24,7 +24,7 @@ SCHEMA_VERSION = 1
 CONNECTOR_ID = "openai.export-inbox"
 SUPPORTED_SUFFIXES = {".json": "json", ".jsonl": "jsonl", ".zip": "zip"}
 FORBIDDEN_ROOT_NAMES = {"desktop", "documents", "downloads", "library"}
-MAX_EXPORT_BYTES = 2_000_000_000
+MAX_EXPORT_BYTES = 256_000_000
 MAX_ARCHIVE_MEMBERS = 10_000
 
 

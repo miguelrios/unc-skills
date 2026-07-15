@@ -3,9 +3,9 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import platform
 import re
-import ssl
 import stat
 import urllib.parse
 import urllib.request
@@ -21,6 +21,7 @@ except ModuleNotFoundError:  # installed bundle imports sibling package
     from ..collector.collector import canonical_json, sanitize
 
 from privacy.policy import PrivacyPolicy, summarize_receipts
+from privacy.transport import open_no_redirect
 
 
 FORBIDDEN_PRIVATE_PATHS = (
@@ -175,10 +176,39 @@ def dry_run_manifest(*, selections: list[dict], visibility: str, home: Path | No
 
 
 def load_file_token(path: Path) -> str:
-    mode = stat.S_IMODE(path.expanduser().stat().st_mode)
-    if mode & 0o077:
+    token_path = path.expanduser()
+    try:
+        metadata = token_path.lstat()
+    except OSError:
+        raise PermissionError("token file is unavailable") from None
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise PermissionError("token file must be a regular non-symlink file")
+    if stat.S_IMODE(metadata.st_mode) & 0o077:
         raise PermissionError("token file must not be accessible by group or other")
-    value = json.loads(path.expanduser().read_text()).get("token")
+    if metadata.st_size > 65_536:
+        raise PermissionError("token file exceeds maximum byte count")
+    try:
+        descriptor = os.open(token_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or stat.S_IMODE(opened.st_mode) & 0o077
+                or opened.st_size > 65_536
+                or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
+            ):
+                raise PermissionError("token file changed during validation")
+            raw = os.read(descriptor, 65_537)
+        finally:
+            os.close(descriptor)
+    except PermissionError:
+        raise
+    except OSError:
+        raise PermissionError("token file could not be read safely") from None
+    try:
+        value = json.loads(raw).get("token")
+    except (UnicodeDecodeError, json.JSONDecodeError, AttributeError) as error:
+        raise ValueError("token file must contain a JSON object") from error
     if not isinstance(value, str) or not value:
         raise ValueError("token file has no token")
     return value
@@ -317,7 +347,7 @@ class BrainClient:
             method=method or ("POST" if data is not None else "GET"),
             headers=headers,
         )
-        with urllib.request.urlopen(request, timeout=60, context=ssl.create_default_context()) as response:
+        with open_no_redirect(request, timeout=60) as response:
             return json.loads(response.read())
 
     def ingest(self, events: list[dict]) -> dict:

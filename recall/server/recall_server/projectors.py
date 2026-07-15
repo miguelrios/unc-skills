@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import re
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,15 @@ PRIVATE_KEY_RE = re.compile(
     r"-----BEGIN (?P<label>[A-Z0-9 ]*PRIVATE KEY)-----.*?-----END (?P=label)-----",
     re.DOTALL,
 )
+SOURCE_ID_RE = re.compile(r"[A-Za-z0-9_.:@-]{3,160}\Z")
+NATIVE_ID_RE = re.compile(r"[A-Za-z0-9_.:@/=-]{1,512}\Z")
+KIND_RE = re.compile(r"[A-Za-z0-9_.:-]{1,64}\Z")
+CONTENT_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+ENVELOPE_FIELDS = {
+    "schema_version", "source_id", "native_id", "native_parent_id", "kind",
+    "occurred_at", "observed_at", "principal_id", "visibility", "content_type",
+    "content", "provenance", "content_sha256",
+}
 
 
 def redact_text(value: str) -> str:
@@ -39,7 +49,9 @@ def legacy_engine():
 
 
 def canonical_json(value: Any) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False,
+    ).encode()
 
 
 def advisory_lock_key(source_id: str, native_id: str) -> str:
@@ -53,6 +65,8 @@ def content_sha256(envelope: dict) -> str:
 
 
 def validate_envelope(envelope: dict) -> dict:
+    if not isinstance(envelope, dict):
+        raise ValueError("envelope must be an object")
     if set(envelope) & {"source_profile", "source_family", "source_quality", "quality"}:
         raise ValueError("source profile is host-controlled")
     required = (
@@ -63,13 +77,56 @@ def validate_envelope(envelope: dict) -> dict:
     missing = [key for key in required if key not in envelope]
     if missing:
         raise ValueError("missing fields: " + ",".join(missing))
-    if envelope["schema_version"] != 1:
+    unknown = set(envelope) - ENVELOPE_FIELDS
+    if unknown:
+        raise ValueError("unknown envelope fields")
+    if envelope["schema_version"] != 1 or isinstance(envelope["schema_version"], bool):
         raise ValueError("unsupported schema_version")
+    if not isinstance(envelope["source_id"], str) or not SOURCE_ID_RE.fullmatch(envelope["source_id"]):
+        raise ValueError("invalid source_id")
+    for field in ("native_id", "native_parent_id"):
+        value = envelope.get(field)
+        if value is not None and (not isinstance(value, str) or not NATIVE_ID_RE.fullmatch(value)):
+            raise ValueError(f"invalid {field}")
+    if not isinstance(envelope["kind"], str) or not KIND_RE.fullmatch(envelope["kind"]):
+        raise ValueError("invalid kind")
+    for field in ("occurred_at", "observed_at"):
+        value = envelope[field]
+        if not isinstance(value, str) or len(value) > 64:
+            raise ValueError(f"invalid {field}")
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError(f"invalid {field}") from None
+        if parsed.tzinfo is None:
+            raise ValueError(f"invalid {field}")
+    principal = envelope["principal_id"]
+    if (
+        not isinstance(principal, str) or not 1 <= len(principal) <= 160
+        or any(ord(character) < 32 for character in principal)
+    ):
+        raise ValueError("invalid principal_id")
     if envelope["visibility"] not in {"private", "shared"}:
         raise ValueError("unsupported visibility")
-    actual = content_sha256(envelope)
+    if envelope["content_type"] != "application/json":
+        raise ValueError("unsupported content_type")
+    provenance = envelope.get("provenance", {})
+    if not isinstance(provenance, dict):
+        raise ValueError("provenance must be an object")
+    claimed = envelope["content_sha256"]
+    if not isinstance(claimed, str) or not CONTENT_SHA256_RE.fullmatch(claimed):
+        raise ValueError("invalid content_sha256")
+    try:
+        actual = content_sha256(envelope)
+        canonical_json(provenance)
+    except (TypeError, ValueError):
+        raise ValueError("content and provenance must be finite JSON values") from None
     if envelope["content_sha256"] != actual:
         raise ValueError("content_sha256 mismatch")
+    if envelope["kind"] == "tombstone":
+        content = envelope["content"]
+        if not isinstance(content, dict) or content.get("target_native_id") != envelope["native_id"]:
+            raise ValueError("tombstone target must match native_id")
     return envelope
 
 

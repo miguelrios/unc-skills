@@ -4,7 +4,7 @@
     "sensitive": 9,
     "total": 12
   },
-  "corpus_sha256": "677fc028d079eaa7374942d877c845dd16b3c6ddc504b19593923a24827d271d",
+  "corpus_sha256": "bc67b12e40fb7a91c86696922cb07a334b270f968641180fbeb08928366506b1",
   "policy_version": "recall-privacy-v1",
   "thresholds": {
     "benign_retention_percent": 100,

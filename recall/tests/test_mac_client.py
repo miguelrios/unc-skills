@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest import mock
 from client import cli as client_cli
 
-from client.mac import BrainClient, ExportImporter, MemoryClient, PrivacyError, dry_run_manifest
+from client.mac import BrainClient, ExportImporter, MemoryClient, PrivacyError, dry_run_manifest, load_file_token
 from privacy.policy import PrivacyPolicy
 
 
@@ -77,6 +77,24 @@ class DryRunPrivacyTest(unittest.TestCase):
     def test_visibility_is_explicit_and_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "visibility"):
             dry_run_manifest(selections=[], visibility="public", home=self.home)
+
+
+class CredentialFileTest(unittest.TestCase):
+    def test_token_file_is_private_bounded_and_not_a_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "token.json"
+            path.write_text(json.dumps({"token": "synthetic-token"}))
+            path.chmod(0o600)
+            self.assertEqual(load_file_token(path), "synthetic-token")
+
+            alias = Path(temporary) / "token-link.json"
+            alias.symlink_to(path)
+            with self.assertRaisesRegex(PermissionError, "non-symlink"):
+                load_file_token(alias)
+
+            path.chmod(0o644)
+            with self.assertRaisesRegex(PermissionError, "group or other"):
+                load_file_token(path)
 
 
 class SupportedExportTest(unittest.TestCase):
@@ -220,7 +238,7 @@ class ExplicitMemoryTest(unittest.TestCase):
             principal_id="owner",
             visibility="private",
         )
-        with mock.patch("urllib.request.urlopen", side_effect=open_request):
+        with mock.patch("client.mac.open_no_redirect", side_effect=open_request):
             put = client.put("remember this exact marker", provenance={"uri": "manual://test"})
             deleted = client.delete(put["receipt"])
 
@@ -241,7 +259,7 @@ class ExplicitMemoryTest(unittest.TestCase):
             endpoint="https://brain.example.ts.net", token="synthetic-token",
             source_id="memory:mac:test", privacy=PrivacyPolicy(mode="drop"),
         )
-        with mock.patch("urllib.request.urlopen") as opened:
+        with mock.patch("client.mac.open_no_redirect") as opened:
             result = dropped.put(f"api_key={canary}")
         opened.assert_not_called()
         self.assertEqual(result["privacy"]["action"], "drop")
@@ -258,7 +276,7 @@ class ExplicitMemoryTest(unittest.TestCase):
             event = json.loads(request.data)["events"][0]
             return FakeResponse(201, {"status": "committed", "receipts": [f"recall://{event['source_id']}/{event['native_id']}?rev=1"]})
 
-        with mock.patch("urllib.request.urlopen", side_effect=open_request):
+        with mock.patch("client.mac.open_no_redirect", side_effect=open_request):
             result = scrubbed.put(f"keep context api_key={canary} after")
         self.assertEqual(result["privacy"]["action"], "scrub")
         self.assertNotIn(canary, requests[0].data.decode())
@@ -280,7 +298,7 @@ class ExplicitMemoryTest(unittest.TestCase):
             event = json.loads(request.data)["events"][0]
             return FakeResponse(201, {"status": "committed", "receipts": [f"recall://{event['source_id']}/{event['native_id']}?rev=2"]})
 
-        with mock.patch("urllib.request.urlopen", side_effect=open_request):
+        with mock.patch("client.mac.open_no_redirect", side_effect=open_request):
             result = client.delete("recall://memory:mac:test/memory-synthetic?rev=1")
         self.assertEqual(result["kind"], "tombstone")
         self.assertEqual(len(requests), 1)
@@ -304,7 +322,7 @@ class ExplicitMemoryTest(unittest.TestCase):
             "recall://memory:mac:test/memory-one?rev=1",
             "recall://memory:mac:test/memory-two?rev=1",
         ]
-        with mock.patch("urllib.request.urlopen", side_effect=open_request):
+        with mock.patch("client.mac.open_no_redirect", side_effect=open_request):
             result = client.delete_many(receipts)
         self.assertEqual(result["kind"], "tombstones")
         self.assertEqual(len(requests), 1)
@@ -350,7 +368,7 @@ class ExportPrivacyTest(unittest.TestCase):
                 endpoint="https://brain.example.ts.net", token="synthetic-token",
                 source_id="export:mac:test", privacy=policy,
             )
-            with mock.patch("urllib.request.urlopen") as opened:
+            with mock.patch("client.mac.open_no_redirect") as opened:
                 result = importer.import_with(client, [source])
             opened.assert_not_called()
             self.assertEqual(result["acknowledgement"]["status"], "privacy_filtered")
@@ -364,7 +382,7 @@ class PrivacyPreviewTest(unittest.TestCase):
         with mock.patch("sys.argv", ["recall-brain", "privacy-preview", "--privacy-mode", "scrub"]), \
              mock.patch("sys.stdin", io.StringIO(f"api_key={canary}")), \
              contextlib.redirect_stdout(output), \
-             mock.patch("urllib.request.urlopen") as opened:
+             mock.patch("client.mac.open_no_redirect") as opened:
             client_cli.main()
         opened.assert_not_called()
         receipt = json.loads(output.getvalue())

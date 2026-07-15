@@ -1,0 +1,3 @@
+{"payload":{"cwd":"/synthetic/local-surface-fixture","originator":"Codex Desktop"},"timestamp":"2026-07-15T00:00:00Z","type":"session_meta"}
+{"payload":{"content":"synthetic-private-message-canary","role":"user"},"timestamp":"2026-07-15T00:00:01Z","type":"response_item"}
+{"payload":{"content":"synthetic-assistant-answer","role":"assistant"},"timestamp":"2026-07-15T00:00:02Z","type":"response_item"}

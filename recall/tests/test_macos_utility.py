@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from client.cli import parser
 from client.macos_utility import SOURCE_SPECS, disable_source, mac_status
@@ -55,14 +56,18 @@ class MacUtilityLifecycleTest(unittest.TestCase):
         self.assertEqual(result["sources"]["claude-code"], {
             "enabled": True, "health": "ready", "lag_seconds": 10,
             "checkpointed": True, "state_present": True,
-            "privacy_mode": "scrub",
+            "privacy_mode": "scrub", "surface": "claude-code-project-jsonl",
         })
         self.assertEqual(result["sources"]["cowork"], {
             "enabled": True, "health": "degraded", "lag_seconds": 5,
             "checkpointed": True, "state_present": True,
-            "privacy_mode": "scrub",
+            "privacy_mode": "scrub", "surface": "claude-cowork-project-jsonl",
         })
         self.assertEqual(result["sources"]["codex"]["health"], "disabled")
+        self.assertEqual(
+            result["sources"]["codex"]["surface"],
+            "chatgpt-codex-desktop-rollouts",
+        )
         rendered = json.dumps(result, sort_keys=True)
         for forbidden in (str(self.home), "CANARY", "CREDENTIAL", "PATH"):
             self.assertNotIn(forbidden, rendered)
@@ -96,6 +101,13 @@ class MacUtilityLifecycleTest(unittest.TestCase):
         self.assertTrue((self.agents / f"{SOURCE_SPECS['codex'].label}.plist").exists())
         after = {path.name: path.read_bytes() for path in (self.prefix / "state").iterdir()}
         self.assertEqual(after, before)
+
+    def test_disable_uses_the_fixed_system_launchctl_binary(self) -> None:
+        self._enable("cowork")
+        with mock.patch("client.macos_utility.subprocess.run", return_value=mock.Mock(returncode=1)) as run:
+            disable_source("cowork", launch_agents=self.agents)
+        self.assertEqual(run.call_args_list[0].args[0][0], "/bin/launchctl")
+        self.assertEqual(run.call_args_list[1].args[0][0], "/bin/launchctl")
 
     def test_cli_has_safe_defaults_and_closed_source_choices(self) -> None:
         cowork = parser().parse_args([

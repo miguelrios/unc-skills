@@ -103,7 +103,7 @@ class AgenticJudgeContractTest(unittest.TestCase):
             virtual_key="synthetic-scoped-virtual-key",
             model="privacy-judge",
         )
-        with mock.patch("urllib.request.urlopen", return_value=response) as opened:
+        with mock.patch("privacy.policy.open_no_redirect", return_value=response) as opened:
             spans = judge("ask Ada Example")
         self.assertEqual(spans, [{"start": 4, "end": 15, "category": "contextual_name"}])
         request = opened.call_args.args[0]
@@ -124,7 +124,7 @@ class AgenticJudgeContractTest(unittest.TestCase):
         response.read.return_value = json.dumps({
             "choices": [{"message": {"content": "{\"spans\":[{\"start\":9,\"end\":2,\"category\":\"name\"}]}"}}]
         }).encode()
-        with mock.patch("urllib.request.urlopen", return_value=response):
+        with mock.patch("privacy.policy.open_no_redirect", return_value=response):
             with self.assertRaisesRegex(ValueError, "span"):
                 judge("synthetic")
 
@@ -156,6 +156,11 @@ class AgenticJudgeContractTest(unittest.TestCase):
             path.chmod(0o644)
             with self.assertRaisesRegex(PermissionError, "private"):
                 load_scoped_virtual_key(path)
+            path.chmod(0o600)
+            alias = Path(temporary) / "judge-key-link.json"
+            alias.symlink_to(path)
+            with self.assertRaisesRegex(PermissionError, "non-symlink"):
+                load_scoped_virtual_key(alias)
 
 
 if __name__ == "__main__":

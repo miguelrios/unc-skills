@@ -5,7 +5,6 @@ import json
 import os
 import re
 import sqlite3
-import ssl
 import time
 import urllib.error
 import urllib.request
@@ -14,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from privacy.policy import PrivacyPolicy, summarize_receipts
+from privacy.transport import open_no_redirect
 
 COLLECTOR_VERSION = 1
 MAX_BATCH_BYTES = 8_000_000
@@ -289,7 +289,7 @@ class Collector:
                         summary["parse_errors"] += 1
                         self.db.execute(
                             "INSERT OR IGNORE INTO dead_letters(path,byte_offset,error_code,error_summary,created_at) VALUES (?,?,?,?,?)",
-                            (path_text, line_start, type(exc).__name__, str(exc)[:300], time.time()),
+                            (path_text, line_start, type(exc).__name__, "record rejected", time.time()),
                         )
                         continue
                     occurred_at = normalized_timestamp(content.get("timestamp"), stat.st_mtime)
@@ -386,10 +386,10 @@ class Collector:
                     (row["path"],),
                 )
                 result["recovered"] += 1
-            except (OSError, ValueError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            except (OSError, ValueError, json.JSONDecodeError, UnicodeDecodeError):
                 self.db.execute(
                     "INSERT OR IGNORE INTO dead_letters(path,byte_offset,error_code,error_summary,created_at) VALUES (?,?,?,?,?)",
-                    (row["path"], row["start_offset"], "RecoveryError", str(exc)[:300], time.time()),
+                    (row["path"], row["start_offset"], "RecoveryError", "record recovery rejected", time.time()),
                 )
                 result["unrecoverable"] += 1
         self.db.commit()
@@ -488,7 +488,7 @@ class Collector:
             acknowledgement = None
             for attempt in range(5):
                 try:
-                    with urllib.request.urlopen(request, timeout=60, context=ssl.create_default_context()) as response:
+                    with open_no_redirect(request, timeout=60) as response:
                         acknowledgement = json.loads(response.read())
                         if response.status not in {200, 201} or acknowledgement.get("status") != "committed":
                             raise RuntimeError("server did not return a commit acknowledgement")

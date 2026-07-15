@@ -38,7 +38,7 @@ while [ "$#" -gt 0 ]; do
     --connector-supervisor-config) SUPERVISOR_CONFIG=$2; shift 2 ;;
     --disable-connector-supervisor) DISABLE_SUPERVISOR=1; shift ;;
     --no-load) NO_LOAD=1; shift ;;
-    *) echo "usage: install.sh [--endpoint URL --host-id ID --keychain-service SERVICE --visibility private|shared] [--sources claude-code,codex,cowork] [--export-inbox PATH | --disable-export-inbox] [--disable-source claude-code|codex|cowork|chatgpt-export] [--connector-supervisor-config FILE | --disable-connector-supervisor] [--privacy-mode off|scrub|drop] [--claude-root PATH] [--codex-root PATH] [--cowork-root PATH] [--prefix PATH] [--launch-agents PATH] [--no-load]" >&2; exit 2 ;;
+    *) echo "usage: install.sh [--endpoint URL --host-id ID --keychain-service SERVICE --visibility private|shared] [--sources claude-code,codex|chatgpt-codex-desktop,cowork] [--export-inbox PATH | --disable-export-inbox] [--disable-source claude-code|codex|chatgpt-codex-desktop|cowork|chatgpt-export] [--connector-supervisor-config FILE | --disable-connector-supervisor] [--privacy-mode off|scrub|drop] [--claude-root PATH] [--codex-root PATH] [--cowork-root PATH] [--prefix PATH] [--launch-agents PATH] [--no-load]" >&2; exit 2 ;;
   esac
 done
 
@@ -59,11 +59,13 @@ if [ -n "$SOURCES" ] || [ -n "$EXPORT_INBOX" ]; then
   case "$VISIBILITY" in private|shared) ;; *) echo "visibility must be private or shared" >&2; exit 2 ;; esac
 fi
 NORMALIZED_SOURCES=""
-case ",$SOURCES," in *,,*) echo "invalid duplicate or empty source selection" >&2; exit 2 ;; esac
+if [ -n "$SOURCES" ]; then
+  case ",$SOURCES," in *,,*) echo "invalid duplicate or empty source selection" >&2; exit 2 ;; esac
+fi
 for SOURCE_NAME in $(echo "$SOURCES" | tr ',' ' '); do
   case "$SOURCE_NAME" in
     claude|claude-code) NORMALIZED=claude ;;
-    codex) NORMALIZED=codex ;;
+    codex|chatgpt-codex-desktop) NORMALIZED=codex ;;
     cowork) NORMALIZED=cowork ;;
     *) echo "unsupported source: $SOURCE_NAME" >&2; exit 2 ;;
   esac
@@ -76,7 +78,7 @@ case ",$SOURCES," in *,cowork,*)
   [ -d "$COWORK_ROOT" ] && [ ! -L "$COWORK_ROOT" ] || { echo "Cowork root must be an explicit non-symlink directory" >&2; exit 2; }
 ;; esac
 for SOURCE_NAME in $DISABLE_SOURCES; do
-  case "$SOURCE_NAME" in claude|claude-code|codex|cowork|chatgpt-export) ;; *) echo "unsupported disable source: $SOURCE_NAME" >&2; exit 2 ;; esac
+  case "$SOURCE_NAME" in claude|claude-code|codex|chatgpt-codex-desktop|cowork|chatgpt-export) ;; *) echo "unsupported disable source: $SOURCE_NAME" >&2; exit 2 ;; esac
 done
 if [ -n "$EXPORT_INBOX" ]; then
   [ -d "$EXPORT_INBOX" ] && [ ! -L "$EXPORT_INBOX" ] || { echo "export inbox must be an explicit non-symlink directory" >&2; exit 2; }
@@ -171,6 +173,7 @@ value = {
     "RunAtLoad": True,
     "StartInterval": 30,
     "ProcessType": "Background",
+    "Umask": 0o077,
     "StandardOutPath": spool + ".stdout.log",
     "StandardErrorPath": spool + ".stderr.log",
 }
@@ -213,6 +216,7 @@ value = {
     "RunAtLoad": True,
     "StartInterval": 30,
     "ProcessType": "Background",
+    "Umask": 0o077,
     "StandardOutPath": spool + ".stdout.log",
     "StandardErrorPath": spool + ".stderr.log",
 }
@@ -255,6 +259,7 @@ value = {
     "RunAtLoad": True,
     "StartInterval": 30,
     "ProcessType": "Background",
+    "Umask": 0o077,
     "StandardOutPath": spool + ".stdout.log",
     "StandardErrorPath": spool + ".stderr.log",
 }
@@ -274,7 +279,13 @@ write_supervisor_plist() {
   if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
     stop_launch_agent "$LABEL"
   fi
-  PYTHONPATH="$PREFIX/lib" "$RUNTIME" -m client.cli connector-supervisor-config-preview --config "$SUPERVISOR_CONFIG" >/dev/null
+  if [ -n "$EXPORT_INBOX" ]; then
+    PYTHONPATH="$PREFIX/lib" "$RUNTIME" -m client.cli connector-supervisor-config-preview \
+      --config "$SUPERVISOR_CONFIG" --reserved-export-inbox "$EXPORT_INBOX" >/dev/null
+  else
+    PYTHONPATH="$PREFIX/lib" "$RUNTIME" -m client.cli connector-supervisor-config-preview \
+      --config "$SUPERVISOR_CONFIG" >/dev/null
+  fi
   "$RUNTIME" - "$PLIST" "$LABEL" "$RUNTIME" "$PREFIX/lib" "$SUPERVISOR_CONFIG" "$STATE" <<'PY'
 import plistlib
 import sys
@@ -291,6 +302,7 @@ value = {
     "KeepAlive": True,
     "ThrottleInterval": 10,
     "ProcessType": "Background",
+    "Umask": 0o077,
     "StandardOutPath": state + ".stdout.log",
     "StandardErrorPath": state + ".stderr.log",
 }
@@ -318,7 +330,7 @@ fi
 for SOURCE_NAME in $DISABLE_SOURCES; do
   case "$SOURCE_NAME" in
     claude|claude-code) LABEL="ai.parcha.recall.claude" ;;
-    codex) LABEL="ai.parcha.recall.codex" ;;
+    codex|chatgpt-codex-desktop) LABEL="ai.parcha.recall.codex" ;;
     cowork) LABEL="ai.parcha.recall.cowork" ;;
     chatgpt-export) LABEL="ai.parcha.recall.chatgpt-export" ;;
   esac

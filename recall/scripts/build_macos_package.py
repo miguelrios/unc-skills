@@ -153,6 +153,7 @@ def application_payloads(source_root: Path, runtime_lock_data: bytes) -> dict[st
         source_root / "client" / "capture.py": "lib/client/capture.py",
         source_root / "client" / "mcp.py": "lib/client/mcp.py",
         source_root / "client" / "macos_utility.py": "lib/client/macos_utility.py",
+        source_root / "client" / "local_surfaces.py": "lib/client/local_surfaces.py",
         source_root / "client" / "__init__.py": "lib/client/__init__.py",
         source_root / "collector" / "collector.py": "lib/collector/collector.py",
         source_root / "collector" / "__init__.py": "lib/collector/__init__.py",
@@ -165,6 +166,7 @@ def application_payloads(source_root: Path, runtime_lock_data: bytes) -> dict[st
         source_root / "connectors" / "host.py": "lib/connectors/host.py",
         source_root / "connectors" / "__init__.py": "lib/connectors/__init__.py",
         source_root / "privacy" / "policy.py": "lib/privacy/policy.py",
+        source_root / "privacy" / "transport.py": "lib/privacy/transport.py",
         source_root / "privacy" / "__init__.py": "lib/privacy/__init__.py",
         source_root / "client" / "macos" / "recall-brain": "bin/recall-brain",
         source_root / "client" / "macos" / "install.sh": "install.sh",
@@ -255,8 +257,13 @@ def build(source_root: Path, output: Path, runtime_archive: Path, runtime_lock: 
 
 def download_runtime(lock: dict[str, Any], destination: Path) -> None:
     request = urllib.request.Request(lock["artifact"]["url"], headers={"User-Agent": "recall-macos-package-builder/2"})
+    expected_bytes = lock["artifact"]["bytes"]
     with urllib.request.urlopen(request, timeout=120) as response, destination.open("wb") as output:
-        while chunk := response.read(1024 * 1024):
+        downloaded = 0
+        while chunk := response.read(min(1024 * 1024, expected_bytes - downloaded + 1)):
+            downloaded += len(chunk)
+            if downloaded > expected_bytes:
+                raise ValueError("runtime artifact exceeds its pinned byte count")
             output.write(chunk)
 
 

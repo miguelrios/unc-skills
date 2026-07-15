@@ -1,4 +1,4 @@
-{"category":"credential","id":"credential-assignment","input":{"text":"deploy with api_key=synthetic-secret-canary-41 and keep this instruction"},"safe_text":"deploy with  and keep this instruction","sensitive":true}
+{"category":"credential","id":"credential-assignment","input":{"text":"deploy with api_key=fake and keep this instruction"},"safe_text":"deploy with  and keep this instruction","sensitive":true}
 {"category":"credential","id":"bearer-header","input":{"tool":{"headers":{"Authorization":"Bearer synthetic-access-canary-42"},"status":"retry"}},"safe_text":"retry","sensitive":true}
 {"category":"email","id":"email","input":{"text":"contact alex@example.invalid about the cobalt release"},"safe_text":"contact  about the cobalt release","sensitive":true}
 {"category":"phone","id":"phone","input":{"text":"call +1 202-555-0104 after the deploy"},"safe_text":"call  after the deploy","sensitive":true}

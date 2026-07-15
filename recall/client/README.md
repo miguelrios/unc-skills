@@ -14,8 +14,9 @@ python3 scripts/build_macos_package.py \
 ```
 
 Two builds from the same tree are byte-identical. `MANIFEST.json` records every
-installed file's byte count and SHA-256. The bundle requires Python 3.10+ and
-installs only beneath the selected user prefix plus two user LaunchAgent files.
+installed file's byte count and SHA-256. The bundle carries its pinned arm64
+CPython runtime and installs only beneath the selected user prefix plus the
+explicitly selected user LaunchAgent files.
 
 ## Inspect, install, and remove
 
@@ -36,31 +37,65 @@ printf '%s' "$SCOPED_CLAUDE_TOKEN" | recall-brain keychain-store \
   --service ai.parcha.recall --account claude:mac:my-mac
 printf '%s' "$SCOPED_CODEX_TOKEN" | recall-brain keychain-store \
   --service ai.parcha.recall --account codex:mac:my-mac
+printf '%s' "$SCOPED_COWORK_TOKEN" | recall-brain keychain-store \
+  --service ai.parcha.recall --account cowork:mac:my-mac
 
 ./install.sh \
   --endpoint https://brain.example.ts.net \
   --host-id my-mac \
   --keychain-service ai.parcha.recall \
   --visibility private \
-  --sources claude,codex
+  --sources claude-code,codex,cowork \
+  --privacy-mode scrub
 ```
 
-`--sources`, `--visibility`, `--claude-root`, and `--codex-root` are explicit
-consent controls. `--privacy-mode off|scrub|drop` is also explicit and defaults
-to `off` for compatibility. Re-running the installer is an in-place upgrade. Remove the
-client and its spool with:
+`--sources`, `--visibility`, `--claude-root`, `--codex-root`, and
+`--cowork-root` are explicit consent controls. Cowork reads only the nested
+local project JSONL surface; it does not inspect app databases, audit logs,
+attachments, caches, metadata files, browser stores, Desktop, or Downloads.
+On the current macOS release, `ChatGPT.app` is the Codex Desktop runtime and its
+durable local work is the supported `~/.codex/sessions` rollout surface. Select
+that source as either `codex` or the truthful alias `chatgpt-codex-desktop`;
+both install the same single collector and neither claims consumer ChatGPT
+cloud-chat history.
+
+`recall-brain mac-claude-surface-preview` reports the separate Claude surfaces
+without reading record bodies. On the probed release, Cowork project logs are
+the supported desktop-work surface; Chromium IndexedDB and Local Storage remain
+excluded app state, and ordinary Claude cloud-chat history is not claimed.
+`--privacy-mode off|scrub|drop` defaults to `scrub`, and Cowork rejects `off`.
+Re-running the installer is an in-place upgrade that preserves private state.
+
+Inspect all four source classes without printing a path, credential, cursor,
+content, or exception:
+
+```bash
+recall-brain mac-status
+recall-brain mac-disable --source cowork
+```
+
+Per-source disable removes only that LaunchAgent and retains recoverable state.
+Default uninstall removes code and agents but retains state; deleting state is
+an explicit choice:
 
 ```bash
 ./uninstall.sh
+./uninstall.sh --delete-state
 ```
+
+The Recall skill can use the same central Brain without shell-specific exports.
+Create a private read-only credential file, then a mode-0600
+`~/.config/recall-brain/client.json` containing only schema version, the `:9443`
+HTTPS endpoint, and the absolute token-file reference. Environment values still
+override this profile, and `RECALL_MODE=local` remains a no-network rollback.
 
 To continuously ingest only files deliberately copied into a flat export inbox,
 add `--export-inbox "$HOME/Recall Inbox"`. The installer creates a separate
 private LaunchAgent and uses Keychain account `chatgpt-export:mac:<host-id>`.
-This does not inspect the ChatGPT app, Cowork, Downloads, or browser storage.
+This does not inspect the ChatGPT app, Downloads, or browser storage.
 Re-run with `--disable-export-inbox` to unload only that LaunchAgent while
-preserving its content-free catalog/spool for recovery; full uninstall removes
-all Recall client state but never deletes the user-owned inbox.
+preserving its content-free catalog/spool for recovery. Uninstall never deletes
+the user-owned inbox.
 
 ## Supported exports and explicit memory
 
@@ -87,7 +122,7 @@ Privacy policy version `recall-privacy-v1` runs on parsed content before a
 collector writes version hashes or outbox rows and before export or memory code
 makes an HTTP request:
 
-- `off` preserves existing behavior and is the default.
+- `off` preserves existing behavior when explicitly selected for supported sources.
 - `scrub` replaces classified spans with category-labelled redactions while
   retaining safe context and provenance.
 - `drop` omits the entire classified record. Its receipt contains only action,
@@ -118,8 +153,9 @@ Enabling `scrub` or `drop` compacts pre-existing pending spool rows once with
 SQLite secure deletion. It cannot retroactively remove evidence already committed
 to the Brain or copies retained in original source transcripts/backups. Delete
 already-committed evidence by its canonical receipt before relying on the new
-policy. Roll back by reinstalling with `--privacy-mode off`; uninstall removes the
-client, LaunchAgents, and entire local spool.
+policy. Roll back a supported source by reinstalling it with `--privacy-mode off`;
+Cowork remains `scrub`/`drop` only. Uninstall retains local state unless the user
+explicitly passes `--delete-state`.
 
 ## External connectors
 

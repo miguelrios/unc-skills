@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
+import io
 import json
 import subprocess
 import sys
@@ -8,10 +10,16 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 RECALL_ROOT = Path(__file__).resolve().parents[1]
 BUILDER = RECALL_ROOT / "scripts" / "build_macos_package.py"
+SPEC = importlib.util.spec_from_file_location("recall_macos_builder", BUILDER)
+builder = importlib.util.module_from_spec(SPEC)
+assert SPEC.loader
+sys.modules[SPEC.name] = builder
+SPEC.loader.exec_module(builder)
 
 
 class MacPackageTest(unittest.TestCase):
@@ -116,6 +124,23 @@ class MacPackageTest(unittest.TestCase):
         self.assertIn("runtime artifact", result.stderr)
         self.assertFalse((self.root / "tampered.tar.gz").exists())
 
+    def test_runtime_download_stops_at_pinned_byte_count(self) -> None:
+        lock = json.loads(self.runtime_lock.read_text())
+        lock["artifact"]["bytes"] = 4
+
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        destination = self.root / "oversized-runtime.tar.gz"
+        with mock.patch.object(builder.urllib.request, "urlopen", return_value=Response(b"12345")):
+            with self.assertRaisesRegex(ValueError, "pinned byte count"):
+                builder.download_runtime(lock, destination)
+        self.assertLessEqual(destination.stat().st_size, 4)
+
     def test_wrong_target_and_missing_license_are_rejected(self) -> None:
         lock = json.loads(self.runtime_lock.read_text())
         lock["target"] = "x86_64-apple-darwin"
@@ -166,6 +191,7 @@ class MacPackageTest(unittest.TestCase):
         self.assertIn("lib/client/macos_utility.py", packaged_paths)
 
         wrapper = (package / "bin" / "recall-brain").read_text()
+        cli = (package / "lib" / "client" / "cli.py").read_text()
         self.assertIn('exec "$HERE/runtime/bin/python3" -m client.cli', wrapper)
         self.assertNotIn("exec python3", wrapper)
         installer = (package / "install.sh").read_text()
@@ -181,12 +207,17 @@ class MacPackageTest(unittest.TestCase):
         self.assertIn('"client.cli", "cowork-local-sync"', installer)
         self.assertIn('claude-code', installer)
         self.assertIn('cowork', installer)
+        self.assertIn('codex|chatgpt-codex-desktop) NORMALIZED=codex', installer)
+        self.assertIn('mac-claude-surface-preview', cli)
         self.assertIn('--export-inbox', installer)
         self.assertIn('--disable-export-inbox', installer)
         self.assertIn('--connector-supervisor-config', installer)
+        self.assertIn('--reserved-export-inbox "$EXPORT_INBOX"', installer)
         self.assertIn('--disable-connector-supervisor', installer)
+        self.assertIn('if [ -n "$SOURCES" ]; then\n  case ",$SOURCES,"', installer)
         self.assertIn('"client.cli", "connector-supervisor-run"', installer)
         self.assertIn('"KeepAlive": True', installer)
+        self.assertEqual(installer.count('"Umask": 0o077'), 4)
         self.assertIn('while launchctl print "$TARGET"', installer)
         self.assertIn('launch agent stop did not converge', installer)
         self.assertIn('stop_launch_agent "$LABEL"', installer)

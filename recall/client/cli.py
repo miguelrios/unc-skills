@@ -20,6 +20,11 @@ from collector.collector import Collector
 from client.capture import CaptureClient, ORIGIN
 from client.mcp import McpServer, serve as serve_mcp
 from client.macos_utility import SOURCE_SPECS, MacUtilityError, disable_source, mac_status
+from client.local_surfaces import (
+    LocalSurfaceError,
+    mac_claude_surface_preview,
+    mac_local_surface_preview,
+)
 from connectors.cowork_local import CoworkLocalConnector
 from connectors.export_inbox import ExportInboxConnector
 from connectors.grep_ai import GrepAIConnector, load_private_api_key, validate_api_key
@@ -42,6 +47,7 @@ from connectors.host import (
     preview_host_config,
     run_host_daemon,
     run_host_once,
+    validate_reserved_export_inbox,
 )
 from privacy.policy import AgenticJudge, PrivacyPolicy, load_scoped_virtual_key
 
@@ -154,6 +160,7 @@ def parser() -> argparse.ArgumentParser:
     supervisor_status.add_argument("--now", type=float)
     host_preview = commands.add_parser("connector-supervisor-config-preview")
     host_preview.add_argument("--config", required=True)
+    host_preview.add_argument("--reserved-export-inbox")
     host_run = commands.add_parser("connector-supervisor-run")
     host_run.add_argument("--config", required=True)
     host_run.add_argument("--state", required=True)
@@ -162,6 +169,14 @@ def parser() -> argparse.ArgumentParser:
     dry.add_argument("--visibility", choices=("private", "shared"), required=True)
     dry.add_argument("--claude-root")
     dry.add_argument("--codex-root")
+    local_surface = commands.add_parser("mac-local-surface-preview")
+    local_surface.add_argument("--app", default="/Applications/ChatGPT.app")
+    local_surface.add_argument("--codex-root", default="~/.codex/sessions")
+    claude_surface = commands.add_parser("mac-claude-surface-preview")
+    claude_surface.add_argument("--app", default="/Applications/Claude.app")
+    claude_surface.add_argument(
+        "--support-root", default="~/Library/Application Support/Claude"
+    )
 
     keychain = commands.add_parser("keychain-store")
     keychain.add_argument("--service", required=True)
@@ -327,7 +342,10 @@ def main() -> None:
         return
     if args.command == "connector-supervisor-config-preview":
         try:
-            result = preview_host_config(load_host_config(Path(args.config)))
+            config = load_host_config(Path(args.config))
+            if args.reserved_export_inbox:
+                validate_reserved_export_inbox(config, Path(args.reserved_export_inbox))
+            result = preview_host_config(config)
         except ConnectorHostError as error:
             raise SystemExit(str(error)) from None
         print(json.dumps(result, sort_keys=True))
@@ -349,6 +367,24 @@ def main() -> None:
         if args.codex_root:
             selections.append({"harness": "codex", "root": args.codex_root})
         print(json.dumps(dry_run_manifest(selections=selections, visibility=args.visibility), sort_keys=True))
+        return
+    if args.command == "mac-local-surface-preview":
+        try:
+            result = mac_local_surface_preview(
+                app=Path(args.app), codex_root=Path(args.codex_root),
+            )
+        except LocalSurfaceError as error:
+            raise SystemExit(str(error)) from None
+        print(json.dumps(result, sort_keys=True))
+        return
+    if args.command == "mac-claude-surface-preview":
+        try:
+            result = mac_claude_surface_preview(
+                app=Path(args.app), support_root=Path(args.support_root),
+            )
+        except LocalSurfaceError as error:
+            raise SystemExit(str(error)) from None
+        print(json.dumps(result, sort_keys=True))
         return
     if args.command == "keychain-store":
         store_keychain_token(args.service, args.account, sys.stdin.read().rstrip("\r\n"))
@@ -493,7 +529,11 @@ def main() -> None:
             privacy=privacy,
         )
         try:
-            result = {"scan": collector.scan(), "flush": collector.flush(), "doctor": collector.doctor()}
+            result = {
+                "scan": collector.scan(),
+                "flush": collector.flush(),
+                "doctor": collector.doctor(include_dead_letters=False),
+            }
         finally:
             collector.close()
     elif args.command == "cowork-local-sync":

@@ -309,6 +309,20 @@ class LocalCoworkConnectorTest(unittest.TestCase):
             with self.assertRaisesRegex(ConnectorContractError, "cowork_local_replaced"):
                 self.connector().pull(None)
 
+    def test_one_mib_line_budget_accepts_current_envelopes_and_remains_bounded(self) -> None:
+        valid = json.loads(json.dumps(self.records("keep")[0]))
+        valid["synthetic_ignored_padding"] = "x" * 1_000_000
+        self.write_records([valid])
+        size = self.transcript.stat().st_size
+        self.assertGreater(size, 1_000_000)
+        self.assertLess(size, 1_048_576)
+        self.assertEqual(len(self.connector().pull(None).records), 1)
+
+        valid["synthetic_ignored_padding"] = "x" * 1_048_576
+        self.write_records([valid])
+        with self.assertRaisesRegex(ConnectorContractError, "cowork_local_record_too_large"):
+            self.connector().pull(None)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "fixture_class": "synthetic-only",
+  "app_display_class": "chatgpt",
+  "runtime_family": "codex-desktop",
+  "eligible_rollouts": 1,
+  "record_body_reads": 0
+}

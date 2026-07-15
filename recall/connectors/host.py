@@ -330,6 +330,17 @@ def preview_host_config(config: ConnectorHostConfig) -> dict[str, Any]:
     }
 
 
+def validate_reserved_export_inbox(config: ConnectorHostConfig, inbox: Path) -> None:
+    """Fail closed when another installed owner already controls an export inbox."""
+
+    if not isinstance(config, ConnectorHostConfig):
+        raise ConnectorHostError("invalid_config")
+    reserved = Path(os.path.normpath(str(Path(inbox))))
+    for job in config.jobs:
+        if isinstance(job.connector, ExportOptions) and job.connector.inbox == reserved:
+            raise ConnectorHostError("duplicate_export_inbox_owner")
+
+
 class ConnectorHost:
     def __init__(self, *, config: ConnectorHostConfig, store: SupervisorStore,
                  runners: list[ConnectorRunner], connectors: list[Any], jobs: tuple[ScheduledJob, ...]):

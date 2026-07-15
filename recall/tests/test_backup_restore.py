@@ -30,28 +30,24 @@ class BackupPublicationTest(unittest.TestCase):
             docker.write_text(
                 """#!/bin/sh
 set -eu
-mount=''
-for argument in "$@"; do
-  case "$argument" in *:/backup) mount=${argument%:/backup};; esac
-done
-test -n "$mount"
+case "$*" in *':/backup'*) exit 5;; esac
 case "$*" in *--snapshot=00000001-00000001-1*) :;; *) exit 3;; esac
-printf partial > "$mount/brain.dump"
+printf partial
 touch "$BACKUP_CONTROL_DIR/partial"
 while test ! -e "$BACKUP_CONTROL_DIR/continue"; do sleep 0.02; done
-printf complete-new-dump > "$mount/brain.dump"
+printf complete-new-dump
 """
             )
             docker.chmod(0o755)
             psql = binaries / "psql"
             psql.write_text(
-                """#!/bin/sh
+                r"""#!/bin/sh
 set -eu
 input=$(cat)
 case "$input" in
   *pg_export_snapshot*)
     echo '00000001-00000001-1'
-    fifo=$(printf '%s\n' "$input" | sed -n 's/.*< "\(.*\)"/\\1/p')
+    fifo=$(printf '%s\n' "$input" | sed -n 's/.*< "\(.*\)"/\1/p')
     read ignored < "$fifo"
     ;;
   *'SET TRANSACTION SNAPSHOT'*'max(created_at)'*) echo 0;;
@@ -79,11 +75,14 @@ esac
                 (control / "continue").touch()
                 stdout, stderr = process.communicate(timeout=5)
                 self.assertEqual(process.returncode, 0, stderr)
-                self.assertEqual((backup / "brain.dump").read_bytes(), b"complete-new-dump")
+                self.assertEqual((backup / "brain.dump").read_bytes(), b"partialcomplete-new-dump")
                 manifest = json.loads((backup / "manifest.json").read_text())
                 self.assertTrue(manifest["dump_sha256"])
                 self.assertEqual(manifest["database_snapshot"], "00000001-00000001-1")
                 self.assertIn('"schema_version": 1', stdout)
+                self.assertEqual(backup.stat().st_mode & 0o777, 0o700)
+                self.assertEqual((backup / "brain.dump").stat().st_mode & 0o777, 0o600)
+                self.assertEqual((backup / "manifest.json").stat().st_mode & 0o777, 0o600)
             finally:
                 (control / "continue").touch()
                 if process.poll() is None:

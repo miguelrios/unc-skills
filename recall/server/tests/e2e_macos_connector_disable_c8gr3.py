@@ -149,6 +149,7 @@ def main() -> None:
             str(args.bundle_root / "uninstall.sh"),
             "--prefix", str(prefix),
             "--launch-agents", str(launch_agents),
+            "--delete-state",
         ], check=True, text=True, capture_output=True)
         installed = False
         facts.update({

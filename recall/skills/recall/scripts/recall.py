@@ -12,9 +12,11 @@ import os
 import re
 import secrets
 import sqlite3
+import stat
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from datetime import datetime, timezone
@@ -68,10 +70,120 @@ one ones our my me you us your their them they he she his her can could would sh
 than then if else""".split())
 REMOTE_READ_COMMANDS = frozenset({"search", "show", "related", "doctor", "session-export"})
 REMOTE_WRITE_COMMANDS = frozenset({"put", "delete"})
+CLIENT_CONFIG_FIELDS = {"schema_version", "url", "token_file"}
+MAX_CLIENT_CONFIG_BYTES = 16_384
+MAX_TOKEN_FILE_BYTES = 16_384
 
 
 class RemoteRecallError(RuntimeError):
     pass
+
+
+class _RejectRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _validated_remote_base(value: str) -> str:
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        port = parsed.port
+    except (AttributeError, TypeError, ValueError):
+        raise RemoteRecallError("remote URL is invalid") from None
+    loopback = (
+        parsed.scheme == "http"
+        and parsed.hostname in {"127.0.0.1", "localhost"}
+        and port is not None
+    )
+    if (
+        not isinstance(value, str)
+        or not ((parsed.scheme == "https" and parsed.hostname) or loopback)
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+        or (port is not None and not 1 <= port <= 65535)
+    ):
+        raise RemoteRecallError("remote URL is invalid")
+    return value.rstrip("/")
+
+
+def _open_remote(request: urllib.request.Request, *, timeout: float):
+    opener = urllib.request.build_opener(_RejectRedirect())
+    return opener.open(request, timeout=timeout)
+
+
+def client_config_path() -> Path:
+    configured = os.environ.get("RECALL_CONFIG_FILE")
+    return Path(configured).expanduser() if configured else (
+        Path.home() / ".config" / "recall-brain" / "client.json"
+    )
+
+
+def _load_private_json(path: Path, *, label: str, max_bytes: int):
+    descriptor = None
+    try:
+        before = path.lstat()
+        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+            raise RemoteRecallError(f"{label} must be a regular file")
+        if stat.S_IMODE(before.st_mode) & 0o077:
+            raise RemoteRecallError(f"{label} must have mode 0600")
+        if before.st_size > max_bytes:
+            raise RemoteRecallError(f"{label} is too large")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+            or stat.S_IMODE(opened.st_mode) & 0o077
+            or opened.st_size > max_bytes
+        ):
+            raise RemoteRecallError(f"{label} changed during inspection")
+        raw = os.read(descriptor, max_bytes + 1)
+        if len(raw) > max_bytes:
+            raise RemoteRecallError(f"{label} is too large")
+        return json.loads(raw)
+    except RemoteRecallError:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        raise RemoteRecallError(f"{label} is unreadable or invalid") from None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def load_client_config() -> dict | None:
+    path = client_config_path()
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise RemoteRecallError("client config unavailable") from None
+    value = _load_private_json(path, label="client config", max_bytes=MAX_CLIENT_CONFIG_BYTES)
+    if not isinstance(value, dict) or set(value) != CLIENT_CONFIG_FIELDS:
+        raise RemoteRecallError("client config fields are invalid")
+    if value["schema_version"] != 1 or isinstance(value["schema_version"], bool):
+        raise RemoteRecallError("client config schema is invalid")
+    url = value["url"]
+    try:
+        parsed = urllib.parse.urlparse(url)
+        port = parsed.port
+    except (TypeError, ValueError):
+        raise RemoteRecallError("client config URL is invalid") from None
+    loopback = parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost"}
+    if (
+        not isinstance(url, str) or not ((parsed.scheme == "https" and parsed.hostname) or loopback)
+        or parsed.username or parsed.password or parsed.query or parsed.fragment
+        or parsed.path not in {"", "/"} or (port is not None and not 1 <= port <= 65535)
+    ):
+        raise RemoteRecallError("client config URL is invalid")
+    token_file = value["token_file"]
+    if not isinstance(token_file, str) or not Path(token_file).expanduser().is_absolute():
+        raise RemoteRecallError("client config token reference is invalid")
+    return {"url": url.rstrip("/"), "token_file": token_file}
 
 
 def recall_mode() -> str:
@@ -80,21 +192,20 @@ def recall_mode() -> str:
         if configured not in {"local", "remote", "shadow"}:
             raise ValueError("RECALL_MODE must be local, remote, or shadow")
         return configured
-    return "remote" if os.environ.get("RECALL_URL") else "local"
+    return "remote" if os.environ.get("RECALL_URL") or client_config_path().exists() else "local"
 
 
 def remote_headers() -> dict[str, str]:
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
-    configured = os.environ.get("RECALL_TOKEN_FILE")
+    config = load_client_config()
+    configured = os.environ.get("RECALL_TOKEN_FILE") or (
+        config["token_file"] if config is not None else None
+    )
     if not configured:
         return headers
     path = Path(configured).expanduser()
-    if path.stat().st_mode & 0o077:
-        raise RemoteRecallError("token file must have mode 0600")
-    try:
-        token = json.loads(path.read_text()).get("token")
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RemoteRecallError("token file is unreadable or invalid") from exc
+    value = _load_private_json(path, label="token file", max_bytes=MAX_TOKEN_FILE_BYTES)
+    token = value.get("token") if isinstance(value, dict) else None
     if not isinstance(token, str) or not token:
         raise RemoteRecallError("token file has no token")
     headers["Authorization"] = "Bearer " + token
@@ -103,7 +214,10 @@ def remote_headers() -> dict[str, str]:
 
 def remote_request(method: str, path: str, body: dict | None = None,
                    idempotency_key: str | None = None) -> dict:
-    base = os.environ.get("RECALL_URL", "").rstrip("/")
+    config = load_client_config()
+    base = _validated_remote_base(os.environ.get("RECALL_URL") or (
+        config["url"] if config is not None else ""
+    ))
     if not base:
         raise RemoteRecallError("RECALL_URL is required for remote mode")
     data = None if body is None else json.dumps(body, sort_keys=True).encode()
@@ -112,7 +226,7 @@ def remote_request(method: str, path: str, body: dict | None = None,
         headers["Idempotency-Key"] = idempotency_key
     request = urllib.request.Request(base + path, data=data, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=float(os.environ.get("RECALL_TIMEOUT", "15"))) as response:
+        with _open_remote(request, timeout=float(os.environ.get("RECALL_TIMEOUT", "15"))) as response:
             rendered = json.loads(response.read())
             if not isinstance(rendered, dict):
                 raise RemoteRecallError("server returned a non-object response")

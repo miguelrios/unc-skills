@@ -126,12 +126,19 @@ def main() -> None:
         assert required in metrics_text
 
     # Same-user direct Unix access cannot forge the root tailscaled peer identity.
-    forged_status = unix_status(socket_path, "/v1/receipts/resolve?" + encoded, {"Tailscale-User-Login": "miguel@parcha.ai"})
+    forged_login = os.environ.get("RECALL_E2E_FORGED_LOGIN", "forged@example.invalid")
+    forged_status = unix_status(
+        socket_path, "/v1/receipts/resolve?" + encoded,
+        {"Tailscale-User-Login": forged_login},
+    )
     assert forged_status == 401
 
     # There is no application TCP listener to bypass Serve on loopback or the tailnet IP.
     no_tcp = {}
-    for host in ("127.0.0.1", "100.106.234.74"):
+    hosts = ["127.0.0.1"]
+    if os.environ.get("RECALL_E2E_TAILNET_IP"):
+        hosts.append(os.environ["RECALL_E2E_TAILNET_IP"])
+    for host in hosts:
         sock = socket.socket(); sock.settimeout(1)
         try:
             sock.connect((host, 18788)); no_tcp[host] = False
