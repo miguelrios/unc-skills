@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "name": "recap-session-boundary-v1",
+  "frozen_at": "2026-07-14T00:00:00Z",
+  "principle": "Every observable event is covered exactly once or named in an explicit low-signal aggregate.",
+  "scenarios": [
+    {
+      "id": "exact-native-session",
+      "harness": "claude",
+      "events": 8,
+      "asserts": ["exact_boundary", "stable_order", "complete_receipt"]
+    },
+    {
+      "id": "long-session-1205",
+      "harness": "codex",
+      "events": 1205,
+      "asserts": ["no_silent_truncation", "ordered_pagination", "complete_receipt"]
+    },
+    {
+      "id": "parent-with-child",
+      "harness": "codex",
+      "events": 13,
+      "child_events": 5,
+      "asserts": ["children_excluded_by_default", "children_nested_when_requested"]
+    },
+    {
+      "id": "dirty-worktree-and-uncommitted-edit",
+      "harness": "claude",
+      "events": 11,
+      "asserts": ["baseline_commit", "worktree_snapshot", "no_false_attribution"]
+    },
+    {
+      "id": "edit-then-revert",
+      "harness": "codex",
+      "events": 14,
+      "asserts": ["timeline_preserves_attempt", "final_state_excludes_reverted_change"]
+    },
+    {
+      "id": "secret-shaped-tool-output",
+      "harness": "claude",
+      "events": 7,
+      "asserts": ["secret_not_rendered", "redaction_count_reported"]
+    },
+    {
+      "id": "explicit-continuation-chain",
+      "harness": "mixed",
+      "events": 19,
+      "asserts": ["native_boundary_default", "continuation_opt_in", "session_labels"]
+    },
+    {
+      "id": "no-git-session",
+      "harness": "codex",
+      "events": 6,
+      "asserts": ["git_unavailable_is_explicit", "transcript_recap_survives"]
+    }
+  ],
+  "baseline_capabilities": [
+    "exact_target",
+    "stable_order",
+    "unbounded_local_read",
+    "remote_pagination",
+    "machine_manifest",
+    "current_session_identity",
+    "coverage_accounting",
+    "git_provenance",
+    "parent_child_scope",
+    "secret_redaction",
+    "observed_test_reporting",
+    "claude_and_codex"
+  ]
+}

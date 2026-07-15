@@ -14,7 +14,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILLS = ("hands-free", "parable", "cascade", "recall", "tether", "desloppify")
+SKILLS = ("hands-free", "parable", "cascade", "recall", "recap", "tether", "desloppify")
 
 
 def digest(path: Path) -> str:
@@ -145,6 +145,12 @@ def main() -> int:
         run(
             "smoke-recall",
             ["python3", str(ROOT / "recall/skills/recall/scripts/recall.py"), "doctor"],
+            smoke_env,
+            output,
+        )
+        run(
+            "smoke-recap",
+            ["python3", str(ROOT / "recap/skills/recap/scripts/recap.py"), "--help"],
             smoke_env,
             output,
         )

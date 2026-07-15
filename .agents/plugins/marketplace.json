@@ -53,6 +53,18 @@
       "category": "Productivity"
     },
     {
+      "name": "recap",
+      "source": {
+        "source": "local",
+        "path": "./recap"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
       "name": "tether",
       "source": {
         "source": "local",

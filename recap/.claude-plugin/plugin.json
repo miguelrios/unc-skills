@@ -1,0 +1,9 @@
+{
+  "name": "recap",
+  "version": "0.1.0",
+  "description": "Evidence-backed end-to-end comprehension of one exact coding-agent session.",
+  "author": {
+    "name": "Miguel Rios",
+    "url": "https://github.com/miguelrios"
+  }
+}

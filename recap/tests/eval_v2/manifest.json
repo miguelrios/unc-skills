@@ -1,0 +1,12 @@
+{
+  "schema_version": 2,
+  "name": "recap-session-boundary-v2",
+  "cases": "cases.jsonl",
+  "cases_sha256": "63f4006b3ea52b378f4367fad873767b43da8bd9583ac7e45cd3953d9bc37aa8",
+  "gold_ledger": "gold_ledger.jsonl",
+  "gold_ledger_sha256": "1d8c2da815bfda0e53d8c89bb932953de3296160cbafc311c752b8509d2eacfc",
+  "scoring": "scoring.py",
+  "scoring_sha256": "930c9a6fd1e7201ba226bb72e897b397f07f7b721336be8bf994e6a40874010b",
+  "case_count": 19,
+  "mutation_policy": "Create eval_v3 after L0; never edit v2 corpus, gold, or scoring."
+}

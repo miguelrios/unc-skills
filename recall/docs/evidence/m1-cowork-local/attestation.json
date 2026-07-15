@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "evidence_class": "synthetic-content-free",
+  "m1": {
+    "focused_tests_passed": 8,
+    "full_suite_tests_passed": 189,
+    "full_suite_tests_failed": 0,
+    "initial_records_acked": 2,
+    "unchanged_replay_records_acked": 0,
+    "unchanged_replay_records_deduplicated": 2,
+    "append_records_acked": 1,
+    "changed_revision_records_acked": 1,
+    "missing_file_tombstones": 0
+  },
+  "privacy_boundary": {
+    "planted_secret_classes": 5,
+    "planted_secret_matches_in_scrub_request": 0,
+    "planted_secret_matches_in_scrub_spool": 0,
+    "planted_secret_matches_in_drop_request": 0,
+    "planted_secret_matches_in_drop_spool": 0,
+    "private_inputs_used_as_evidence": 0,
+    "real_transcripts_in_fixture": 0
+  },
+  "source_boundary": {
+    "eligible_record_classes": 2,
+    "excluded_record_classes": 7,
+    "ambient_metadata_files_read": 0,
+    "attachment_bodies_read": 0,
+    "implicit_tombstones": 0
+  }
+}

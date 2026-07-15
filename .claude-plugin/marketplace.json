@@ -33,6 +33,12 @@
       "description": "Indexed search over Claude Code + Codex session history — find, continue, repeat, or skill-ify prior work"
     },
     {
+      "name": "recap",
+      "source": "./recap",
+      "version": "0.1.0",
+      "description": "Evidence-backed end-to-end comprehension of one exact coding-agent session."
+    },
+    {
       "name": "tether",
       "source": "./tether",
       "version": "0.1.2",
