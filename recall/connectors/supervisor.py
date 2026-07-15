@@ -9,7 +9,7 @@ import re
 import secrets
 import sqlite3
 import stat
-import time
+import time  # noqa: F401 - retained as a test seam proving tick() never reads wall time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping

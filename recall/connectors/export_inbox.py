@@ -295,7 +295,7 @@ class ExportInboxConnector:
                         raise ExportInboxError("export contains an invalid message")
                     node_messages[node_id] = _required_string(message.get("id"), "message id")
             pending: list[tuple[str, str, dict[str, Any], str | None]] = []
-            for node_id, node in mapping.items():
+            for _node_id, node in mapping.items():
                 message = node.get("message")
                 if message is None:
                     continue

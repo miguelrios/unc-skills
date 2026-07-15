@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import io
 import json
-import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock

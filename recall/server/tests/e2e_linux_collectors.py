@@ -5,7 +5,6 @@ import json
 import os
 import sqlite3
 import ssl
-import statistics
 import time
 import urllib.parse
 import urllib.request

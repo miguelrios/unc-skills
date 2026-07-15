@@ -907,7 +907,7 @@ def search(args) -> int:
         return 1 if "C" in legs else 0
 
     grouped = {}
-    for row, score, matched, legs, informative_count, has_rare_anchor in search_rows(conn, args):
+    for row, score, matched, legs, informative_count, _has_rare_anchor in search_rows(conn, args):
         tier = chunk_tier(legs)
         item = grouped.setdefault(row["session_id"],
                                   {"row": row, "best": (score, matched, legs, informative_count),
@@ -1255,7 +1255,7 @@ def export_root_for(path: Path, harness: str) -> Path:
     try:
         path.resolve().relative_to(root)
     except ValueError:
-        raise ValueError("session target is outside the configured harness root")
+        raise ValueError("session target is outside the configured harness root") from None
     return root
 
 

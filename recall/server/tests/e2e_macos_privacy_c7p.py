@@ -6,7 +6,6 @@ import argparse
 import json
 import shutil
 import sys
-import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -72,10 +71,6 @@ def main() -> None:
             token = tokens[(harness, mode)]
             policy = PrivacyPolicy(mode=mode)
             client = BrainClient(
-                endpoint=args.endpoint, token=token, source_id=source_id,
-                principal_id="owner", visibility="private",
-            )
-            memory = MemoryClient(
                 endpoint=args.endpoint, token=token, source_id=source_id,
                 principal_id="owner", visibility="private",
             )
