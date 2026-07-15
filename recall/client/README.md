@@ -107,7 +107,9 @@ and meaning require the optional agentic judge. It accepts only an HTTPS staging
 LiteLLM URL, a model alias, and a mode-0600 file containing a short-lived scoped
 virtual key as `{"virtual_key":"...","scope":"recall-privacy-judge",`
 `"expires_at":"...Z"}`; provider-direct URLs, wrong scopes, and expired files are
-rejected. Never give it the LiteLLM master
+rejected. Set `RECALL_PRIVACY_JUDGE_ALLOWED_BASE_URL` from the trusted deployment
+environment to the exact approved router base URL; the requested judge URL must
+match it exactly. Never give it the LiteLLM master
 key. Judge failure defaults to `drop`; `ignore` is an explicit availability-over-
 privacy choice. The judge sees the text being classified, so enable it only with
 informed consent and a router retention policy you accept.

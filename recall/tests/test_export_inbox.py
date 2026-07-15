@@ -30,14 +30,22 @@ class FakeBrain:
     def ingest(self, events):
         self.calls += 1
         receipts = []
+        inserted = duplicates = 0
         for event in events:
             key = (event["source_id"], event["native_id"], event["content_sha256"])
-            self.events[key] = event
+            if key in self.events:
+                duplicates += 1
+            else:
+                self.events[key] = event
+                inserted += 1
             receipts.append(f"recall://{event['source_id']}/{event['native_id']}?rev=1")
         if self.fail_after_commit:
             self.fail_after_commit = False
             raise OSError("synthetic lost acknowledgement with private payload")
-        return {"status": "committed", "receipts": receipts, "inserted": len(events)}
+        return {
+            "status": "committed", "receipts": receipts, "inserted": inserted,
+            "duplicate_events": duplicates, "replay": False,
+        }
 
 
 class ExportInboxTest(unittest.TestCase):

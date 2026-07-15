@@ -181,6 +181,51 @@ class ConnectorRunnerTest(unittest.TestCase):
         self.assertEqual(second["deduplicated"], 1)
         runner.close()
 
+    def test_rejected_or_malformed_ack_never_advances_or_purges(self) -> None:
+        def invalid_brain(overrides):
+            class InvalidBrain:
+                def ingest(self, events):
+                    event = events[0]
+                    acknowledgement = {
+                        "status": "committed",
+                        "inserted": 1,
+                        "duplicate_events": 0,
+                        "receipts": [
+                            f"recall://{event['source_id']}/{event['native_id']}?rev=1"
+                        ],
+                        "replay": False,
+                    }
+                    acknowledgement.update(overrides)
+                    return acknowledgement
+            return InvalidBrain()
+
+        cases = (
+            {"status": "rejected"},
+            {"receipts": ["not-a-receipt"]},
+            {"inserted": 0},
+            {"replay": "false"},
+        )
+        for index, overrides in enumerate(cases):
+            with self.subTest(overrides=overrides):
+                connector = SyntheticConnector({None: ConnectorPage(
+                    records=(record(f"invalid-{index}", "must remain pending"),),
+                    next_cursor="next", has_more=False,
+                )})
+                runner = ConnectorRunner(
+                    connector=connector,
+                    brain=invalid_brain(overrides),
+                    spool_path=Path(self.temporary.name) / f"invalid-{index}.db",
+                )
+                with self.assertRaisesRegex(ConnectorRunError, "brain_invalid_acknowledgement"):
+                    runner.run_once()
+                self.assertFalse(runner.doctor()["checkpointed"])
+                self.assertEqual(runner.doctor()["pending"], 1)
+                self.assertEqual(
+                    runner.db.execute("SELECT count(*) FROM acknowledged_records").fetchone()[0],
+                    0,
+                )
+                runner.close()
+
     def test_changed_content_and_tombstone_ingest_but_old_versions_stay_suppressed(self) -> None:
         connector = SyntheticConnector({
             None: ConnectorPage(

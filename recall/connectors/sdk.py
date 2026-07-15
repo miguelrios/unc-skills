@@ -92,6 +92,34 @@ def _native_sha256(source_id: str, native_id: str) -> str:
     return hashlib.sha256(f"{source_id}\0{native_id}".encode()).hexdigest()
 
 
+def _validate_acknowledgement(value: Any, events: list[dict[str, Any]]) -> None:
+    if not isinstance(value, dict) or value.get("status") != "committed":
+        raise ConnectorRunError("brain_invalid_acknowledgement")
+    inserted = value.get("inserted")
+    duplicates = value.get("duplicate_events")
+    replay = value.get("replay")
+    receipts = value.get("receipts")
+    if (
+        type(inserted) is not int
+        or type(duplicates) is not int
+        or inserted < 0
+        or duplicates < 0
+        or inserted + duplicates != len(events)
+        or type(replay) is not bool
+        or not isinstance(receipts, list)
+        or len(receipts) != len(events)
+    ):
+        raise ConnectorRunError("brain_invalid_acknowledgement")
+    for receipt, event in zip(receipts, events, strict=True):
+        prefix = f"recall://{event['source_id']}/{event['native_id']}?rev="
+        if (
+            not isinstance(receipt, str)
+            or not receipt.startswith(prefix)
+            or not re.fullmatch(r"[1-9][0-9]*", receipt.removeprefix(prefix))
+        ):
+            raise ConnectorRunError("brain_invalid_acknowledgement")
+
+
 def _strict_private_file(path: Path, *, label: str, max_bytes: int | None = None,
                          read_data: bool = True) -> bytes:
     path = Path(path)
@@ -481,13 +509,11 @@ class ConnectorRunner:
         except Exception:
             self._record_error("brain_unavailable")
             raise ConnectorRunError("brain_unavailable") from None
-        if not isinstance(acknowledgement, dict):
+        try:
+            _validate_acknowledgement(acknowledgement, events)
+        except ConnectorRunError:
             self._record_error("brain_invalid_acknowledgement")
-            raise ConnectorRunError("brain_invalid_acknowledgement")
-        receipts = acknowledgement.get("receipts", [])
-        if len(receipts) != len(events):
-            self._record_error("brain_invalid_acknowledgement")
-            raise ConnectorRunError("brain_invalid_acknowledgement")
+            raise
         replayed = int(bool(self._get_meta("last_error_code") == "brain_unavailable"))
         with self.db:
             acknowledged_at = time.time()
