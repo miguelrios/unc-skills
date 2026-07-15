@@ -1072,7 +1072,7 @@ def local_session_export(args) -> int:
                         state["metadata"][key] = clean_text(str(value))
                 native_id = f"{session_file_key(path, Path(state['root']), state['harness'])}-{line_start:016x}"
                 start_index = next_skip if line_start == state["byte_offset"] else 0
-                for item_index, (occurred_at, surface, text, _entities) in enumerate(parsed):
+                for item_index, (occurred_at, surface, text, entities) in enumerate(parsed):
                     if item_index < start_index:
                         continue
                     evidence_id, text_sha = session_evidence_id(
@@ -1091,6 +1091,16 @@ def local_session_export(args) -> int:
                         "receipt": None,
                         "projector_version": PARSER_VERSION,
                     }
+                    safe_entities = [
+                        {"kind": kind, "value": clean_text(str(value))}
+                        for kind, value in entities
+                    ]
+                    if safe_entities:
+                        item["entities"] = safe_entities
+                    if surface in {"tool_input", "tool_output"} and len(text) >= (
+                        MAX_TOOL_INPUT if surface == "tool_input" else MAX_TOOL_OUTPUT
+                    ):
+                        item["possibly_truncated"] = True
                     if len(returned) == args.limit:
                         next_byte, next_skip, found_extra = line_start, item_index, True
                         break

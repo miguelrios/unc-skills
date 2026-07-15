@@ -203,6 +203,20 @@ class RecallEngineTest(unittest.TestCase):
         self.assertIn("redacted", rendered.lower())
         self.assertIn("safe", rendered)
 
+    def test_session_export_redacts_secret_shaped_native_tool_entity(self):
+        secret = "Z" * 40
+        session = self.claude / "sensitive-tool.jsonl"
+        session.write_text(json.dumps({
+            "type": "assistant", "timestamp": "2026-01-01T00:00:00Z",
+            "message": {"content": [{
+                "type": "tool_use", "name": "api_key=" + secret, "input": {"path": "safe.txt"},
+            }]},
+        }) + "\n")
+        page = json.loads(self.cli("session-export", "--target", str(session)))
+        rendered = json.dumps(page)
+        self.assertNotIn(secret, rendered)
+        self.assertIn("redacted", rendered.lower())
+
     def test_ambiguous_current_error_uses_content_free_ranked_receipts(self):
         session = self.claude / "candidate-secret-token-value.jsonl"
         session.write_text(json.dumps({"type": "user", "message": {"content": "private"}}) + "\n")
