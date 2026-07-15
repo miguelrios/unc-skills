@@ -33,8 +33,17 @@ class RecallEngineTest(unittest.TestCase):
         self.codex = self.root / "codex"
         self.claude.mkdir(); self.codex.mkdir()
         self.db = self.root / "state/index.db"
-        self.old_env = {key: os.environ.get(key) for key in ("RECALL_CLAUDE_ROOT", "RECALL_CODEX_ROOT", "RECALL_DB")}
-        os.environ.update(RECALL_CLAUDE_ROOT=str(self.claude), RECALL_CODEX_ROOT=str(self.codex), RECALL_DB=str(self.db))
+        self.old_env = {key: os.environ.get(key) for key in (
+            "RECALL_CLAUDE_ROOT", "RECALL_CODEX_ROOT", "RECALL_DB", "RECALL_SESSION_CURSOR_DB",
+            "RECALL_EXPORT_SOURCE_ID", "CODEX_THREAD_ID", "CLAUDE_SESSION_ID",
+        )}
+        os.environ.update(
+            RECALL_CLAUDE_ROOT=str(self.claude), RECALL_CODEX_ROOT=str(self.codex), RECALL_DB=str(self.db),
+            RECALL_SESSION_CURSOR_DB=str(self.root / "state/session-cursors.db"),
+            RECALL_EXPORT_SOURCE_ID="claude:linux:test",
+        )
+        os.environ.pop("CODEX_THREAD_ID", None)
+        os.environ.pop("CLAUDE_SESSION_ID", None)
 
     def tearDown(self):
         for key, value in self.old_env.items():
@@ -100,6 +109,121 @@ class RecallEngineTest(unittest.TestCase):
         with p.open("a") as fh: fh.write("\n")
         self.cli("index")
         self.assertIn("later", self.cli("search", "later"))
+
+    def test_session_export_pages_1001_items_and_redacts_cursor_surface(self):
+        session = self.claude / "long.jsonl"
+        secret = "sk-" + "A" * 32
+        with session.open("w") as output:
+            for index in range(1001):
+                text = f"event {index}"
+                if index == 500:
+                    text = "api_key=" + secret
+                output.write(json.dumps({
+                    "type": "user", "timestamp": f"2026-01-01T00:{(index // 60) % 60:02d}:{index % 60:02d}Z",
+                    "message": {"content": text},
+                }) + "\n")
+        first = json.loads(self.cli("session-export", "--target", str(session), "--limit", "1000"))
+        self.assertFalse(first["page"]["complete"])
+        self.assertEqual(first["page"]["count"], 1000)
+        self.assertTrue(first["page"]["next_cursor"].startswith("rsl_"))
+        self.assertNotIn(secret, json.dumps(first))
+        self.assertNotIn(str(session), first["page"]["next_cursor"])
+        with session.open("a") as output:
+            output.write(json.dumps({
+                "type": "user", "timestamp": "2026-01-02T00:00:00Z",
+                "message": {"content": "appended after snapshot"},
+            }) + "\n")
+        second = json.loads(self.cli("session-export", "--cursor", first["page"]["next_cursor"], "--limit", "1000"))
+        replay = json.loads(self.cli("session-export", "--cursor", first["page"]["next_cursor"], "--limit", "1000"))
+        self.assertTrue(second["page"]["complete"])
+        self.assertFalse(second["session"]["source_snapshot_stable"])
+        self.assertEqual(second["page"]["count"], 1)
+        self.assertEqual(
+            [item["evidence_id"] for item in second["items"]],
+            [item["evidence_id"] for item in replay["items"]],
+        )
+        items = first["items"] + second["items"]
+        self.assertEqual([item["sequence"] for item in items], list(range(1001)))
+        self.assertEqual(len({item["evidence_id"] for item in items}), 1001)
+        self.assertEqual(first["session"]["boundary_receipt"], second["session"]["boundary_receipt"])
+        self.assertEqual((self.root / "state/session-cursors.db").stat().st_mode & 0o777, 0o600)
+
+    def test_session_export_cursor_store_rejects_symlink(self):
+        state = self.root / "state"
+        state.mkdir(mode=0o700, exist_ok=True)
+        target = state / "target.db"
+        target.write_text("unchanged")
+        target.chmod(0o600)
+        link = state / "cursor-link.db"
+        link.symlink_to(target)
+        os.environ["RECALL_SESSION_CURSOR_DB"] = str(link)
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            engine.export_cursor_connection()
+        self.assertEqual(target.read_text(), "unchanged")
+
+    def test_session_export_cursor_store_never_chmods_shared_parent(self):
+        shared = self.root / "shared"
+        shared.mkdir(mode=0o755)
+        shared.chmod(0o755)
+        before = shared.stat().st_mode & 0o777
+        os.environ["RECALL_SESSION_CURSOR_DB"] = str(shared / "cursor.db")
+        with self.assertRaisesRegex(ValueError, "0700"):
+            engine.export_cursor_connection()
+        self.assertEqual(shared.stat().st_mode & 0o777, before)
+        self.assertFalse((shared / "cursor.db").exists())
+
+    def test_session_export_marks_partial_record_and_current_codex_is_exact(self):
+        os.environ["RECALL_EXPORT_SOURCE_ID"] = "codex:linux:test"
+        thread = "12345678-1234-1234-1234-123456789abc"
+        session = self.codex / f"2026/01/01/rollout-2026-01-01T00-00-00-{thread}.jsonl"
+        session.parent.mkdir(parents=True)
+        session.write_text(
+            json.dumps({"timestamp": "2026-01-01T00:00:00Z", "type": "response_item", "payload": {
+                "role": "user", "content": [{"type": "input_text", "text": "exact current"}]}}) + "\n"
+            + '{"type":"response_item"'
+        )
+        os.environ["CODEX_THREAD_ID"] = thread
+        page = json.loads(self.cli("session-export", "--current"))
+        self.assertTrue(page["page"]["complete"])
+        self.assertTrue(page["session"]["source_partial_record"])
+        self.assertEqual(page["items"][0]["text"], "exact current")
+
+    def test_session_export_redacts_private_key_blocks_and_generic_key_assignments(self):
+        private_value = "Z" * 50
+        pem = "-----BEGIN " + "PRIVATE KEY-----\n" + ("Q" * 256) + "\n-----END " + "PRIVATE KEY-----"
+        session = self.claude / "sensitive.jsonl"
+        session.write_text(json.dumps({
+            "type": "user", "timestamp": "2026-01-01T00:00:00Z",
+            "message": {"content": "key=" + private_value + "\n" + pem + "\nsafe"},
+        }) + "\n")
+        page = json.loads(self.cli("session-export", "--target", str(session)))
+        rendered = json.dumps(page)
+        self.assertNotIn(private_value, rendered)
+        self.assertNotIn("Q" * 64, rendered)
+        self.assertIn("redacted", rendered.lower())
+        self.assertIn("safe", rendered)
+
+    def test_ambiguous_current_error_uses_content_free_ranked_receipts(self):
+        session = self.claude / "candidate-secret-token-value.jsonl"
+        session.write_text(json.dumps({"type": "user", "message": {"content": "private"}}) + "\n")
+        with self.assertRaises(ValueError) as raised:
+            engine.resolve_current_session()
+        message = str(raised.exception)
+        self.assertIn("ranked_candidate_receipts=", message)
+        self.assertNotIn(str(session), message)
+        self.assertNotIn("private", message)
+
+    def test_current_claude_identity_requires_exact_native_id(self):
+        session_id = "87654321-4321-4321-4321-cba987654321"
+        session = self.claude / "project" / f"{session_id}.jsonl"
+        session.parent.mkdir()
+        session.write_text(json.dumps({"type": "user", "message": {"content": "exact"}}) + "\n")
+        os.environ["CLAUDE_SESSION_ID"] = session_id
+        self.assertEqual(engine.resolve_current_session(), session.resolve())
+        duplicate = self.claude / f"duplicate-{session_id}.jsonl"
+        duplicate.write_text(session.read_text())
+        with self.assertRaisesRegex(ValueError, "resolved to 2"):
+            engine.resolve_current_session()
 
     def test_secret_redaction_tool_cap_and_fts_injection(self):
         secret = "sk-ABCDEFGHIJKLMNOPQRSTUVWX"
@@ -260,17 +384,17 @@ class RecallEngineTest(unittest.TestCase):
             engine.FTS_LEG_LIMIT = old_limit
 
     def test_identifier_token_leg_finds_raw_tool_output_without_entity(self):
-        token = "api-prod-6fcdc84dd4-mmjpj"
+        identifier = "identifier-prod-6fcdc84dd4-mmjpj"
         target = self.claude / "identifier-tool.jsonl"
         target.write_text(json.dumps({"type":"user", "timestamp":"2026-01-01T00:00:00Z",
                                       "message":{"content":"seed"}}) + "\n")
         self.cli("index")
         conn = engine.connect(self.db)
         session_id = conn.execute("select s.id from sessions s join files f on f.id=s.file_id where f.path like '%identifier-tool.jsonl'").fetchone()[0]
-        chunk_id = conn.execute("insert into chunks(session_id,ts,surface,text) values (?,?,?,?)", (session_id, 1, "tool_output", token)).lastrowid
-        conn.execute("insert into chunks_fts(rowid,text) values (?,?)", (chunk_id, token))
+        chunk_id = conn.execute("insert into chunks(session_id,ts,surface,text) values (?,?,?,?)", (session_id, 1, "tool_output", identifier)).lastrowid
+        conn.execute("insert into chunks_fts(rowid,text) values (?,?)", (chunk_id, identifier))
         conn.commit(); conn.close()
-        self.assertEqual(Path(self.cli("search", "which pod was failing " + token, "--paths").splitlines()[0]), target)
+        self.assertEqual(Path(self.cli("search", "which pod was failing " + identifier, "--paths").splitlines()[0]), target)
 
     def test_gate_keeps_fuzzy_best_with_two_long_terms(self):
         target = self.claude / "fuzzy-best.jsonl"
@@ -437,6 +561,22 @@ class RemoteHandler(BaseHTTPRequestHandler):
                 "occurred_at": "2026-01-01T00:00:00Z", "surface": "user",
                 "text": "remote prompt", "receipt": "recall://claude:linux/session:1?rev=1#item=0"
             }]})
+        elif self.path == "/v1/session-export":
+            self.send_json(200, {
+                "schema_version": "recall.session-export.v1",
+                "session": {
+                    "source_id": "claude:linux:test", "native_session_id": "claude-session-test",
+                    "harness": "claude", "boundary_receipt": "boundary-test",
+                    "projector_version": 1, "privacy_policy_version": "privacy-v1",
+                },
+                "items": [{
+                    "sequence": 0, "evidence_id": "rse_test", "event_native_id": "event-1",
+                    "item_ordinal": 0, "surface": "user", "text": "remote prompt",
+                    "text_sha256": hashlib.sha256(b"remote prompt").hexdigest(),
+                    "receipt": "recall://claude:linux:test/event-1?rev=1#item=0",
+                }],
+                "page": {"count": 1, "complete": True, "next_cursor": None, "page_receipt": "page-test"},
+            })
         elif self.path == "/v1/related":
             self.send_json(200, {"results": [{
                 "path": type(self).target_path, "overlap": 3,
@@ -542,6 +682,17 @@ class RemoteTransportTest(unittest.TestCase):
         doctor = self.call("doctor")[1]
         self.assertIn("OK remote", doctor)
         self.assertIn("projection_lag=0", doctor)
+
+    def test_remote_session_export_preserves_machine_contract(self):
+        code, output, error = self.call(
+            "session-export", "--target", RemoteHandler.target_path, "--limit", "500",
+        )
+        self.assertEqual((code, error), (0, ""))
+        page = json.loads(output)
+        self.assertEqual(page["items"][0]["evidence_id"], "rse_test")
+        request = RemoteHandler.requests[-1]
+        self.assertEqual(request["path"], "/v1/session-export")
+        self.assertEqual(request["body"], {"target": RemoteHandler.target_path, "limit": 500})
 
     def test_explicit_local_mode_is_config_only_rollback(self):
         self.seed_local()

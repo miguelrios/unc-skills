@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+import secrets
 import sqlite3
 import sys
 import time
@@ -25,8 +26,16 @@ MAX_TOOL_INPUT = 2048
 MAX_TOOL_OUTPUT = 4096
 FTS_LEG_LIMIT = 400
 SECRET_RE = re.compile(
-    r"[\"']?(?:api[_-]?key|token|secret|password|bearer|authorization)[\"']?\s*[=:]\s*[\"']?(?:Bearer\s+)?\S{12,}|"
-    r"sk-[A-Za-z0-9]{20,}|xox[bp]-|ghs_[A-Za-z0-9]{20,}|AKIA[A-Z0-9]{16}", re.I)
+    r"[\"']?(?:api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|token|secret|password|bearer|authorization|\bkey)"
+    r"[\"']?\s*[=:]\s*[\"']?(?:Bearer\s+)?\S{12,}|"
+    r"sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|"
+    r"(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}|AKIA[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{30,}",
+    re.I,
+)
+PRIVATE_KEY_RE = re.compile(
+    r"-----BEGIN (?P<label>[A-Z0-9 ]*PRIVATE KEY)-----.*?-----END (?P=label)-----",
+    re.DOTALL,
+)
 PATH_RE = re.compile(r"(?<!\w)(?:/[A-Za-z0-9_@.+~#%=-]+(?:/[A-Za-z0-9_@.+~#%=-]+)+|(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_@.+~#%=-]+\.[A-Za-z0-9]+)")
 URL_RE = re.compile(r"https?://[^\s<>\]\[\"']+")
 UUID_RE = re.compile(r"\b[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\b|\b[0-9a-fA-F]{8}\b")
@@ -34,7 +43,7 @@ STOPWORDS = frozenset("""the a an of in on we i was which that did do how what w
 and or not it its this those these from by at as is are were be been about into over after before
 one ones our my me you us your their them they he she his her can could would should will just
 than then if else""".split())
-REMOTE_READ_COMMANDS = frozenset({"search", "show", "related", "doctor"})
+REMOTE_READ_COMMANDS = frozenset({"search", "show", "related", "doctor", "session-export"})
 REMOTE_WRITE_COMMANDS = frozenset({"put", "delete"})
 
 
@@ -202,6 +211,22 @@ def remote_execute(args) -> tuple[str, dict]:
             if not args.prompts or chunk.get("surface") == "user"
         ]
         return ("\n".join(lines) + ("\n" if lines else ""), {"remote_chunks": chunks})
+    if args.command == "session-export":
+        target = args.target
+        if args.current:
+            target = str(resolve_current_session())
+        body = {"limit": args.limit}
+        if args.cursor:
+            body["cursor"] = args.cursor
+        else:
+            body["target"] = target
+        response = remote_request("POST", "/v1/session-export", body)
+        if response.get("schema_version") != "recall.session-export.v1":
+            raise RemoteRecallError("session export response has unsupported schema")
+        return json.dumps(response, sort_keys=True, default=str) + "\n", {"remote_session_export": {
+            "boundary_receipt": response.get("session", {}).get("boundary_receipt"),
+            "page_receipt": response.get("page", {}).get("page_receipt"),
+        }}
     if args.command == "related":
         response = remote_request("POST", "/v1/related", {
             "cwd": args.cwd or str(Path.cwd()), "branch": args.branch, "limit": args.limit,
@@ -321,6 +346,7 @@ def iso(value: str | None) -> float | None:
 def clean_text(value) -> str:
     if not isinstance(value, str):
         value = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    value = PRIVATE_KEY_RE.sub("[redacted-private-key-block]", value)
     return "\n".join("[redacted-secret-line]" if SECRET_RE.search(line) else line
                      for line in value.splitlines())
 
@@ -887,6 +913,237 @@ def direct_chunks(path: Path):
     return parse_file(path, harness)[0]
 
 
+def session_evidence_id(source_id: str, session_id: str, event_native_id: str,
+                        ordinal: int, text: str) -> tuple[str, str]:
+    text_sha = hashlib.sha256(text.encode()).hexdigest()
+    identity = f"{source_id}\0{session_id}\0{event_native_id}\0{ordinal}\0{text_sha}"
+    return "rse_" + hashlib.sha256(identity.encode()).hexdigest(), text_sha
+
+
+def resolve_current_session() -> Path:
+    claude, codex, _ = paths()
+    thread_id = os.environ.get("CODEX_THREAD_ID")
+    if thread_id:
+        matches = [path for path in codex.rglob(f"*{thread_id}*.jsonl") if path.name.startswith("rollout-")]
+        if len(matches) != 1:
+            raise ValueError(f"current Codex identity resolved to {len(matches)} sessions")
+        return matches[0].resolve()
+    claude_id = os.environ.get("CLAUDE_SESSION_ID")
+    if claude_id:
+        matches = [path for path in claude.rglob(f"*{claude_id}*.jsonl") if path.is_file()]
+        if len(matches) != 1:
+            raise ValueError(f"current Claude identity resolved to {len(matches)} sessions")
+        return matches[0].resolve()
+    candidates = sorted(
+        (path for path in claude.rglob("*.jsonl") if path.is_file()),
+        key=lambda path: path.stat().st_mtime_ns,
+        reverse=True,
+    )[:5]
+    receipts = [
+        hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:16] + "@" + str(path.stat().st_mtime_ns)
+        for path in candidates
+    ]
+    raise ValueError(
+        "current session identity unavailable; pass --target explicitly"
+        + ("; ranked_candidate_receipts=" + ",".join(receipts) if receipts else "")
+    )
+
+
+def export_cursor_connection() -> sqlite3.Connection:
+    configured = Path(os.environ.get(
+        "RECALL_SESSION_CURSOR_DB", Path.home() / ".recall/session-export-cursors.db",
+    )).expanduser()
+    configured.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if configured.parent.stat().st_mode & 0o077:
+        raise ValueError("session export cursor directory must have mode 0700")
+    if configured.is_symlink():
+        raise ValueError("session export cursor database must not be a symlink")
+    if not configured.exists():
+        descriptor = os.open(configured, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(descriptor)
+    elif configured.stat().st_mode & 0o077:
+        raise ValueError("session export cursor database must have mode 0600")
+    connection = sqlite3.connect(configured)
+    connection.row_factory = sqlite3.Row
+    connection.execute("""
+        CREATE TABLE IF NOT EXISTS cursors(
+          token_sha256 TEXT PRIMARY KEY,path TEXT NOT NULL,root TEXT NOT NULL,
+          harness TEXT NOT NULL,source_id TEXT NOT NULL,session_id TEXT NOT NULL,
+          snapshot_size INTEGER NOT NULL,snapshot_fingerprint TEXT NOT NULL,
+          byte_offset INTEGER NOT NULL,item_skip INTEGER NOT NULL,sequence INTEGER NOT NULL,
+          metadata_json TEXT NOT NULL,created_at REAL NOT NULL,expires_at REAL NOT NULL)
+    """)
+    connection.execute("DELETE FROM cursors WHERE expires_at<=?", (time.time(),))
+    connection.commit()
+    return connection
+
+
+def export_root_for(path: Path, harness: str) -> Path:
+    claude, codex, _ = paths()
+    root = (codex if harness == "codex" else claude).resolve()
+    try:
+        path.resolve().relative_to(root)
+    except ValueError:
+        raise ValueError("session target is outside the configured harness root")
+    return root
+
+
+def session_file_key(path: Path, root: Path, harness: str) -> str:
+    relative = str(path.resolve().relative_to(root.resolve()))
+    return hashlib.sha256((harness + "\x1f" + relative).encode()).hexdigest()[:24]
+
+
+def save_local_export_cursor(connection: sqlite3.Connection, state: dict) -> str:
+    token = "rsl_" + secrets.token_urlsafe(32)
+    connection.execute(
+        """INSERT INTO cursors(token_sha256,path,root,harness,source_id,session_id,
+             snapshot_size,snapshot_fingerprint,byte_offset,item_skip,sequence,metadata_json,
+             created_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (hashlib.sha256(token.encode()).hexdigest(), state["path"], state["root"], state["harness"],
+         state["source_id"], state["session_id"], state["snapshot_size"],
+         state["snapshot_fingerprint"], state["byte_offset"], state["item_skip"], state["sequence"],
+         json.dumps(state["metadata"], sort_keys=True), time.time(), time.time() + 3600),
+    )
+    connection.commit()
+    return token
+
+
+def local_session_export(args) -> int:
+    connection = export_cursor_connection()
+    try:
+        if args.cursor:
+            if not re.fullmatch(r"rsl_[A-Za-z0-9_-]{32,128}", args.cursor):
+                raise ValueError("invalid local session export cursor")
+            row = connection.execute(
+                "SELECT * FROM cursors WHERE token_sha256=? AND expires_at>?",
+                (hashlib.sha256(args.cursor.encode()).hexdigest(), time.time()),
+            ).fetchone()
+            if not row:
+                raise ValueError("local session export cursor not found or expired")
+            state = dict(row)
+            state["metadata"] = json.loads(state.pop("metadata_json"))
+        else:
+            path = resolve_current_session() if args.current else Path(args.target).expanduser().resolve()
+            if not path.is_file():
+                raise ValueError("session target does not exist")
+            harness = "codex" if path.name.startswith("rollout-") else "claude"
+            root = export_root_for(path, harness)
+            file_key = session_file_key(path, root, harness)
+            session_id = f"{harness}-session-{file_key}"
+            source_id = os.environ.get("RECALL_EXPORT_SOURCE_ID") or os.environ.get("RECALL_SOURCE_ID") or f"local:{harness}"
+            stat = path.stat()
+            state = {
+                "path": str(path), "root": str(root), "harness": harness,
+                "source_id": source_id, "session_id": session_id,
+                "snapshot_size": stat.st_size, "snapshot_fingerprint": fingerprint(path, stat.st_size),
+                "byte_offset": 0, "item_skip": 0, "sequence": 0,
+                "metadata": {"harness": harness, "original_path": clean_text(str(path))},
+            }
+
+        path = Path(state["path"])
+        if not path.is_file():
+            raise ValueError("session source disappeared after cursor creation")
+        parser_function = claude_record if state["harness"] == "claude" else codex_record
+        returned = []
+        next_byte = int(state["byte_offset"])
+        next_skip = int(state["item_skip"])
+        partial_record = False
+        found_extra = False
+        with path.open("rb") as source:
+            source.seek(next_byte)
+            while source.tell() < state["snapshot_size"]:
+                line_start = source.tell()
+                line = source.readline(state["snapshot_size"] - line_start)
+                if not line.endswith(b"\n"):
+                    partial_record = True
+                    next_byte = line_start
+                    break
+                line_end = source.tell()
+                try:
+                    content = json.loads(line)
+                    if not isinstance(content, dict):
+                        raise ValueError
+                except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+                    next_byte, next_skip = line_end, 0
+                    continue
+                parsed, metadata = parser_function(content)
+                for key, value in metadata.items():
+                    if value is not None:
+                        state["metadata"][key] = clean_text(str(value))
+                native_id = f"{session_file_key(path, Path(state['root']), state['harness'])}-{line_start:016x}"
+                start_index = next_skip if line_start == state["byte_offset"] else 0
+                for item_index, (occurred_at, surface, text, _entities) in enumerate(parsed):
+                    if item_index < start_index:
+                        continue
+                    evidence_id, text_sha = session_evidence_id(
+                        state["source_id"], state["session_id"], native_id, item_index, text,
+                    )
+                    item = {
+                        "sequence": state["sequence"] + len(returned),
+                        "evidence_id": evidence_id,
+                        "event_native_id": native_id,
+                        "item_ordinal": item_index,
+                        "occurred_at": occurred_at,
+                        "role": surface,
+                        "surface": surface,
+                        "text": text,
+                        "text_sha256": text_sha,
+                        "receipt": None,
+                        "projector_version": PARSER_VERSION,
+                    }
+                    if len(returned) == args.limit:
+                        next_byte, next_skip, found_extra = line_start, item_index, True
+                        break
+                    returned.append(item)
+                if found_extra:
+                    break
+                next_byte, next_skip = line_end, 0
+
+        current_stable = (
+            path.stat().st_size == state["snapshot_size"]
+            and fingerprint(path, state["snapshot_size"]) == state["snapshot_fingerprint"]
+        )
+        next_cursor = None
+        if found_extra:
+            next_state = {**state, "byte_offset": next_byte, "item_skip": next_skip,
+                          "sequence": state["sequence"] + len(returned)}
+            next_cursor = save_local_export_cursor(connection, next_state)
+        boundary = hashlib.sha256(
+            f"{state['source_id']}\0{state['session_id']}\0{state['snapshot_fingerprint']}".encode()
+        ).hexdigest()
+        result = {
+            "schema_version": "recall.session-export.v1",
+            "session": {
+                "source_id": state["source_id"],
+                "native_session_id": state["session_id"],
+                "harness": state["harness"],
+                "started_at": state["metadata"].get("started_at"),
+                "ended_at": state["metadata"].get("ended_at"),
+                "metadata": state["metadata"],
+                "projector_version": PARSER_VERSION,
+                "privacy_policy_version": "local-clean-text-v1",
+                "boundary_receipt": boundary,
+                "children_included": False,
+                "source_snapshot_stable": current_stable,
+                "source_partial_record": partial_record,
+            },
+            "items": returned,
+            "page": {
+                "count": len(returned),
+                "complete": not found_extra,
+                "next_cursor": next_cursor,
+                "page_receipt": hashlib.sha256(
+                    "\n".join(item["evidence_id"] for item in returned).encode()
+                ).hexdigest(),
+                "snapshot_size": state["snapshot_size"],
+            },
+        }
+        print(json.dumps(result, sort_keys=True))
+        return 0
+    finally:
+        connection.close()
+
+
 def show(args) -> int:
     _, _, db = paths(); target = Path(args.target).expanduser()
     if not target.exists() and args.target.isdigit() and db.exists():
@@ -1005,6 +1262,13 @@ def main(argv=None) -> int:
     p = sub.add_parser("index"); p.add_argument("--rebuild", action="store_true"); p.set_defaults(func=ingest)
     p = sub.add_parser("search"); p.add_argument("query"); p.add_argument("--since"); p.add_argument("--until"); p.add_argument("--cwd"); p.add_argument("--branch"); p.add_argument("--harness", choices=("claude","codex")); p.add_argument("--limit", type=int, default=10); p.add_argument("--paths", action="store_true"); p.set_defaults(func=search)
     p = sub.add_parser("show"); p.add_argument("target"); p.add_argument("--around"); p.add_argument("--prompts", action="store_true"); p.add_argument("--tail", type=int, default=0, help="print only the last N chunks"); p.set_defaults(func=show)
+    p = sub.add_parser("session-export", help="page one exact redacted session snapshot as JSON")
+    target = p.add_mutually_exclusive_group(required=True)
+    target.add_argument("--current", action="store_true")
+    target.add_argument("--target")
+    target.add_argument("--cursor")
+    p.add_argument("--limit", type=int, default=1000)
+    p.set_defaults(func=local_session_export)
     p = sub.add_parser("related"); p.add_argument("--cwd"); p.add_argument("--branch"); p.add_argument("--limit", type=int, default=10); p.add_argument("--mains-only", action="store_true", help="exclude subagent transcripts"); p.add_argument("--fast", action="store_true", help="tight caps for the session-start hook budget"); p.set_defaults(func=related)
     p = sub.add_parser("doctor"); p.set_defaults(func=doctor)
     p = sub.add_parser("put"); p.add_argument("text", nargs="?"); p.add_argument("--source-id"); p.add_argument("--principal-id"); p.add_argument("--visibility", choices=("private", "shared")); p.add_argument("--provenance-uri", default="manual://recall_put")

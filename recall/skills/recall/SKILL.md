@@ -194,6 +194,30 @@ python3 scripts/recall.py show <path> --tail 30                    # the session
 Pass the session file path from the search output. Never cat a transcript —
 sessions reach 80 MB; `show` parses and prints only what you asked for.
 
+## Export one exact session for another skill
+
+Use the machine-readable session export when `/recap` or another evidence consumer needs complete,
+ordered coverage rather than a human window:
+
+```bash
+python3 scripts/recall.py session-export --current --limit 1000
+python3 scripts/recall.py session-export --target <exact-path-or-receipt> --limit 1000
+python3 scripts/recall.py session-export --cursor <opaque-next-cursor> --limit 1000
+```
+
+Each JSON page contains stable evidence IDs, redacted text and digests, native session/parent
+identity, projection/privacy versions, a boundary receipt, a content-free page receipt, and
+`complete` plus `next_cursor`. Consume pages in sequence and accept completeness only on the final
+page. Local cursors are stored owner-private under `~/.recall`; central cursors are random,
+source-authorized server state. Neither cursor encodes transcript text or a path.
+
+`--current` resolves Codex only through exact `CODEX_THREAD_ID`, and Claude through exact
+`CLAUDE_SESSION_ID` when the harness exposes it. Otherwise it fails closed with content-free ranked
+candidate receipts; pass the exact path found by Recall rather than guessing. Child and continuation
+sessions are separate boundaries by default. For local/central evidence-ID parity, collectors set
+the source ID; a standalone local export uses `RECALL_EXPORT_SOURCE_ID` when configured and an
+explicit `local:<harness>` source otherwise.
+
 ## Related work (no query needed)
 
 ```bash

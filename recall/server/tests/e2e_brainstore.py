@@ -88,7 +88,7 @@ def main() -> None:
     store = BrainStore(dsn)
     store.migrate()
     with store.connect() as conn:
-        conn.execute("TRUNCATE chunks,items,sessions,projection_watermarks,source_events,ingest_batches,source_grants,sources,dead_letters,audit_events RESTART IDENTITY CASCADE")
+        conn.execute("TRUNCATE session_export_cursors,chunks,items,sessions,projection_watermarks,source_events,ingest_batches,source_grants,sources,dead_letters,audit_events RESTART IDENTITY CASCADE")
 
     with tempfile.TemporaryDirectory(prefix="recall-c1-e2e-") as tmp:
         log_path = Path(tmp) / "server.log"
@@ -396,6 +396,55 @@ def main() -> None:
                     assert status == 200
                     assert [item["text_redacted"] for item in resolved["items"]] == [item["text_redacted"] for item in expected]
 
+                export_page = store.session_export(target=fixture_ack["receipts"][0], limit=1000)
+                assert export_page and export_page["page"]["complete"]
+                projected = [item for _env, expected in fixture_records for item in expected]
+                expected_evidence = []
+                for (env, expected) in fixture_records:
+                    for item in expected:
+                        expected_evidence.append(store._session_evidence_id(
+                            env["source_id"], env["native_parent_id"], env["native_id"],
+                            item["ordinal"], item["text_redacted"],
+                        )[0])
+                assert [item["evidence_id"] for item in export_page["items"]] == expected_evidence
+                assert len(export_page["items"]) == len(projected)
+
+            # A 1,001-item snapshot cannot claim completion on page one. The opaque
+            # cursor replays the same final page and remains source-authorized.
+            paged_source = "codex:session-export"
+            paged = [
+                make_envelope(
+                    f"page-{index:04d}",
+                    {"text": "[REDACTED]" if index == 500 else f"page event {index}"},
+                    source=paged_source, parent="session-export-1001",
+                )
+                for index in range(1001)
+            ]
+            paged_ack = store.ingest("session-export-1001", paged)[0]
+            first_page = store.session_export(target=paged_ack["receipts"][0], limit=1000)
+            assert first_page and not first_page["page"]["complete"]
+            assert len(first_page["items"]) == 1000
+            cursor = first_page["page"]["next_cursor"]
+            assert cursor.startswith("rsc_") and "session-export" not in cursor
+            appended = make_envelope(
+                "page-1001", {"text": "appended after snapshot"},
+                source=paged_source, parent="session-export-1001",
+            )
+            store.ingest("session-export-appended", [appended])
+            final_page = store.session_export(target=None, cursor=cursor, limit=1000)
+            replay_page = store.session_export(target=None, cursor=cursor, limit=1000)
+            assert final_page["page"]["complete"] and len(final_page["items"]) == 1
+            assert final_page["session"]["source_snapshot_stable"] is False
+            assert [item["evidence_id"] for item in final_page["items"]] == [
+                item["evidence_id"] for item in replay_page["items"]
+            ]
+            assert store.session_export(
+                target=paged_ack["receipts"][0], limit=1000, authorized_source="source:alpha",
+            ) is None
+            assert store.session_export(
+                target=None, cursor=cursor, limit=1000, authorized_source="source:alpha",
+            ) is None
+
             # Secrets remain canonical in raw evidence but never enter projections/API/audit/logs.
             secret = "supersecretvalue123456"
             secret_env = make_envelope("session-secret:turn-1", {"text": f"safe\nAuthorization={secret}\nend"}, parent="session-secret")
@@ -403,6 +452,9 @@ def main() -> None:
             assert status == 201
             status, sanitized = request(base, "GET", "/v1/receipts/resolve?" + urllib.parse.urlencode({"receipt": secret_ack["receipts"][0]}))
             assert status == 200 and secret not in json.dumps(sanitized) and "[REDACTED]" in json.dumps(sanitized)
+            secret_export = store.session_export(target=secret_ack["receipts"][0], limit=1000)
+            assert secret_export and secret not in json.dumps(secret_export, default=str)
+            assert "[REDACTED]" in json.dumps(secret_export, default=str)
             assert request(base, "GET", "/v1/raw/events")[0] == 404
             with store.connect() as conn:
                 assert secret in json.dumps(conn.execute("SELECT envelope FROM source_events WHERE native_id='session-secret:turn-1'").fetchone()["envelope"])
@@ -432,6 +484,7 @@ def main() -> None:
             assert status == 201 and tomb_ack["receipts"][0].endswith("?rev=3")
             status, old_after_delete = request(base, "GET", "/v1/receipts/resolve?" + urllib.parse.urlencode({"receipt": ack["receipts"][0]}))
             assert status == 404 and old_after_delete == {"error": "not found"}
+            assert store.session_export(target=ack["receipts"][0], limit=1000) is None
             before = {}
             for receipt, _ in fixture_receipts:
                 before[receipt] = request(base, "GET", "/v1/receipts/resolve?" + urllib.parse.urlencode({"receipt": receipt}))[1]

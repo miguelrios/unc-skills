@@ -193,6 +193,24 @@ class CollectorTest(unittest.TestCase):
         self.assertEqual(payloads[0]["source_id"], "claude:linux:test")
         collector.close()
 
+    def test_private_key_block_and_generic_key_never_enter_spool(self) -> None:
+        private_value = "Z" * 50
+        private_block = (
+            "-----BEGIN " + "PRIVATE KEY-----\n" + ("Q" * 256)
+            + "\n-----END " + "PRIVATE KEY-----"
+        )
+        (self.root / "session.jsonl").write_text(json.dumps({
+            "type": "user", "timestamp": "2026-07-12T22:00:00Z",
+            "message": {"content": "key=" + private_value + "\n" + private_block + "\nsafe"},
+        }) + "\n")
+        collector = self.collector()
+        collector.scan()
+        rendered = json.dumps(collector.pending_envelopes())
+        self.assertNotIn(private_value, rendered)
+        self.assertNotIn("Q" * 64, rendered)
+        self.assertIn("safe", rendered)
+        collector.close()
+
     def test_benign_token_count_key_is_not_treated_as_a_credential(self) -> None:
         (self.root / "session.jsonl").write_text(json.dumps({
             "type": "event_msg", "timestamp": "2026-07-12T22:00:00Z",

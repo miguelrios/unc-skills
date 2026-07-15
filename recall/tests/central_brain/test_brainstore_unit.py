@@ -75,6 +75,18 @@ class EnvelopeContractTest(unittest.TestCase):
     def test_redaction_does_not_use_semantic_matching(self) -> None:
         self.assertEqual(redact_text("a harmless discussion about password rotation"), "a harmless discussion about password rotation")
 
+    def test_redaction_removes_private_key_blocks_and_generic_key_assignments(self) -> None:
+        private_value = "Z" * 50
+        private_block = (
+            "-----BEGIN " + "PRIVATE KEY-----\n" + ("Q" * 256)
+            + "\n-----END " + "PRIVATE KEY-----"
+        )
+        redacted = redact_text("safe\nkey=" + private_value + "\n" + private_block + "\nend")
+        self.assertNotIn(private_value, redacted)
+        self.assertNotIn("Q" * 64, redacted)
+        self.assertIn("safe", redacted)
+        self.assertIn("end", redacted)
+
     def test_partial_probes_prefer_structural_anchors_and_are_bounded(self) -> None:
         probes = partial_lexical_probes(
             ["foreign-key", "violation", "check_result", "agent_instance_id"],

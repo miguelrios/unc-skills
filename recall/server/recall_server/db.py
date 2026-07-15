@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
 import re
 import secrets
@@ -752,6 +751,191 @@ class BrainStore:
                     values,
                 ).fetchall()
             return {"chunks": [dict(row) for row in rows], "truncated": not around and not tail and len(rows) == 1000}
+
+    @staticmethod
+    def _session_evidence_id(source_id: str, session_id: str, event_native_id: str,
+                             ordinal: int, text: str) -> tuple[str, str]:
+        text_sha = hashlib.sha256(text.encode()).hexdigest()
+        identity = f"{source_id}\0{session_id}\0{event_native_id}\0{ordinal}\0{text_sha}"
+        return "rse_" + hashlib.sha256(identity.encode()).hexdigest(), text_sha
+
+    def session_export(self, *, target: str | None, cursor: str | None = None,
+                       limit: int = 1000, authorized_source: str | None = None) -> dict | None:
+        """Return one immutable, authorization-scoped page of an exact session snapshot."""
+        if not 1 <= limit <= 1000:
+            raise ValueError("limit must be between 1 and 1000")
+        if bool(target) == bool(cursor):
+            raise ValueError("provide exactly one of target or cursor")
+        with self.connect() as conn:
+            conn.execute("DELETE FROM session_export_cursors WHERE expires_at <= now()")
+            if cursor:
+                if not re.fullmatch(r"rsc_[A-Za-z0-9_-]{32,128}", cursor):
+                    raise ValueError("invalid session export cursor")
+                cursor_sha = hashlib.sha256(cursor.encode()).hexdigest()
+                state = conn.execute(
+                    """SELECT * FROM session_export_cursors
+                       WHERE token_sha256=%s AND expires_at>now()
+                         AND (%s::text IS NULL OR source_id=%s)""",
+                    (cursor_sha, authorized_source, authorized_source),
+                ).fetchone()
+                if not state:
+                    return None
+                source_id = state["source_id"]
+                session_id = state["session_native_id"]
+                snapshot_max = state["snapshot_max_item_id"]
+                snapshot_at = state["snapshot_at"]
+                after_native = state["after_event_native_id"]
+                after_ordinal = state["after_ordinal"]
+                after_item_id = state["after_item_id"]
+                after_sequence = state["after_sequence"]
+            else:
+                assert target is not None
+                if target.startswith("recall://"):
+                    event_part = target.split("#", 1)[0]
+                    try:
+                        base, revision = event_part.rsplit("?rev=", 1)
+                        source_id, native_id = base.removeprefix("recall://").split("/", 1)
+                        int(revision)
+                    except (ValueError, TypeError):
+                        raise ValueError("invalid receipt")
+                    identity = conn.execute(
+                        """SELECT source_id,COALESCE(native_parent_id,native_id) AS session_native_id
+                           FROM source_events event WHERE source_id=%s AND native_id=%s AND revision=%s
+                             AND (%s::text IS NULL OR source_id=%s)
+                             AND event.kind!='tombstone'
+                             AND NOT EXISTS (
+                               SELECT 1 FROM source_events later
+                               WHERE later.source_id=event.source_id
+                                 AND later.native_id=event.native_id
+                                 AND later.revision>event.revision
+                                 AND later.is_tombstone)""",
+                        (source_id, native_id, int(revision), authorized_source, authorized_source),
+                    ).fetchone()
+                else:
+                    identity = conn.execute(
+                        """SELECT source_id,COALESCE(native_parent_id,native_id) AS session_native_id
+                           FROM source_events event WHERE envelope #>> '{provenance,original_path}'=%s
+                             AND (%s::text IS NULL OR source_id=%s)
+                             AND event.kind!='tombstone'
+                             AND NOT EXISTS (
+                               SELECT 1 FROM source_events later
+                               WHERE later.source_id=event.source_id
+                                 AND later.native_id=event.native_id
+                                 AND later.revision>event.revision
+                                 AND later.is_tombstone)
+                           ORDER BY id DESC LIMIT 1""",
+                        (target, authorized_source, authorized_source),
+                    ).fetchone()
+                if not identity:
+                    return None
+                source_id = identity["source_id"]
+                session_id = identity["session_native_id"]
+                snapshot = conn.execute(
+                    """SELECT COALESCE(max(id),0) AS max_id,now() AS snapshot_at FROM items
+                       WHERE source_id=%s AND session_native_id=%s""",
+                    (source_id, session_id),
+                ).fetchone()
+                snapshot_max = snapshot["max_id"]
+                snapshot_at = snapshot["snapshot_at"]
+                after_native, after_ordinal, after_item_id, after_sequence = "", -1, 0, 0
+
+            session = conn.execute(
+                """SELECT source_id,native_id,harness,started_at,ended_at,metadata,projector_version
+                   FROM sessions WHERE source_id=%s AND native_id=%s
+                     AND (%s::text IS NULL OR source_id=%s)""",
+                (source_id, session_id, authorized_source, authorized_source),
+            ).fetchone()
+            if not session:
+                return None
+            rows = conn.execute(
+                """SELECT i.id,i.event_native_id,i.ordinal,i.occurred_at,i.role,i.surface,
+                          i.text_redacted,i.receipt,i.projector_version
+                   FROM items i
+                   WHERE i.source_id=%s AND i.session_native_id=%s AND i.id<=%s
+                     AND (i.deleted_at IS NULL OR i.deleted_at>%s)
+                     AND (i.event_native_id,i.ordinal,i.id)>(%s,%s,%s)
+                     AND NOT EXISTS (
+                       SELECT 1 FROM items newer
+                       WHERE newer.source_id=i.source_id
+                         AND newer.session_native_id=i.session_native_id
+                         AND newer.event_native_id=i.event_native_id
+                         AND newer.ordinal=i.ordinal
+                         AND newer.id>i.id AND newer.id<=%s
+                         AND (newer.deleted_at IS NULL OR newer.deleted_at>%s)
+                     )
+                   ORDER BY i.event_native_id,i.ordinal,i.id LIMIT %s""",
+                (source_id, session_id, snapshot_max, snapshot_at,
+                 after_native, after_ordinal, after_item_id, snapshot_max, snapshot_at, limit + 1),
+            ).fetchall()
+            has_more = len(rows) > limit
+            page_rows = rows[:limit]
+            items = []
+            for index, row in enumerate(page_rows, after_sequence):
+                evidence_id, text_sha = self._session_evidence_id(
+                    source_id, session_id, row["event_native_id"], row["ordinal"], row["text_redacted"],
+                )
+                items.append({
+                    "sequence": index,
+                    "evidence_id": evidence_id,
+                    "event_native_id": row["event_native_id"],
+                    "item_ordinal": row["ordinal"],
+                    "occurred_at": row["occurred_at"],
+                    "role": row["role"],
+                    "surface": row["surface"],
+                    "text": row["text_redacted"],
+                    "text_sha256": text_sha,
+                    "receipt": row["receipt"],
+                    "projector_version": row["projector_version"],
+                })
+            next_cursor = None
+            if has_more:
+                last = page_rows[-1]
+                next_cursor = "rsc_" + secrets.token_urlsafe(32)
+                conn.execute(
+                    """INSERT INTO session_export_cursors(
+                         token_sha256,source_id,session_native_id,snapshot_max_item_id,snapshot_at,
+                         after_event_native_id,after_ordinal,after_item_id,after_sequence,expires_at)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,now()+interval '1 hour')""",
+                    (hashlib.sha256(next_cursor.encode()).hexdigest(), source_id, session_id,
+                     snapshot_max, snapshot_at, last["event_native_id"], last["ordinal"], last["id"],
+                     after_sequence + len(page_rows)),
+                )
+            metadata = session["metadata"] or {}
+            current_snapshot = conn.execute(
+                """SELECT COALESCE(max(id),0) AS max_id FROM items
+                   WHERE source_id=%s AND session_native_id=%s""",
+                (source_id, session_id),
+            ).fetchone()
+            source_snapshot_stable = current_snapshot["max_id"] == snapshot_max
+            boundary = hashlib.sha256(f"{source_id}\0{session_id}\0{snapshot_max}".encode()).hexdigest()
+            page_receipt = hashlib.sha256(
+                "\n".join(item["evidence_id"] for item in items).encode()
+            ).hexdigest()
+            return {
+                "schema_version": "recall.session-export.v1",
+                "session": {
+                    "source_id": source_id,
+                    "native_session_id": session_id,
+                    "harness": session["harness"],
+                    "started_at": session["started_at"],
+                    "ended_at": session["ended_at"],
+                    "metadata": metadata,
+                    "projector_version": session["projector_version"],
+                    "privacy_policy_version": metadata.get("privacy_policy_version", "unknown"),
+                    "boundary_receipt": boundary,
+                    "children_included": False,
+                    "source_snapshot_stable": source_snapshot_stable,
+                },
+                "items": items,
+                "page": {
+                    "count": len(items),
+                    "complete": not has_more,
+                    "next_cursor": next_cursor,
+                    "page_receipt": page_receipt,
+                    "snapshot_at": snapshot_at,
+                    "snapshot_max_item_id": snapshot_max,
+                },
+            }
 
     def related(self, *, cwd: str | None, branch: str | None, limit: int = 10,
                 mains_only: bool = False, fast: bool = False,
