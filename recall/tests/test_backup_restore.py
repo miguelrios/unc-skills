@@ -30,16 +30,12 @@ class BackupPublicationTest(unittest.TestCase):
             docker.write_text(
                 """#!/bin/sh
 set -eu
-mount=''
-for argument in "$@"; do
-  case "$argument" in *:/backup) mount=${argument%:/backup};; esac
-done
-test -n "$mount"
+case "$*" in *':/backup'*) exit 5;; esac
 case "$*" in *--snapshot=00000001-00000001-1*) :;; *) exit 3;; esac
-printf partial > "$mount/brain.dump"
+printf partial
 touch "$BACKUP_CONTROL_DIR/partial"
 while test ! -e "$BACKUP_CONTROL_DIR/continue"; do sleep 0.02; done
-printf complete-new-dump > "$mount/brain.dump"
+printf complete-new-dump
 """
             )
             docker.chmod(0o755)
@@ -79,7 +75,7 @@ esac
                 (control / "continue").touch()
                 stdout, stderr = process.communicate(timeout=5)
                 self.assertEqual(process.returncode, 0, stderr)
-                self.assertEqual((backup / "brain.dump").read_bytes(), b"complete-new-dump")
+                self.assertEqual((backup / "brain.dump").read_bytes(), b"partialcomplete-new-dump")
                 manifest = json.loads((backup / "manifest.json").read_text())
                 self.assertTrue(manifest["dump_sha256"])
                 self.assertEqual(manifest["database_snapshot"], "00000001-00000001-1")

@@ -78,8 +78,8 @@ SQL
     case "$database_snapshot" in ''|*[!A-Fa-f0-9-]*) echo "invalid exported database snapshot" >&2; exit 1;; esac
     source_fingerprint=$(fingerprint "$RECALL_DATABASE_URL" "$database_snapshot")
     newest_epoch=$(snapshot_newest_epoch "$RECALL_DATABASE_URL" "$database_snapshot")
-    docker run --rm --network host -v "$stage:/backup" "$TOOLS_IMAGE" \
-      pg_dump "$RECALL_DATABASE_URL" --snapshot="$database_snapshot" --format=custom --no-owner --file=/backup/brain.dump
+    docker run --rm --network host "$TOOLS_IMAGE" \
+      pg_dump "$RECALL_DATABASE_URL" --snapshot="$database_snapshot" --format=custom --no-owner >"$stage/brain.dump"
     printf 'release\n' >&9
     wait "$snapshot_pid"
     snapshot_pid=''
