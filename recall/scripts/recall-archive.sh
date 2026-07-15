@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 archive_root=${HOME}/archives
 log_file=${archive_root}/archive.log
@@ -62,6 +63,8 @@ case ${1-} in
 esac
 
 mkdir -p "$archive_root/manifests" || fail setup "cannot create archive directories"
+chmod 700 "$archive_root" "$archive_root/manifests" \
+  || fail setup "cannot secure archive directories"
 labels=(projects sessions todos shell-snapshots)
 sources=("$HOME/.claude/projects" "$HOME/.codex/sessions" "$HOME/.claude/todos" "$HOME/.claude/shell-snapshots")
 dests=("$archive_root/claude-transcripts/projects" "$archive_root/codex-sessions" "$archive_root/claude-todos" "$archive_root/claude-shell-snapshots")
@@ -109,4 +112,3 @@ done
 printf ']}\n' >>"$manifest" || fail manifest "cannot finish $manifest"
 printf '%s ok sources=%d files=%d bytes=%d samples_ok=%s\n' "$(utc_now)" "$source_count" "$total_files" "$total_bytes" "$samples_ok" >>"$log_file" || fail log "cannot write $log_file"
 if [[ $samples_ok != true ]]; then fail samples "one or more archive samples did not match"; fi
-

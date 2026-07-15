@@ -6,7 +6,6 @@ import json
 import os
 import platform
 import re
-import ssl
 import stat
 import urllib.parse
 import urllib.request
@@ -22,6 +21,7 @@ except ModuleNotFoundError:  # installed bundle imports sibling package
     from ..collector.collector import canonical_json, sanitize
 
 from privacy.policy import PrivacyPolicy, summarize_receipts
+from privacy.transport import open_no_redirect
 
 
 FORBIDDEN_PRIVATE_PATHS = (
@@ -347,7 +347,7 @@ class BrainClient:
             method=method or ("POST" if data is not None else "GET"),
             headers=headers,
         )
-        with urllib.request.urlopen(request, timeout=60, context=ssl.create_default_context()) as response:
+        with open_no_redirect(request, timeout=60) as response:
             return json.loads(response.read())
 
     def ingest(self, events: list[dict]) -> dict:

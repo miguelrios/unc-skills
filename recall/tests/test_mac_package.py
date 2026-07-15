@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
+import io
 import json
 import subprocess
 import sys
@@ -8,10 +10,16 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 RECALL_ROOT = Path(__file__).resolve().parents[1]
 BUILDER = RECALL_ROOT / "scripts" / "build_macos_package.py"
+SPEC = importlib.util.spec_from_file_location("recall_macos_builder", BUILDER)
+builder = importlib.util.module_from_spec(SPEC)
+assert SPEC.loader
+sys.modules[SPEC.name] = builder
+SPEC.loader.exec_module(builder)
 
 
 class MacPackageTest(unittest.TestCase):
@@ -115,6 +123,23 @@ class MacPackageTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("runtime artifact", result.stderr)
         self.assertFalse((self.root / "tampered.tar.gz").exists())
+
+    def test_runtime_download_stops_at_pinned_byte_count(self) -> None:
+        lock = json.loads(self.runtime_lock.read_text())
+        lock["artifact"]["bytes"] = 4
+
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                self.close()
+
+        destination = self.root / "oversized-runtime.tar.gz"
+        with mock.patch.object(builder.urllib.request, "urlopen", return_value=Response(b"12345")):
+            with self.assertRaisesRegex(ValueError, "pinned byte count"):
+                builder.download_runtime(lock, destination)
+        self.assertLessEqual(destination.stat().st_size, 4)
 
     def test_wrong_target_and_missing_license_are_rejected(self) -> None:
         lock = json.loads(self.runtime_lock.read_text())

@@ -22,7 +22,7 @@ def main() -> None:
     backfill_entities.add_argument("--batch-size", type=int, default=5000)
     backfill_entities.add_argument("--max-batches", type=int)
     sub.add_parser("export")
-    create_token = sub.add_parser("token-create"); create_token.add_argument("name"); create_token.add_argument("--source"); create_token.add_argument("--scopes", default="read,write"); create_token.add_argument("--output", help="write the one-time plaintext credential to a new mode-0600 file")
+    create_token = sub.add_parser("token-create"); create_token.add_argument("name"); create_token.add_argument("--source"); create_token.add_argument("--scopes", default="read,write"); create_token.add_argument("--output", required=True, help="write the one-time plaintext credential to a new mode-0600 file")
     revoke_token = sub.add_parser("token-revoke"); revoke_token.add_argument("name")
     source_profile = sub.add_parser("source-profile-set")
     source_profile.add_argument("source_id")
@@ -45,14 +45,11 @@ def main() -> None:
         for envelope in store.export_raw(): print(json.dumps(envelope, sort_keys=True))
     elif args.command == "token-create":
         credential = store.create_collector_token(args.name, args.source, [scope.strip() for scope in args.scopes.split(",") if scope.strip()])
-        if args.output:
-            payload = (json.dumps(credential, sort_keys=True) + "\n").encode()
-            descriptor = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(descriptor, "wb") as output:
-                output.write(payload)
-            print(json.dumps({key: value for key, value in credential.items() if key != "token"}, sort_keys=True))
-        else:
-            print(json.dumps(credential, sort_keys=True))
+        payload = (json.dumps(credential, sort_keys=True) + "\n").encode()
+        descriptor = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(payload)
+        print(json.dumps({key: value for key, value in credential.items() if key != "token"}, sort_keys=True))
     elif args.command == "token-revoke":
         print(json.dumps({"revoked": store.revoke_collector_token(args.name)}))
     elif args.command == "source-profile-set":

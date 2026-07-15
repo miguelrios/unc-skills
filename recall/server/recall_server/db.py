@@ -790,7 +790,8 @@ class BrainStore:
                 after_item_id = state["after_item_id"]
                 after_sequence = state["after_sequence"]
             else:
-                assert target is not None
+                if target is None:
+                    raise ValueError("session export target is required")
                 if target.startswith("recall://"):
                     event_part = target.split("#", 1)[0]
                     try:

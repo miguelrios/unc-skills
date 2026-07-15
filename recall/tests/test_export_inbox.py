@@ -311,6 +311,15 @@ class ExportInboxTest(unittest.TestCase):
         self.assertEqual(connector.exports(), [])
         self.assertFalse(self.spool.exists())
 
+    def test_oversized_export_is_rejected_before_reading_or_cataloging(self) -> None:
+        oversized = self.inbox / "oversized.json"
+        oversized.write_bytes(b"[" + b" " * 32 + b"]")
+        with mock.patch("connectors.export_inbox.MAX_EXPORT_BYTES", 32):
+            connector = self.connector()
+            with self.assertRaisesRegex(ExportInboxError, "size limit"):
+                connector.pull(None)
+            self.assertEqual(connector.exports(), [])
+
 
 if __name__ == "__main__":
     unittest.main()

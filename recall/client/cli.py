@@ -529,7 +529,11 @@ def main() -> None:
             privacy=privacy,
         )
         try:
-            result = {"scan": collector.scan(), "flush": collector.flush(), "doctor": collector.doctor()}
+            result = {
+                "scan": collector.scan(),
+                "flush": collector.flush(),
+                "doctor": collector.doctor(include_dead_letters=False),
+            }
         finally:
             collector.close()
     elif args.command == "cowork-local-sync":

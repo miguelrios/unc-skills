@@ -5,6 +5,7 @@ import logging
 import os
 import socket
 import socketserver
+import stat
 import struct
 import threading
 import time
@@ -48,6 +49,17 @@ class Handler(BaseHTTPRequestHandler):
             # The database work may have completed after a bounded client left.
             # Never turn that ordinary transport event into a content-bearing traceback.
             return
+
+    def body_length(self, maximum: int) -> int | None:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except (TypeError, ValueError):
+            self.send_json(400, {"error": "invalid body size"})
+            return None
+        if length <= 0 or length > maximum:
+            self.send_json(413, {"error": "invalid body size"})
+            return None
+        return length
 
     def authenticate(self, scope: str) -> dict | None:
         if os.environ.get("RECALL_AUTH_REQUIRED", "0") != "1":
@@ -182,9 +194,9 @@ class Handler(BaseHTTPRequestHandler):
             if not principal:
                 return
             authorized_source = principal.get("source_id")
-            length = int(self.headers.get("Content-Length", "0"))
-            if length <= 0 or length > 256 * 1024:
-                self.send_json(413, {"error": "invalid body size"}); return
+            length = self.body_length(256 * 1024)
+            if length is None:
+                return
             try:
                 body = json.loads(self.rfile.read(length))
                 if path == "/v1/search":
@@ -225,9 +237,9 @@ class Handler(BaseHTTPRequestHandler):
         principal = self.require("write")
         if not principal:
             return
-        length = int(self.headers.get("Content-Length", "0"))
-        if length <= 0 or length > MAX_BODY_BYTES:
-            self.send_json(413, {"error": "invalid body size"}); return
+        length = self.body_length(MAX_BODY_BYTES)
+        if length is None:
+            return
         try:
             body = json.loads(self.rfile.read(length))
             if principal.get("kind") == "collector" and principal.get("source_id"):
@@ -260,6 +272,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(dsn: str, host: str = "127.0.0.1", port: int = 8788) -> None:
+    if os.environ.get("RECALL_AUTH_REQUIRED", "0") != "1" and host not in {
+        "127.0.0.1", "localhost", "::1",
+    }:
+        raise RuntimeError("authentication is required for a non-loopback TCP bind")
     Handler.store = BrainStore(dsn)
     server = ThreadingHTTPServer((host, port), Handler)
     LOG.info("brainstore listening host=%s port=%s", host, port)
@@ -273,9 +289,13 @@ class ThreadingUnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStre
 
 def serve_unix(dsn: str, path: str) -> None:
     try:
-        os.unlink(path)
+        existing = os.lstat(path)
     except FileNotFoundError:
         pass
+    else:
+        if not stat.S_ISSOCK(existing.st_mode):
+            raise RuntimeError("refusing to replace a non-socket Unix path")
+        os.unlink(path)
     Handler.store = BrainStore(dsn)
     server = ThreadingUnixHTTPServer(path, Handler)
     os.chmod(path, 0o600)

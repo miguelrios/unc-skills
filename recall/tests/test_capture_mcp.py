@@ -9,7 +9,7 @@ from unittest import mock
 
 from client import cli as client_cli
 from client.capture import CaptureClient, CaptureContractError
-from client.mcp import McpProtocolError, McpServer, serve
+from client.mcp import MAX_REQUEST_CHARS, McpProtocolError, McpServer, serve
 from privacy.policy import PrivacyPolicy
 
 
@@ -77,7 +77,7 @@ class CaptureContractTest(unittest.TestCase):
                 "replay": len(requests) > 1,
             })
 
-        with mock.patch("urllib.request.urlopen", side_effect=open_request):
+        with mock.patch("client.mac.open_no_redirect", side_effect=open_request):
             first = self.client().capture(capture)
             second = self.client().capture(capture)
         self.assertEqual(first["native_id"], second["native_id"])
@@ -100,14 +100,14 @@ class CaptureContractTest(unittest.TestCase):
                 "replay": False,
             })
 
-        with mock.patch("urllib.request.urlopen", side_effect=open_request):
+        with mock.patch("client.mac.open_no_redirect", side_effect=open_request):
             scrubbed = self.client(privacy=PrivacyPolicy(mode="scrub")).capture(capture)
         self.assertEqual(len(requests), 1)
         self.assertNotIn(canary, requests[0].data.decode())
         self.assertIn("Keep safe Cowork context", requests[0].data.decode())
         self.assertNotIn(canary, json.dumps(scrubbed))
 
-        with mock.patch("urllib.request.urlopen") as opened:
+        with mock.patch("client.mac.open_no_redirect") as opened:
             dropped = self.client(privacy=PrivacyPolicy(mode="drop")).capture(capture)
         opened.assert_not_called()
         self.assertEqual(dropped["status"], "privacy_filtered")
@@ -115,7 +115,7 @@ class CaptureContractTest(unittest.TestCase):
 
     def test_oversized_capture_fails_before_request(self) -> None:
         capture = {**self.rows()[0]["capture"], "body": "x" * 1_000_001}
-        with mock.patch("urllib.request.urlopen") as opened:
+        with mock.patch("client.mac.open_no_redirect") as opened:
             with self.assertRaises(CaptureContractError):
                 self.client().capture(capture)
         opened.assert_not_called()
@@ -217,7 +217,7 @@ class McpProtocolTest(unittest.TestCase):
         errors = io.StringIO()
         with mock.patch("sys.argv", arguments), mock.patch("sys.stderr", errors), \
              mock.patch("client.cli.load_file_token") as loaded, \
-             mock.patch("urllib.request.urlopen") as opened, \
+             mock.patch("client.mac.open_no_redirect") as opened, \
              self.assertRaises(SystemExit):
             client_cli.main()
         loaded.assert_not_called()
@@ -245,6 +245,17 @@ class McpProtocolTest(unittest.TestCase):
         self.assertNotIn(canary, output.getvalue())
         self.assertNotIn(canary, errors.getvalue())
 
+    def test_stdio_protocol_bounds_and_drains_oversized_requests(self) -> None:
+        output = io.StringIO()
+        requests = "x" * (MAX_REQUEST_CHARS + 1) + "\n" + json.dumps(self.initialize()) + "\n"
+        serve(
+            McpServer(FakeCapture(), capture_origin="synthetic-client"),
+            io.StringIO(requests), output, io.StringIO(),
+        )
+        responses = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(responses[0]["error"]["message"], "request_too_large")
+        self.assertIn("result", responses[1])
+
     def test_config_preview_is_reference_only_read_only_and_private_by_default(self) -> None:
         arguments = [
             "recall-brain", "mcp-config-preview",
@@ -258,7 +269,7 @@ class McpProtocolTest(unittest.TestCase):
         output = io.StringIO()
         with mock.patch("sys.argv", arguments), mock.patch("sys.stdout", output), \
              mock.patch("client.cli.load_keychain_token") as keychain, \
-             mock.patch("urllib.request.urlopen") as opened:
+             mock.patch("client.mac.open_no_redirect") as opened:
             client_cli.main()
         keychain.assert_not_called()
         opened.assert_not_called()

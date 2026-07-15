@@ -45,13 +45,13 @@ printf complete-new-dump > "$mount/brain.dump"
             docker.chmod(0o755)
             psql = binaries / "psql"
             psql.write_text(
-                """#!/bin/sh
+                r"""#!/bin/sh
 set -eu
 input=$(cat)
 case "$input" in
   *pg_export_snapshot*)
     echo '00000001-00000001-1'
-    fifo=$(printf '%s\n' "$input" | sed -n 's/.*< "\(.*\)"/\\1/p')
+    fifo=$(printf '%s\n' "$input" | sed -n 's/.*< "\(.*\)"/\1/p')
     read ignored < "$fifo"
     ;;
   *'SET TRANSACTION SNAPSHOT'*'max(created_at)'*) echo 0;;
@@ -84,6 +84,9 @@ esac
                 self.assertTrue(manifest["dump_sha256"])
                 self.assertEqual(manifest["database_snapshot"], "00000001-00000001-1")
                 self.assertIn('"schema_version": 1', stdout)
+                self.assertEqual(backup.stat().st_mode & 0o777, 0o700)
+                self.assertEqual((backup / "brain.dump").stat().st_mode & 0o777, 0o600)
+                self.assertEqual((backup / "manifest.json").stat().st_mode & 0o777, 0o600)
             finally:
                 (control / "continue").touch()
                 if process.poll() is None:

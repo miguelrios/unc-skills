@@ -6,13 +6,14 @@ from itertools import pairwise
 import json
 import os
 import re
-import ssl
 import stat
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
 from pathlib import Path
+
+from .transport import open_no_redirect
 
 
 POLICY_VERSION = "recall-privacy-v1"
@@ -185,7 +186,7 @@ class AgenticJudge:
             self.endpoint, data=body, method="POST",
             headers={"Authorization": "Bearer " + self.virtual_key, "Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(request, timeout=self.timeout, context=ssl.create_default_context()) as response:
+        with open_no_redirect(request, timeout=self.timeout) as response:
             outer = json.loads(response.read())
         content = outer["choices"][0]["message"]["content"]
         payload = json.loads(content)

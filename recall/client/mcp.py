@@ -10,6 +10,7 @@ from client.capture import CaptureContractError, ORIGIN, validate_capture
 
 PROTOCOL_VERSION = "2025-11-25"
 SUPPORTED_PROTOCOL_VERSIONS = {PROTOCOL_VERSION, "2025-06-18"}
+MAX_REQUEST_CHARS = 1_100_000
 
 
 class McpProtocolError(ValueError):
@@ -132,7 +133,19 @@ class McpServer:
 
 
 def serve(server: McpServer, input_stream: TextIO, output_stream: TextIO, error_stream: TextIO) -> None:
-    for line in input_stream:
+    while True:
+        line = input_stream.readline(MAX_REQUEST_CHARS + 1)
+        if line == "":
+            break
+        if len(line) > MAX_REQUEST_CHARS:
+            while line and not line.endswith("\n"):
+                line = input_stream.readline(MAX_REQUEST_CHARS + 1)
+            output_stream.write(json.dumps({
+                "jsonrpc": "2.0", "id": None,
+                "error": {"code": -32600, "message": "request_too_large"},
+            }, sort_keys=True, separators=(",", ":")) + "\n")
+            output_stream.flush()
+            continue
         if not line.strip():
             continue
         request_id = None

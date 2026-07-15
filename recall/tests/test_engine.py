@@ -11,6 +11,7 @@ import shutil
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -791,6 +792,18 @@ class RemoteHandler(BaseHTTPRequestHandler):
             self.send_json(404, {"error": "not found"})
 
 
+class RedirectOnlyHandler(BaseHTTPRequestHandler):
+    destination = ""
+
+    def log_message(self, *_args):
+        pass
+
+    def do_GET(self):
+        self.send_response(302)
+        self.send_header("Location", type(self).destination)
+        self.end_headers()
+
+
 class RemoteTransportTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -911,6 +924,36 @@ class RemoteTransportTest(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertIn("remote recall unavailable", err)
 
+    def test_remote_redirect_never_forwards_bearer_to_destination(self):
+        token_file = self.root / "redirect-token.json"
+        token_file.write_text(json.dumps({"token": "redirect-secret-token"}))
+        token_file.chmod(0o600)
+        os.environ["RECALL_TOKEN_FILE"] = str(token_file)
+        redirect = ThreadingHTTPServer(("127.0.0.1", 0), RedirectOnlyHandler)
+        RedirectOnlyHandler.destination = f"http://127.0.0.1:{self.server.server_port}/v1/doctor"
+        thread = threading.Thread(target=redirect.serve_forever, daemon=True)
+        thread.start()
+        RemoteHandler.requests = []
+        os.environ["RECALL_URL"] = f"http://127.0.0.1:{redirect.server_port}"
+        try:
+            code, output, error = self.call("doctor")
+            self.assertNotEqual(code, 0)
+            self.assertEqual(output, "")
+            self.assertIn("HTTP 302", error)
+            self.assertEqual(RemoteHandler.requests, [])
+        finally:
+            redirect.shutdown()
+            redirect.server_close()
+
+    def test_environment_url_is_validated_before_authority_or_network(self):
+        os.environ["RECALL_URL"] = "file:///tmp/not-http"
+        with mock.patch.object(engine, "_open_remote") as opened:
+            code, output, error = self.call("doctor")
+        self.assertNotEqual(code, 0)
+        self.assertEqual(output, "")
+        self.assertIn("remote URL is invalid", error)
+        opened.assert_not_called()
+
     def test_shadow_returns_local_and_records_receipt_level_comparison(self):
         self.seed_local(); os.environ["RECALL_MODE"] = "shadow"
         RemoteHandler.target_path = str(self.claude / "remote-other.jsonl")
@@ -950,6 +993,31 @@ class RemoteTransportTest(unittest.TestCase):
         code, _, err = self.call("doctor")
         self.assertEqual((code, err), (0, ""))
         self.assertEqual(RemoteHandler.requests[-1]["authorization"], "Bearer scoped-test-token")
+
+    def test_token_file_rejects_symlinks_and_oversized_content_without_network(self):
+        target = self.root / "actual-token.json"
+        target.write_text(json.dumps({"token": "private-synthetic-token"}))
+        target.chmod(0o600)
+        linked = self.root / "linked-token.json"
+        linked.symlink_to(target)
+        os.environ["RECALL_TOKEN_FILE"] = str(linked)
+        with mock.patch.object(engine, "_open_remote") as opened:
+            code, output, error = self.call("doctor")
+        self.assertNotEqual(code, 0)
+        self.assertEqual(output, "")
+        self.assertIn("regular file", error)
+        opened.assert_not_called()
+
+        oversized = self.root / "oversized-token.json"
+        oversized.write_bytes(b"{" + b" " * engine.MAX_TOKEN_FILE_BYTES + b"}")
+        oversized.chmod(0o600)
+        os.environ["RECALL_TOKEN_FILE"] = str(oversized)
+        with mock.patch.object(engine, "_open_remote") as opened:
+            code, output, error = self.call("doctor")
+        self.assertNotEqual(code, 0)
+        self.assertEqual(output, "")
+        self.assertIn("too large", error)
+        opened.assert_not_called()
 
     def test_private_default_client_config_enables_remote_and_env_overrides_it(self):
         token_file = self.root / "read-token.json"

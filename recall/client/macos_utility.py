@@ -165,12 +165,12 @@ def disable_source(name: str, *, launch_agents: Path, no_load: bool = False) -> 
         target = f"gui/{os.getuid()}/{spec.label}"
         try:
             subprocess.run(
-                ["launchctl", "bootout", target], check=False,
+                ["/bin/launchctl", "bootout", target], check=False,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
             for _ in range(100):
                 result = subprocess.run(
-                    ["launchctl", "print", target], check=False,
+                    ["/bin/launchctl", "print", target], check=False,
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
                 if result.returncode != 0:
