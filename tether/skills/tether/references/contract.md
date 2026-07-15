@@ -8,14 +8,18 @@ One bridge binds:
 
 - one source capability: `codex_session`, `claude_session`, `zellij_pane`, `hermes_session`, or `headless_run`;
 - one Slack workspace/channel/thread tuple;
-- one owner (`*` means any allowlisted operator);
+- one owner (`*` means any allowlisted operator and is the shared-channel default);
 - one idempotency key.
 
-An explicit run ID always creates `headless_run`, even inside Codex or Claude Code. Native sessions remain the source when those agents run inside Zellij; Zellij coordinates are retained only as origin metadata.
+An explicit run ID always creates `headless_run`, even inside Codex or Claude Code. Native sessions remain the source when those agents run inside Zellij, but the captured and fingerprinted live pane is their delivery endpoint.
 
 ## Inbound routing
 
-Resolve the exact persisted thread before bypassing Slack's mention gate. Then apply the global allowlist and per-bridge owner check. Fail closed at every missing field. Deduplicate by Slack message timestamp.
+Resolve the exact persisted thread before bypassing Slack's mention gate. Then apply the global allowlist and any explicit per-bridge owner restriction. Shared channels accept every allowlisted operator by default; use one owner only for an intentionally private bridge. Fail closed at every missing field. Deduplicate by Slack message timestamp.
+
+Socket Mode is the primary inbound transport. Tether also polls a bounded batch of recently active threads through Hermes's existing Slack client. Polled events re-enter the normal adapter and gateway pipeline; a persistent ingress ledger prevents duplicate execution across live delivery, polling, and gateway restarts. Polling never weakens workspace, channel, allowlist, or bridge-owner checks.
+
+Peer-agent collaboration is agentic. Hermes may admit peer messages in threads where the agent is participating; Tether applies the same configured transport policy during reply recovery and routes those turns to the Hermes conversation, never into a captured native coding session. Code handles identity, self-echo prevention, and deduplication. The agent decides from conversation context whether a response is warranted and returns exactly `NO_REPLY` when it is not; Hermes suppresses that marker before Slack delivery.
 
 Queue and serialize native replies per bridge. Strip synthetic Slack thread history before native resume because prior bridge turns already exist in the bound agent session. Terminate the whole continuation process group on cancellation or timeout.
 
@@ -23,7 +27,7 @@ Never forward the gateway's Slack credential environment to a native agent proce
 
 ## Outcomes
 
-Post native output back to the same Slack thread. For Zellij, capture an allowlisted agent command and its process fingerprint, recheck both before every delivery, inject the operator instruction into that exact pane, and require the pane agent to use the supplied bridge reply command. Never write into a shell or a pane whose process changed. Continue headless work as a durable Hermes conversation using the root report and thread history as context.
+Post native output back to the same Slack thread. When Claude or Codex has a captured Zellij pane, capture its allowlisted agent command and process fingerprint, recheck both before every delivery, inject the operator instruction into that exact pane, verify the text is visible, press Enter, and verify the same agent process remains active. Detached native resume is allowed only when no live pane was captured. Never write into a shell or a pane whose process changed. Continue headless work as a durable Hermes conversation using the root report and thread history as context.
 
 Display compact origin metadata in the root message without exposing full session IDs or absolute paths. Apply high-confidence credential redaction at Slack egress, sanitize stored and posted errors, and require agents to omit sensitive content that cannot be detected mechanically. Never route to a replacement session after a stale-source failure.
 

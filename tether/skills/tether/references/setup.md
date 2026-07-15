@@ -14,13 +14,19 @@ Use `--harness=codex` or `--harness=claude-code` when only one is installed.
 
 The command installs Tether, opens Hermes's own Slack setup, restarts or installs the gateway service when possible, and runs live readiness checks. Hermes generates the current Slack app manifest, including Socket Mode, Interactivity, events, scopes, and slash commands. Follow its prompts to create or update the Slack app and enter the bot/app tokens directly into Hermes.
 
-Slack's website remains the only manual boundary: create the app from Hermes's generated manifest, install it to the workspace, create the `connections:write` app token, and invite the bot to the desired channels.
+Setup explicitly enables the `tether` Hermes plugin. When it finds the pre-release `session-bridge` plugin, it disables that legacy plugin before restart so two reply hooks never share one bridge database.
+
+Slack's website remains the only manual boundary: create the app from Hermes's generated manifest, install it to the workspace, and create the `connections:write` app token. Keep the generated `channels:join` scope: Tether joins public destinations before posting so it can read their replies. Invite the bot to private channels explicitly.
 
 Completion criterion: `tether doctor` reports a private live broker, at least one authorized operator, and an installed runtime/plugin. A default home channel is optional; without one, pass `--channel` when notifying.
+
+Doctor distinguishes a copied-but-disabled plugin from the live Tether broker protocol and reports reply-ingress health. Socket Mode is the low-latency path. A bounded poll of recently active bridge threads is the recovery path for messages missed during websocket disconnects; it uses Hermes's existing Slack client, persists ingress IDs, and applies the same authorization before dispatch.
 
 ## Existing Hermes Slack setup
 
 Tether automatically reuses Hermes's `SLACK_ALLOWED_USERS`, `GATEWAY_ALLOWED_USERS`, and `SLACK_HOME_CHANNEL` runtime settings. Do not duplicate them in Tether config.
+
+For agent-to-agent collaboration, set `SLACK_ALLOW_BOTS=all` and set `TETHER_ALLOWED_BOT_USERS` to the comma-separated Slack member IDs of the peer agents that may participate. The explicit Tether allowlist is required: enabling Hermes bot traffic alone does not trust every workspace bot. Disable machine-generated busy acknowledgments with `display.busy_ack_enabled=false`, and give each agent the shared-thread policy from the Tether skill: use conversation context, respond only when useful, and return exactly `NO_REPLY` otherwise. Hermes already suppresses that intentional-silence marker. Restart the gateway and rerun `tether doctor` after changing the settings.
 
 The generated `${XDG_CONFIG_HOME:-~/.config}/tether/config.toml` is for optional overrides only:
 
@@ -53,3 +59,14 @@ Then run `hermes gateway setup`, start the gateway, and run `tether doctor`.
 Hermes and Tether update independently. After a Hermes update, rerun the one-command setup or package installer. It replaces only Tether code, preserves config and bridge state, restarts Hermes, and checks the Slack adapter compatibility surface. Never fall back to direct Slack calls when compatibility fails.
 
 Pin the Git reference to a release tag instead of `#main` when reproducible production installs matter.
+
+## Reply diagnostics
+
+Inspect a thread through the broker without exposing the Slack credential:
+
+```bash
+tether thread --channel C12345678 --thread-ts 1234567890.123456
+tether doctor
+```
+
+The thread command returns a minimal message view. Doctor must identify the active implementation as Tether and show either connected Socket Mode or a healthy polling fallback. If neither ingress path is healthy, restart or fix Hermes; never bypass Tether with a direct Slack token.
