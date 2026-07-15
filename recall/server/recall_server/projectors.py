@@ -11,11 +11,19 @@ from typing import Any
 from . import PROJECTOR_VERSION
 
 SECRET_RE = re.compile(
-    r"(?i)(api[_-]?key|token|secret|password|bearer|authorization)[\"']?\s*[=:]\s*[\"']?\S{8,}"
+    r"(?i)[\"']?(?:api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|token|secret|password|bearer|authorization|\bkey)"
+    r"[\"']?\s*[=:]\s*[\"']?(?:Bearer\s+)?\S{12,}|sk-[A-Za-z0-9_-]{20,}|"
+    r"xox[baprs]-[A-Za-z0-9-]{10,}|(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}|"
+    r"AKIA[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{30,}"
+)
+PRIVATE_KEY_RE = re.compile(
+    r"-----BEGIN (?P<label>[A-Z0-9 ]*PRIVATE KEY)-----.*?-----END (?P=label)-----",
+    re.DOTALL,
 )
 
 
 def redact_text(value: str) -> str:
+    value = PRIVATE_KEY_RE.sub("[REDACTED-PRIVATE-KEY]", value)
     return "\n".join("[REDACTED]" if SECRET_RE.search(line) else line for line in value.splitlines())
 
 
@@ -45,6 +53,8 @@ def content_sha256(envelope: dict) -> str:
 
 
 def validate_envelope(envelope: dict) -> dict:
+    if set(envelope) & {"source_profile", "source_family", "source_quality", "quality"}:
+        raise ValueError("source profile is host-controlled")
     required = (
         "schema_version", "source_id", "native_id", "kind", "occurred_at",
         "observed_at", "principal_id", "visibility", "content_type", "content",
@@ -72,10 +82,11 @@ def item_receipt(source_id: str, native_id: str, revision: int, ordinal: int) ->
 
 
 def projected_entities(engine, text: str, extra: list[tuple[str, str]] | None = None) -> list[dict]:
-    return [
-        {"kind": kind, "value": value, "normalized": value.casefold()}
-        for kind, value in engine.extract_entities(text, extra)
-    ]
+    values = []
+    for kind, value in engine.extract_entities(text, extra):
+        safe_value = redact_text(str(value))
+        values.append({"kind": kind, "value": safe_value, "normalized": safe_value.casefold()})
+    return values
 
 
 def partial_lexical_probes(informative: list[str], *, has_time_filter: bool) -> list[tuple[str, str, int]]:
@@ -143,12 +154,11 @@ def phrase_query_spec(probes: list[str]) -> tuple[str, str] | None:
 def project(envelope: dict, revision: int) -> tuple[list[dict], dict]:
     """Return sanitized items and session metadata for one canonical event."""
     kind = envelope["kind"]
-    session_id = envelope.get("native_parent_id") or envelope["native_id"]
     content = envelope["content"]
     items: list[dict] = []
     metadata: dict[str, Any] = {"projector_version": PROJECTOR_VERSION}
     provenance = envelope.get("provenance", {})
-    for key in ("original_path", "cwd", "branch", "slot", "harness"):
+    for key in ("original_path", "cwd", "branch", "slot", "harness", "privacy_policy_version"):
         if provenance.get(key) is not None:
             metadata[key] = redact_text(str(provenance[key]))
 

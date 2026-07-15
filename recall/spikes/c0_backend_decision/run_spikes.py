@@ -60,7 +60,6 @@ def native_postgres(dsn: str, profiles: dict) -> dict:
       payload jsonb, PRIMARY KEY(source_id,native_id));
     """
     _, setup = run(["psql", dsn, "-v", "ON_ERROR_STOP=1", "-q", "-c", sql])
-    payload = json.dumps(RECORDS[0])
     inserts = []
     for rec in RECORDS + [RECORDS[0]]:
         inserts.append("INSERT INTO c0_events VALUES (%s,%s,%s,%s,%s::jsonb) ON CONFLICT DO NOTHING;" % tuple("'" + str(x).replace("'", "''") + "'" for x in (rec["source_id"], rec["native_id"], rec["content"], rec["receipt"], json.dumps(rec))))

@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from collector.collector import Collector
+from privacy.policy import PrivacyPolicy
 
 
 def claude_line(text: str, timestamp: str = "2026-07-12T22:00:00Z") -> str:
@@ -119,6 +120,31 @@ class CollectorTest(unittest.TestCase):
         self.assertGreater(located["end_offset"], located["start_offset"])
         collector.close()
 
+    def test_process_death_after_remote_commit_before_local_ack_replays_exactly_once(self) -> None:
+        (self.root / "session.jsonl").write_text(claude_line("committed before local ack"))
+        collector = self.collector()
+        collector.scan()
+
+        def die_after_remote_commit(_acknowledgement) -> None:
+            raise RuntimeError("simulated death after remote commit before local ack")
+
+        collector._after_remote_commit = die_after_remote_commit
+        with self.assertRaisesRegex(RuntimeError, "after remote commit before local ack"):
+            collector.flush()
+        self.assertEqual(collector.doctor()["pending"], 1)
+        self.assertEqual(len(AckServer.batches), 1)
+        collector.close()
+
+        resumed = self.collector()
+        result = resumed.flush()
+        self.assertEqual(result["acked"], 1)
+        self.assertEqual(result["replayed_batches"], 1)
+        self.assertEqual(resumed.doctor()["pending"], 0)
+        self.assertEqual(resumed.doctor()["acked"], 1)
+        self.assertEqual(AckServer.requests, 2)
+        self.assertEqual(len(AckServer.batches), 1)
+        resumed.close()
+
     def test_append_queues_only_new_complete_records(self) -> None:
         transcript = self.root / "session.jsonl"
         transcript.write_text(claude_line("first"))
@@ -165,6 +191,128 @@ class CollectorTest(unittest.TestCase):
         self.assertIn("[NUL]", payloads[0]["content"]["message"]["content"])
         self.assertNotIn("notes.txt", rendered)
         self.assertEqual(payloads[0]["source_id"], "claude:linux:test")
+        collector.close()
+
+    def test_private_key_block_and_generic_key_never_enter_spool(self) -> None:
+        private_value = "Z" * 50
+        private_block = (
+            "-----BEGIN " + "PRIVATE KEY-----\n" + ("Q" * 256)
+            + "\n-----END " + "PRIVATE KEY-----"
+        )
+        (self.root / "session.jsonl").write_text(json.dumps({
+            "type": "user", "timestamp": "2026-07-12T22:00:00Z",
+            "message": {"content": "key=" + private_value + "\n" + private_block + "\nsafe"},
+        }) + "\n")
+        collector = self.collector()
+        collector.scan()
+        rendered = json.dumps(collector.pending_envelopes())
+        self.assertNotIn(private_value, rendered)
+        self.assertNotIn("Q" * 64, rendered)
+        self.assertIn("safe", rendered)
+        collector.close()
+
+    def test_benign_token_count_key_is_not_treated_as_a_credential(self) -> None:
+        (self.root / "session.jsonl").write_text(json.dumps({
+            "type": "event_msg", "timestamp": "2026-07-12T22:00:00Z",
+            "payload": {"type": "token_count", "info": {"total": 42}},
+        }) + "\n")
+        collector = Collector(
+            root=self.root, harness="claude", source_id="claude:linux:test",
+            spool_path=self.spool, endpoint=self.endpoint, token="test-token-not-a-secret",
+            privacy=PrivacyPolicy(mode="scrub"),
+        )
+        collector.scan()
+        rendered = json.dumps(collector.pending_envelopes())
+        self.assertIn("token_count", rendered)
+        self.assertIn('"total": 42', rendered)
+        collector.close()
+
+    def test_drop_never_writes_sensitive_record_to_spool_or_network(self) -> None:
+        canary = "synthetic-secret-drop-canary-91"
+        (self.root / "session.jsonl").write_text(
+            claude_line(f"api_key={canary}") + claude_line("safe neighbor survives")
+        )
+        collector = Collector(
+            root=self.root, harness="claude", source_id="claude:linux:test",
+            spool_path=self.spool, endpoint=self.endpoint, token="test-token-not-a-secret",
+            privacy=PrivacyPolicy(mode="drop"),
+        )
+        scan = collector.scan()
+        self.assertEqual(scan["records_queued"], 1)
+        self.assertEqual(scan["privacy"]["actions"], {"drop": 1, "keep": 1})
+        self.assertEqual(collector.db.execute("SELECT count(*) FROM outbox").fetchone()[0], 1)
+        self.assertNotIn(canary.encode(), self.spool.read_bytes())
+        self.assertEqual(collector.flush()["acked"], 1)
+        self.assertEqual(AckServer.requests, 1)
+        self.assertNotIn(canary, json.dumps(AckServer.received))
+        collector.close()
+
+    def test_scrubbed_canary_is_absent_from_spool_and_request(self) -> None:
+        canary = "synthetic-secret-scrub-canary-92"
+        (self.root / "session.jsonl").write_text(claude_line(f"keep context api_key={canary} after"))
+        collector = Collector(
+            root=self.root, harness="claude", source_id="claude:linux:test",
+            spool_path=self.spool, endpoint=self.endpoint, token="test-token-not-a-secret",
+            privacy=PrivacyPolicy(mode="scrub"),
+        )
+        scan = collector.scan()
+        self.assertEqual(scan["privacy"]["actions"], {"scrub": 1})
+        self.assertNotIn(canary.encode(), self.spool.read_bytes())
+        self.assertIn("keep context", json.dumps(collector.pending_envelopes()))
+        collector.flush()
+        self.assertNotIn(canary, json.dumps(AckServer.received))
+        collector.close()
+
+    def test_enabling_drop_compacts_sensitive_pending_bytes_from_legacy_spool(self) -> None:
+        canary = "synthetic-legacy-spool-canary-95"
+        (self.root / "session.jsonl").write_text(claude_line("legacy pending row"))
+        legacy = self.collector("http://127.0.0.1:1")
+        legacy.scan()
+        row = legacy.db.execute("SELECT id,envelope_json FROM outbox").fetchone()
+        envelope = json.loads(row["envelope_json"])
+        envelope["content"] = {"message": {"content": f"api_key={canary}"}}
+        legacy.db.execute("UPDATE outbox SET envelope_json=? WHERE id=?", (json.dumps(envelope), row["id"]))
+        legacy.db.commit()
+        legacy.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        legacy.close()
+        self.assertTrue(any(canary.encode() in artifact.read_bytes() for artifact in self.spool.parent.glob(self.spool.name + "*")))
+
+        protected = Collector(
+            root=self.root, harness="claude", source_id="claude:linux:test",
+            spool_path=self.spool, endpoint=self.endpoint, token="test-token-not-a-secret",
+            privacy=PrivacyPolicy(mode="drop"),
+        )
+        self.assertEqual(protected.db.execute("SELECT count(*) FROM outbox").fetchone()[0], 0)
+        self.assertEqual(protected.doctor()["privacy_mode"], "drop")
+        protected.close()
+        for artifact in self.spool.parent.glob(self.spool.name + "*"):
+            self.assertNotIn(canary.encode(), artifact.read_bytes())
+
+    def test_all_dropped_file_advances_local_committed_cursor_without_network(self) -> None:
+        (self.root / "session.jsonl").write_text(claude_line("api_key=synthetic-all-drop-canary-96"))
+        collector = Collector(
+            root=self.root, harness="claude", source_id="claude:linux:test",
+            spool_path=self.spool, endpoint=self.endpoint, token="test-token-not-a-secret",
+            privacy=PrivacyPolicy(mode="drop"),
+        )
+        collector.scan()
+        self.assertEqual(collector.doctor()["committed_files"], 1)
+        self.assertEqual(AckServer.requests, 0)
+        collector.close()
+
+    def test_selected_visibility_reaches_every_envelope(self) -> None:
+        (self.root / "session.jsonl").write_text(claude_line("shared evidence"))
+        collector = Collector(
+            root=self.root,
+            harness="claude",
+            source_id="claude:mac:shared-test",
+            spool_path=self.spool,
+            endpoint=self.endpoint,
+            token="test-token-not-a-secret",
+            visibility="shared",
+        )
+        collector.scan()
+        self.assertEqual({event["visibility"] for event in collector.pending_envelopes()}, {"shared"})
         collector.close()
 
     def test_giant_file_resumes_from_durable_scan_checkpoint(self) -> None:

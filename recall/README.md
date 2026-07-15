@@ -111,6 +111,11 @@ Codex transcripts; pi can run the search, but pi's own transcript format is not 
 
 - `skills/recall/scripts/recall.py` is a stdlib-only Python engine backed by one
   SQLite database, FTS5, an entity index, and evidence-tiered ranking.
+- `session-export` gives evidence consumers such as Recap an exact, redacted,
+  ordered session snapshot with stable IDs and opaque local/central pagination;
+  it never relies on scraping Recall's human-readable `show` output.
+- `session-relations` resolves local Claude sidechains and Codex child/fork edges from bounded native
+  metadata. It never guesses relationships from time, cwd, filenames, or transcript prose.
 - `skills/recall/SKILL.md` teaches the agent when to search, how to judge a
   match, and how to find, continue, repeat, or skill-ify prior work.
 - `skills/recall/scripts/recall-hook.sh` is an optional SessionStart hook. It is

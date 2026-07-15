@@ -1,0 +1,2 @@
+{"conversation_id":"synthetic-cowork-beta","message_id":"cowork-user-beta","parent_message_id":null,"create_time":"2026-07-14T00:10:00Z","role":"user","content":{"content_type":"text","parts":["Synthetic Cowork beta decision"]}}
+{"conversation_id":"synthetic-cowork-beta","message_id":"cowork-assistant-beta","parent_message_id":"cowork-user-beta","create_time":"2026-07-14T00:10:01Z","role":"assistant","content":{"content_type":"text","parts":["Safe before password=synthetic-cowork-secret-canary-92 safe after"]}}

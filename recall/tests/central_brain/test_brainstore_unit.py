@@ -3,12 +3,27 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+import types
 import unittest
+from unittest import mock
 from pathlib import Path
 
 SERVER = Path(__file__).resolve().parents[2] / "server"
 sys.path.insert(0, str(SERVER))
 
+try:
+    import psycopg  # noqa: F401
+except ModuleNotFoundError:
+    psycopg = types.ModuleType("psycopg")
+    psycopg_rows = types.ModuleType("psycopg.rows")
+    psycopg_rows.dict_row = object()
+    psycopg.rows = psycopg_rows
+    sys.modules["psycopg"] = psycopg
+    sys.modules["psycopg.rows"] = psycopg_rows
+
+from recall_server import SCHEMA_VERSION
+from recall_server.app import Handler
+from recall_server.db import BrainStore
 from recall_server.projectors import advisory_lock_key, canonical_json, partial_lexical_probes, phrase_query_spec, preferred_phrase_probe, preferred_phrase_probes, project, redact_text, validate_envelope
 from recall_server.ranking import DEFAULT_SEARCH_DEADLINE_MS, evidence_rank_components, retrieval_leg_order, should_run_partial
 
@@ -31,6 +46,53 @@ def envelope(**updates):
     value.update(updates)
     value["content_sha256"] = hashlib.sha256(canonical_json(value["content"])).hexdigest()
     return value
+
+
+class SchemaMigrationContractTest(unittest.TestCase):
+    def test_migration_versions_are_unique_contiguous_and_current(self) -> None:
+        migrations = sorted((SERVER / "schema").glob("*.sql"))
+        versions = [int(path.name.split("_", 1)[0]) for path in migrations]
+        self.assertEqual(versions, list(range(1, SCHEMA_VERSION + 1)))
+        for version, path in zip(versions, migrations, strict=True):
+            self.assertRegex(
+                path.read_text(),
+                rf"schema_migrations\(version\) VALUES \({version}\)",
+            )
+
+
+class SourceScopedReadContractTest(unittest.TestCase):
+    def test_resolve_filters_by_the_authenticated_collector_source(self) -> None:
+        connection = mock.MagicMock()
+        connection.execute.return_value.fetchone.return_value = None
+        context = mock.MagicMock()
+        context.__enter__.return_value = connection
+        store = BrainStore("postgresql://synthetic.invalid/recall")
+        store.connect = mock.MagicMock(return_value=context)
+
+        self.assertIsNone(
+            store.resolve(
+                "recall://source-a/item-1?rev=1",
+                authorized_source="source-a",
+            )
+        )
+        sql, params = connection.execute.call_args.args
+        self.assertIn("event.source_id=%s", sql)
+        self.assertEqual(params, ("source-a", "item-1", 1, "source-a", "source-a"))
+
+    def test_http_resolve_passes_the_principal_source_scope(self) -> None:
+        handler = object.__new__(Handler)
+        handler.path = "/v1/receipts/resolve?receipt=recall%3A%2F%2Fsource-a%2Fitem-1%3Frev%3D1"
+        handler.require = mock.MagicMock(return_value={"source_id": "source-a"})
+        handler.store = mock.MagicMock()
+        handler.store.resolve.return_value = None
+        handler.send_json = mock.MagicMock()
+
+        Handler.do_GET(handler)
+
+        handler.store.resolve.assert_called_once_with(
+            "recall://source-a/item-1?rev=1", authorized_source="source-a",
+        )
+        handler.send_json.assert_called_once_with(404, {"error": "not found"})
 
 
 class EnvelopeContractTest(unittest.TestCase):
@@ -72,8 +134,37 @@ class EnvelopeContractTest(unittest.TestCase):
         self.assertIn({"kind": "uuid", "value": marker.lower(), "normalized": marker.lower()}, items[0]["entities"])
         self.assertIn({"kind": "error", "value": "ConnectTimeout", "normalized": "connecttimeout"}, items[0]["entities"])
 
+    def test_projection_redacts_secret_shaped_native_tool_entity(self) -> None:
+        secret = "Z" * 40
+        value = envelope(
+            kind="transcript_record",
+            provenance={"harness": "claude"},
+            content={
+                "type": "assistant", "timestamp": "2026-07-12T20:00:00Z",
+                "message": {"content": [{
+                    "type": "tool_use", "name": "api_key=" + secret, "input": {"path": "safe.txt"},
+                }]},
+            },
+        )
+        items, _ = project(value, 1)
+        rendered = json.dumps(items)
+        self.assertNotIn(secret, rendered)
+        self.assertIn("REDACTED", rendered)
+
     def test_redaction_does_not_use_semantic_matching(self) -> None:
         self.assertEqual(redact_text("a harmless discussion about password rotation"), "a harmless discussion about password rotation")
+
+    def test_redaction_removes_private_key_blocks_and_generic_key_assignments(self) -> None:
+        private_value = "Z" * 50
+        private_block = (
+            "-----BEGIN " + "PRIVATE KEY-----\n" + ("Q" * 256)
+            + "\n-----END " + "PRIVATE KEY-----"
+        )
+        redacted = redact_text("safe\nkey=" + private_value + "\n" + private_block + "\nend")
+        self.assertNotIn(private_value, redacted)
+        self.assertNotIn("Q" * 64, redacted)
+        self.assertIn("safe", redacted)
+        self.assertIn("end", redacted)
 
     def test_partial_probes_prefer_structural_anchors_and_are_bounded(self) -> None:
         probes = partial_lexical_probes(

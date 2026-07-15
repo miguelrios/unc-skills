@@ -1,0 +1,8 @@
+{
+  "corpus_sha256": "68a72ccd937f207d505c5167c7ba63b0caab8f53e540d3ff65518d955f1de6d1",
+  "schema_version": 1,
+  "thresholds": {
+    "invalid_acceptance": 0.0,
+    "valid_acceptance": 1.0
+  }
+}

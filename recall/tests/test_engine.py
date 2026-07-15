@@ -25,13 +25,35 @@ spec.loader.exec_module(engine)
 class RecallEngineTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
+        # macOS exposes /var through the /private/var filesystem alias. The
+        # engine intentionally stores canonical paths, so expected paths must
+        # use that same cross-platform contract.
+        self.root = Path(self.tmp.name).resolve()
         self.claude = self.root / "claude"
         self.codex = self.root / "codex"
         self.claude.mkdir(); self.codex.mkdir()
         self.db = self.root / "state/index.db"
-        self.old_env = {key: os.environ.get(key) for key in ("RECALL_CLAUDE_ROOT", "RECALL_CODEX_ROOT", "RECALL_DB")}
-        os.environ.update(RECALL_CLAUDE_ROOT=str(self.claude), RECALL_CODEX_ROOT=str(self.codex), RECALL_DB=str(self.db))
+        self.old_env = {key: os.environ.get(key) for key in (
+            "RECALL_CLAUDE_ROOT", "RECALL_CODEX_ROOT", "RECALL_DB", "RECALL_URL",
+            "RECALL_MODE", "RECALL_TOKEN_FILE", "RECALL_CONFIG_FILE",
+            "RECALL_SESSION_CURSOR_DB", "RECALL_EXPORT_SOURCE_ID", "CODEX_THREAD_ID",
+            "CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CLAUDECODE",
+            "CLAUDE_CODE_ENTRYPOINT",
+        )}
+        os.environ.update(
+            RECALL_CLAUDE_ROOT=str(self.claude),
+            RECALL_CODEX_ROOT=str(self.codex),
+            RECALL_DB=str(self.db),
+            RECALL_MODE="local",
+            RECALL_CONFIG_FILE=str(self.root / "absent-client.json"),
+            RECALL_SESSION_CURSOR_DB=str(self.root / "state/session-cursors.db"),
+            RECALL_EXPORT_SOURCE_ID="claude:linux:test",
+        )
+        for key in (
+            "RECALL_URL", "RECALL_TOKEN_FILE", "CODEX_THREAD_ID", "CLAUDE_SESSION_ID",
+            "CLAUDE_CODE_SESSION_ID", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT",
+        ):
+            os.environ.pop(key, None)
 
     def tearDown(self):
         for key, value in self.old_env.items():
@@ -98,6 +120,309 @@ class RecallEngineTest(unittest.TestCase):
         self.cli("index")
         self.assertIn("later", self.cli("search", "later"))
 
+    def test_session_export_pages_1001_items_and_redacts_cursor_surface(self):
+        session = self.claude / "long.jsonl"
+        secret = "sk-" + "A" * 32
+        with session.open("w") as output:
+            for index in range(1001):
+                text = f"event {index}"
+                if index == 500:
+                    text = "api_key=" + secret
+                output.write(json.dumps({
+                    "type": "user", "timestamp": f"2026-01-01T00:{(index // 60) % 60:02d}:{index % 60:02d}Z",
+                    "message": {"content": text},
+                }) + "\n")
+        first = json.loads(self.cli("session-export", "--target", str(session), "--limit", "1000"))
+        self.assertFalse(first["page"]["complete"])
+        self.assertEqual(first["page"]["count"], 1000)
+        self.assertTrue(first["page"]["next_cursor"].startswith("rsl_"))
+        self.assertNotIn(secret, json.dumps(first))
+        self.assertNotIn(str(session), first["page"]["next_cursor"])
+        with session.open("a") as output:
+            output.write(json.dumps({
+                "type": "user", "timestamp": "2026-01-02T00:00:00Z",
+                "message": {"content": "appended after snapshot"},
+            }) + "\n")
+        second = json.loads(self.cli("session-export", "--cursor", first["page"]["next_cursor"], "--limit", "1000"))
+        replay = json.loads(self.cli("session-export", "--cursor", first["page"]["next_cursor"], "--limit", "1000"))
+        self.assertTrue(second["page"]["complete"])
+        self.assertFalse(second["session"]["source_snapshot_stable"])
+        self.assertEqual(second["page"]["count"], 1)
+        self.assertEqual(
+            [item["evidence_id"] for item in second["items"]],
+            [item["evidence_id"] for item in replay["items"]],
+        )
+        items = first["items"] + second["items"]
+        self.assertEqual([item["sequence"] for item in items], list(range(1001)))
+        self.assertEqual(len({item["evidence_id"] for item in items}), 1001)
+        self.assertEqual(first["session"]["boundary_receipt"], second["session"]["boundary_receipt"])
+        self.assertEqual((self.root / "state/session-cursors.db").stat().st_mode & 0o777, 0o600)
+
+    def test_session_export_cursor_store_rejects_symlink(self):
+        state = self.root / "state"
+        state.mkdir(mode=0o700, exist_ok=True)
+        target = state / "target.db"
+        target.write_text("unchanged")
+        target.chmod(0o600)
+        link = state / "cursor-link.db"
+        link.symlink_to(target)
+        os.environ["RECALL_SESSION_CURSOR_DB"] = str(link)
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            engine.export_cursor_connection()
+        self.assertEqual(target.read_text(), "unchanged")
+
+    def test_session_export_cursor_store_never_chmods_shared_parent(self):
+        shared = self.root / "shared"
+        shared.mkdir(mode=0o755)
+        shared.chmod(0o755)
+        before = shared.stat().st_mode & 0o777
+        os.environ["RECALL_SESSION_CURSOR_DB"] = str(shared / "cursor.db")
+        with self.assertRaisesRegex(ValueError, "0700"):
+            engine.export_cursor_connection()
+        self.assertEqual(shared.stat().st_mode & 0o777, before)
+        self.assertFalse((shared / "cursor.db").exists())
+
+    def test_session_export_marks_partial_record_and_current_codex_is_exact(self):
+        os.environ["RECALL_EXPORT_SOURCE_ID"] = "codex:linux:test"
+        thread = "12345678-1234-1234-1234-123456789abc"
+        session = self.codex / f"2026/01/01/rollout-2026-01-01T00-00-00-{thread}.jsonl"
+        session.parent.mkdir(parents=True)
+        session.write_text(
+            json.dumps({"timestamp": "2026-01-01T00:00:00Z", "type": "response_item", "payload": {
+                "role": "user", "content": [{"type": "input_text", "text": "exact current"}]}}) + "\n"
+            + '{"type":"response_item"'
+        )
+        os.environ["CODEX_THREAD_ID"] = thread
+        page = json.loads(self.cli("session-export", "--current"))
+        self.assertTrue(page["page"]["complete"])
+        self.assertTrue(page["session"]["source_partial_record"])
+        self.assertEqual(page["items"][0]["text"], "exact current")
+
+    def test_session_export_redacts_private_key_blocks_and_generic_key_assignments(self):
+        private_value = "Z" * 50
+        pem = "-----BEGIN " + "PRIVATE KEY-----\n" + ("Q" * 256) + "\n-----END " + "PRIVATE KEY-----"
+        session = self.claude / "sensitive.jsonl"
+        session.write_text(json.dumps({
+            "type": "user", "timestamp": "2026-01-01T00:00:00Z",
+            "message": {"content": "key=" + private_value + "\n" + pem + "\nsafe"},
+        }) + "\n")
+        page = json.loads(self.cli("session-export", "--target", str(session)))
+        rendered = json.dumps(page)
+        self.assertNotIn(private_value, rendered)
+        self.assertNotIn("Q" * 64, rendered)
+        self.assertIn("redacted", rendered.lower())
+        self.assertIn("safe", rendered)
+
+    def test_session_export_redacts_secret_shaped_native_tool_entity(self):
+        secret = "Z" * 40
+        session = self.claude / "sensitive-tool.jsonl"
+        session.write_text(json.dumps({
+            "type": "assistant", "timestamp": "2026-01-01T00:00:00Z",
+            "message": {"content": [{
+                "type": "tool_use", "name": "api_key=" + secret, "input": {"path": "safe.txt"},
+            }]},
+        }) + "\n")
+        page = json.loads(self.cli("session-export", "--target", str(session)))
+        rendered = json.dumps(page)
+        self.assertNotIn(secret, rendered)
+        self.assertIn("redacted", rendered.lower())
+
+    def test_session_redaction_covers_deep_sweep_provider_formats(self):
+        values = (
+            "sk-" + "O" * 48,
+            "sk-ant-api03-" + "A" * 90 + "AA",
+            "AIza" + "G" * 35,
+            "sk-or-v1-" + "R" * 40,
+            "gsk_" + "Q" * 40,
+            "xai-" + "X" * 40,
+            "pplx-" + "P" * 40,
+            "csk-" + "C" * 40,
+            "github_pat_" + "J" * 60,
+            "xoxb-" + "S" * 40,
+            "ops_" + "W" * 40,
+            "AKIA" + "Z" * 16,
+            "sk_live_" + "T" * 32,
+            "hf_" + "F" * 40,
+            "pcsk_" + "N" * 40,
+            "lsv2_" + "L" * 40,
+        )
+        for value in values:
+            with self.subTest(prefix=value[:10]):
+                self.assertNotIn(value, engine.clean_text("prefix " + value + " suffix"))
+        fireworks = "FireworksSynthetic" + "8" * 40
+        self.assertNotIn(
+            fireworks,
+            engine.clean_text("FIREWORKS_API_KEY=" + fireworks),
+        )
+        nested = "NestedSynthetic" + "7" * 40
+        self.assertNotIn(
+            nested,
+            engine.clean_text('{"service":{"fireworks_api_key_value":"' + nested + '"}}'),
+        )
+        multiline = "MultilineSynthetic" + "6" * 40
+        self.assertNotIn(
+            multiline,
+            engine.clean_text("| OP_SERVICE_ACCOUNT_TOKEN\n=\n" + multiline),
+        )
+        self.assertNotIn(multiline, engine.clean_text("| deployment_key = " + multiline))
+        proximity = "a" * 63 + "7"
+        self.assertNotIn(proximity, engine.clean_text("_sentry token " + proximity))
+        self.assertNotIn(proximity, engine.clean_text("other_access_token " + proximity))
+
+    def test_ambiguous_current_error_uses_content_free_ranked_receipts(self):
+        session = self.claude / "candidate-secret-token-value.jsonl"
+        session.write_text(json.dumps({"type": "user", "message": {"content": "private"}}) + "\n")
+        with self.assertRaises(ValueError) as raised:
+            engine.resolve_current_session()
+        message = str(raised.exception)
+        self.assertIn("ranked_candidate_receipts=", message)
+        self.assertNotIn(str(session), message)
+        self.assertNotIn("private", message)
+
+    def test_current_claude_identity_requires_exact_native_id(self):
+        session_id = "87654321-4321-4321-4321-cba987654321"
+        session = self.claude / "project" / f"{session_id}.jsonl"
+        session.parent.mkdir()
+        session.write_text(json.dumps({"type": "user", "message": {"content": "exact"}}) + "\n")
+        os.environ["CLAUDE_SESSION_ID"] = session_id
+        self.assertEqual(engine.resolve_current_session(), session.resolve())
+        duplicate = self.claude / f"duplicate-{session_id}.jsonl"
+        duplicate.write_text(session.read_text())
+        with self.assertRaisesRegex(ValueError, "resolved to 2"):
+            engine.resolve_current_session()
+
+    def test_current_identity_fails_when_codex_and_claude_are_both_present(self):
+        os.environ["CODEX_THREAD_ID"] = "codex-id"
+        os.environ["CLAUDE_SESSION_ID"] = "claude-id"
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
+            engine.resolve_current_session()
+
+    def test_active_claude_refuses_an_inherited_codex_identity(self):
+        os.environ["CLAUDECODE"] = "1"
+        os.environ["CODEX_THREAD_ID"] = "parent-codex-id"
+        with self.assertRaisesRegex(ValueError, "inherited Codex identity was ignored"):
+            engine.resolve_current_session()
+
+    def test_active_claude_prefers_its_exact_identity_over_inherited_codex(self):
+        session_id = "12345678-4321-4321-4321-cba987654321"
+        session = self.claude / "project" / f"{session_id}.jsonl"
+        session.parent.mkdir()
+        session.write_text(json.dumps({"type": "user", "message": {"content": "exact"}}) + "\n")
+        os.environ["CLAUDE_CODE_ENTRYPOINT"] = "cli"
+        os.environ["CLAUDE_CODE_SESSION_ID"] = session_id
+        os.environ["CODEX_THREAD_ID"] = "parent-codex-id"
+        self.assertEqual(engine.resolve_current_session(), session.resolve())
+
+    def test_session_relations_selects_codex_children_and_fork_chain_exactly(self):
+        def write_codex(name, node_id, *, parent=None, forked=None):
+            target = self.codex / "2026/07/14" / f"rollout-{name}.jsonl"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            payload = {"id": node_id, "cwd": "/workspace"}
+            if parent:
+                payload["source"] = {"subagent": {"thread_spawn": {"parent_thread_id": parent}}}
+            if forked:
+                payload["forked_from_id"] = forked
+            target.write_text(json.dumps({"type": "session_meta", "payload": payload}) + "\n")
+            return target
+
+        main = write_codex("main", "main-id")
+        write_codex("child", "child-id", parent="main-id")
+        write_codex("nested", "nested-id", parent="child-id")
+        write_codex("fork", "fork-id", forked="main-id")
+        write_codex("unrelated", "other-id")
+        graph = json.loads(self.cli(
+            "session-relations", "--target", str(main), "--include-children", "--chain",
+        ))
+        self.assertTrue(graph["graph_complete"])
+        self.assertEqual({node["node_id"] for node in graph["nodes"]},
+                         {"main-id", "child-id", "nested-id", "fork-id"})
+        self.assertNotIn("other-id", {node["node_id"] for node in graph["nodes"]})
+        self.assertEqual({edge["type"] for edge in graph["edges"]}, {"child", "continuation"})
+
+    def test_session_relations_maps_claude_sidechain_without_filename_guessing(self):
+        session_id = "claude-main-id"
+        main = self.claude / "project" / "opaque-main.jsonl"
+        child = self.claude / "project" / "subagents" / "opaque-child.jsonl"
+        main.parent.mkdir(parents=True)
+        child.parent.mkdir(parents=True)
+        main.write_text(json.dumps({"sessionId": session_id, "type": "user", "message": {"content": "x"}}) + "\n")
+        child.write_text(json.dumps({
+            "sessionId": session_id, "agentId": "claude-child-id", "isSidechain": True,
+            "type": "assistant", "message": {"content": "y"},
+        }) + "\n")
+        graph = json.loads(self.cli(
+            "session-relations", "--target", str(main), "--include-children",
+        ))
+        self.assertEqual([node["node_id"] for node in graph["nodes"]],
+                         [session_id, "claude-child-id"])
+        self.assertEqual(graph["edges"], [{"from": session_id, "to": "claude-child-id", "type": "child"}])
+
+    def test_session_relations_fails_closed_for_missing_fork_ancestor(self):
+        target = self.codex / "rollout-fork.jsonl"
+        target.write_text(json.dumps({
+            "type": "session_meta", "payload": {"id": "fork-id", "forked_from_id": "missing-id"},
+        }) + "\n")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = engine.main(["session-relations", "--target", str(target), "--chain"])
+        self.assertEqual(code, 2)
+        graph = json.loads(out.getvalue())
+        self.assertFalse(graph["graph_complete"])
+        self.assertEqual(graph["incomplete_relations"][0]["reason"], "missing")
+
+    def test_session_relations_fails_closed_for_claude_child_without_agent_id(self):
+        main = self.claude / "project" / "main.jsonl"
+        child = self.claude / "project" / "subagents" / "broken.jsonl"
+        main.parent.mkdir(parents=True)
+        child.parent.mkdir(parents=True)
+        main.write_text(json.dumps({"sessionId": "main-id", "type": "user"}) + "\n")
+        child.write_text(json.dumps({
+            "sessionId": "main-id", "isSidechain": True, "type": "assistant",
+        }) + "\n")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = engine.main([
+                "session-relations", "--target", str(main), "--include-children",
+            ])
+        self.assertEqual(code, 2)
+        graph = json.loads(out.getvalue())
+        self.assertEqual(graph["incomplete_relations"][0]["reason"], "missing_agent_id")
+        self.assertNotIn(str(child), out.getvalue())
+
+    def test_session_relations_remote_only_mode_fails_without_local_fallback(self):
+        target = self.codex / "rollout-remote.jsonl"
+        target.write_text(json.dumps({
+            "type": "session_meta", "payload": {"id": "remote-id"},
+        }) + "\n")
+        previous_mode = os.environ.get("RECALL_MODE")
+        os.environ["RECALL_MODE"] = "remote"
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                with self.assertRaises(SystemExit) as raised:
+                    engine.main(["session-relations", "--target", str(target), "--chain"])
+        finally:
+            if previous_mode is None:
+                os.environ.pop("RECALL_MODE", None)
+            else:
+                os.environ["RECALL_MODE"] = previous_mode
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("requires local native transcript metadata", err.getvalue())
+
+    def test_session_relations_rejects_credential_shaped_native_identity(self):
+        secret = "xai-" + "X" * 40
+        target = self.codex / "rollout-unsafe-id.jsonl"
+        target.write_text(json.dumps({
+            "type": "session_meta", "payload": {"id": secret},
+        }) + "\n")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with self.assertRaises(SystemExit) as raised:
+                engine.main(["session-relations", "--target", str(target)])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertNotIn(secret, out.getvalue() + err.getvalue())
+
     def test_secret_redaction_tool_cap_and_fts_injection(self):
         secret = "sk-ABCDEFGHIJKLMNOPQRSTUVWX"
         huge = "z" * 5000
@@ -140,6 +465,79 @@ class RecallEngineTest(unittest.TestCase):
         stored = self.rows("select title,first_user_prompt from sessions")[0]
         self.assertNotIn(secret, stored[0]); self.assertNotIn(secret, stored[1])
         self.assertEqual(stored[0], "[redacted-secret-line]")
+
+    def test_current_codex_record_shapes_project_user_agent_and_tool_surfaces(self):
+        marker = "c6a-current-codex-projection-4f18"
+        cases = [
+            (
+                {
+                    "timestamp": "2026-07-13T00:00:00Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "user_message", "message": marker + " question",
+                        "images": [], "local_images": [], "text_elements": [],
+                    },
+                },
+                ("user", marker + " question"),
+            ),
+            (
+                {
+                    "timestamp": "2026-07-13T00:00:00Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "agent_message", "message": marker,
+                        "phase": "final_answer", "memory_citation": None,
+                    },
+                },
+                ("assistant", marker),
+            ),
+            (
+                {
+                    "timestamp": "2026-07-13T00:00:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "agent_message", "author": "assistant",
+                        "recipient": "user", "content": [
+                            {"type": "text", "text": marker + " response"},
+                            {"type": "encrypted_content", "encrypted_content": "opaque"},
+                        ],
+                    },
+                },
+                ("assistant", marker + " response"),
+            ),
+            (
+                {
+                    "timestamp": "2026-07-13T00:00:02Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "custom_tool_call", "name": "synthetic_tool",
+                        "call_id": "call-1", "input": marker + " input",
+                    },
+                },
+                ("tool_input", marker + " input"),
+            ),
+            (
+                {
+                    "timestamp": "2026-07-13T00:00:03Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "custom_tool_call_output", "call_id": "call-1",
+                        "output": [{"type": "text", "text": marker + " output"}],
+                    },
+                },
+                ("tool_output", marker + " output"),
+            ),
+        ]
+        for record, expected in cases:
+            with self.subTest(record_type=record["payload"]["type"]):
+                parsed, _metadata = engine.codex_record(record)
+                self.assertEqual([(surface, text) for _, surface, text, _ in parsed], [expected])
+
+        ignored, _metadata = engine.codex_record({
+            "timestamp": "2026-07-13T00:00:04Z", "type": "event_msg",
+            "payload": {"type": "token_count", "info": {"total": 42}},
+        })
+        self.assertEqual(ignored, [])
 
     def test_partial_fts_or_fallback_returns_natural_partial_matches(self):
         (self.claude / "alpha.jsonl").write_text(json.dumps({"type":"user", "timestamp":"2026-01-01T00:00:00Z", "message":{"content":"alpha bravo only"}}) + "\n")
@@ -184,17 +582,17 @@ class RecallEngineTest(unittest.TestCase):
             engine.FTS_LEG_LIMIT = old_limit
 
     def test_identifier_token_leg_finds_raw_tool_output_without_entity(self):
-        token = "api-prod-6fcdc84dd4-mmjpj"
+        identifier = "identifier-prod-6fcdc84dd4-mmjpj"
         target = self.claude / "identifier-tool.jsonl"
         target.write_text(json.dumps({"type":"user", "timestamp":"2026-01-01T00:00:00Z",
                                       "message":{"content":"seed"}}) + "\n")
         self.cli("index")
         conn = engine.connect(self.db)
         session_id = conn.execute("select s.id from sessions s join files f on f.id=s.file_id where f.path like '%identifier-tool.jsonl'").fetchone()[0]
-        chunk_id = conn.execute("insert into chunks(session_id,ts,surface,text) values (?,?,?,?)", (session_id, 1, "tool_output", token)).lastrowid
-        conn.execute("insert into chunks_fts(rowid,text) values (?,?)", (chunk_id, token))
+        chunk_id = conn.execute("insert into chunks(session_id,ts,surface,text) values (?,?,?,?)", (session_id, 1, "tool_output", identifier)).lastrowid
+        conn.execute("insert into chunks_fts(rowid,text) values (?,?)", (chunk_id, identifier))
         conn.commit(); conn.close()
-        self.assertEqual(Path(self.cli("search", "which pod was failing " + token, "--paths").splitlines()[0]), target)
+        self.assertEqual(Path(self.cli("search", "which pod was failing " + identifier, "--paths").splitlines()[0]), target)
 
     def test_gate_keeps_fuzzy_best_with_two_long_terms(self):
         target = self.claude / "fuzzy-best.jsonl"
@@ -269,7 +667,6 @@ class RecallEngineTest(unittest.TestCase):
     def test_entity_boost_filters_and_codex_reader(self):
         c = self.write_claude("old.jsonl")
         # A generic recent session supplies a less-specific ordinary match.
-        uuid = "12345678-1234-1234-1234-123456789abc"
         (self.claude / "generic.jsonl").write_text(json.dumps({"type":"user","timestamp":"2026-07-01T00:00:00Z","cwd":"/other","message":{"content":"mention an unrelated identifier"}}) + "\n")
         codex = self.copy_codex(); self.cli("index")
         # Seed a matching legacy-style chunk with no entities: the exact UUID
@@ -329,7 +726,7 @@ class RemoteHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
-        type(self).requests.append({"method": "POST", "path": self.path, "body": body, "authorization": self.headers.get("Authorization")})
+        type(self).requests.append({"method": "POST", "path": self.path, "body": body, "authorization": self.headers.get("Authorization"), "idempotency_key": self.headers.get("Idempotency-Key")})
         if self.path == "/v1/search":
             if type(self).fail_search:
                 self.send_json(503, {"error": "unavailable"})
@@ -361,12 +758,35 @@ class RemoteHandler(BaseHTTPRequestHandler):
                 "occurred_at": "2026-01-01T00:00:00Z", "surface": "user",
                 "text": "remote prompt", "receipt": "recall://claude:linux/session:1?rev=1#item=0"
             }]})
+        elif self.path == "/v1/session-export":
+            self.send_json(200, {
+                "schema_version": "recall.session-export.v1",
+                "session": {
+                    "source_id": "claude:linux:test", "native_session_id": "claude-session-test",
+                    "harness": "claude", "boundary_receipt": "boundary-test",
+                    "projector_version": 1, "privacy_policy_version": "privacy-v1",
+                },
+                "items": [{
+                    "sequence": 0, "evidence_id": "rse_test", "event_native_id": "event-1",
+                    "item_ordinal": 0, "surface": "user", "text": "remote prompt",
+                    "text_sha256": hashlib.sha256(b"remote prompt").hexdigest(),
+                    "receipt": "recall://claude:linux:test/event-1?rev=1#item=0",
+                }],
+                "page": {"count": 1, "complete": True, "next_cursor": None, "page_receipt": "page-test"},
+            })
         elif self.path == "/v1/related":
             self.send_json(200, {"results": [{
                 "path": type(self).target_path, "overlap": 3,
                 "cwd": "/work/grep123/project", "branch": "feature/remote",
                 "receipt": "recall://claude:linux/session:1?rev=1#item=0"
             }]})
+        elif self.path == "/v1/ingest/batches":
+            event = body["events"][0]
+            revision = 2 if event["kind"] == "tombstone" else 1
+            self.send_json(201, {
+                "status": "committed", "inserted": 1, "duplicate_events": 0,
+                "receipts": [f"recall://{event['source_id']}/{event['native_id']}?rev={revision}"],
+            })
         else:
             self.send_json(404, {"error": "not found"})
 
@@ -374,7 +794,7 @@ class RemoteHandler(BaseHTTPRequestHandler):
 class RemoteTransportTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         self.claude = self.root / "claude"; self.claude.mkdir()
         self.codex = self.root / "codex"; self.codex.mkdir()
         self.db = self.root / "state/index.db"
@@ -382,6 +802,7 @@ class RemoteTransportTest(unittest.TestCase):
         self.old_env = {key: os.environ.get(key) for key in (
             "RECALL_CLAUDE_ROOT", "RECALL_CODEX_ROOT", "RECALL_DB", "RECALL_URL",
             "RECALL_MODE", "RECALL_TOKEN_FILE", "RECALL_SHADOW_LOG", "RECALL_REMOTE_TRACE",
+            "RECALL_CONFIG_FILE",
         )}
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), RemoteHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True); self.thread.start()
@@ -390,6 +811,7 @@ class RemoteTransportTest(unittest.TestCase):
         os.environ.update(
             RECALL_CLAUDE_ROOT=str(self.claude), RECALL_CODEX_ROOT=str(self.codex), RECALL_DB=str(self.db),
             RECALL_URL=f"http://127.0.0.1:{self.server.server_port}", RECALL_SHADOW_LOG=str(self.shadow),
+            RECALL_CONFIG_FILE=str(self.root / "absent-client.json"),
         )
 
     def tearDown(self):
@@ -460,6 +882,17 @@ class RemoteTransportTest(unittest.TestCase):
         self.assertIn("OK remote", doctor)
         self.assertIn("projection_lag=0", doctor)
 
+    def test_remote_session_export_preserves_machine_contract(self):
+        code, output, error = self.call(
+            "session-export", "--target", RemoteHandler.target_path, "--limit", "500",
+        )
+        self.assertEqual((code, error), (0, ""))
+        page = json.loads(output)
+        self.assertEqual(page["items"][0]["evidence_id"], "rse_test")
+        request = RemoteHandler.requests[-1]
+        self.assertEqual(request["path"], "/v1/session-export")
+        self.assertEqual(request["body"], {"target": RemoteHandler.target_path, "limit": 500})
+
     def test_explicit_local_mode_is_config_only_rollback(self):
         self.seed_local()
         before = hashlib.sha256(self.db.read_bytes()).hexdigest()
@@ -517,6 +950,92 @@ class RemoteTransportTest(unittest.TestCase):
         code, _, err = self.call("doctor")
         self.assertEqual((code, err), (0, ""))
         self.assertEqual(RemoteHandler.requests[-1]["authorization"], "Bearer scoped-test-token")
+
+    def test_private_default_client_config_enables_remote_and_env_overrides_it(self):
+        token_file = self.root / "read-token.json"
+        token_file.write_text(json.dumps({"token": "configured-read-token"}))
+        token_file.chmod(0o600)
+        config = self.root / "client.json"
+        config.write_text(json.dumps({
+            "schema_version": 1,
+            "url": f"http://127.0.0.1:{self.server.server_port}",
+            "token_file": str(token_file),
+        }))
+        config.chmod(0o600)
+        os.environ.pop("RECALL_URL", None)
+        os.environ.pop("RECALL_TOKEN_FILE", None)
+        os.environ["RECALL_CONFIG_FILE"] = str(config)
+
+        code, output, error = self.call("doctor")
+
+        self.assertEqual((code, error), (0, ""))
+        self.assertIn("OK remote", output)
+        self.assertEqual(RemoteHandler.requests[-1]["authorization"], "Bearer configured-read-token")
+
+        override = self.root / "override-token.json"
+        override.write_text(json.dumps({"token": "environment-read-token"}))
+        override.chmod(0o600)
+        os.environ["RECALL_URL"] = f"http://127.0.0.1:{self.server.server_port}"
+        os.environ["RECALL_TOKEN_FILE"] = str(override)
+        self.assertEqual(self.call("doctor")[0], 0)
+        self.assertEqual(RemoteHandler.requests[-1]["authorization"], "Bearer environment-read-token")
+
+    def test_client_config_rejects_open_mode_symlink_and_unknown_fields_without_path_echo(self):
+        token_file = self.root / "read-token.json"
+        token_file.write_text(json.dumps({"token": "configured-read-token"}))
+        token_file.chmod(0o600)
+        config = self.root / "private-config-canary.json"
+        config.write_text(json.dumps({
+            "schema_version": 1,
+            "url": f"http://127.0.0.1:{self.server.server_port}",
+            "token_file": str(token_file),
+            "secret_extra": "private-config-content-canary",
+        }))
+        config.chmod(0o644)
+        os.environ.pop("RECALL_URL", None)
+        os.environ.pop("RECALL_TOKEN_FILE", None)
+        os.environ["RECALL_CONFIG_FILE"] = str(config)
+
+        code, output, error = self.call("doctor")
+
+        self.assertNotEqual(code, 0)
+        self.assertEqual(output, "")
+        self.assertNotIn(str(config), error)
+        self.assertNotIn("private-config-content-canary", error)
+
+        config.chmod(0o600)
+        target = self.root / "target.json"
+        config.rename(target)
+        config.symlink_to(target)
+        code, output, error = self.call("doctor")
+        self.assertNotEqual(code, 0)
+        self.assertEqual(output, "")
+        self.assertNotIn(str(target), error)
+
+    def test_explicit_memory_put_and_delete_are_remote_scoped_and_receipted(self):
+        os.environ["RECALL_WRITE_SOURCE_ID"] = "memory:mac:test"
+        self.addCleanup(os.environ.pop, "RECALL_WRITE_SOURCE_ID", None)
+        code, output, error = self.call(
+            "put", "remember the c5 exact marker", "--visibility", "private",
+            "--provenance-uri", "manual://unit-test",
+        )
+        self.assertEqual((code, error), (0, ""))
+        put = json.loads(output)
+        self.assertEqual(put["kind"], "memory")
+        request = RemoteHandler.requests[-1]
+        event = request["body"]["events"][0]
+        self.assertEqual(event["content"], {"text": "remember the c5 exact marker"})
+        self.assertEqual(event["source_id"], "memory:mac:test")
+        self.assertEqual(event["visibility"], "private")
+        self.assertTrue(request["idempotency_key"].startswith("recall-skill-v1-"))
+
+        code, output, error = self.call("delete", put["receipt"], "--source-id", "memory:mac:test")
+        self.assertEqual((code, error), (0, ""))
+        deleted = json.loads(output)
+        self.assertEqual(deleted["kind"], "tombstone")
+        tombstone = RemoteHandler.requests[-1]["body"]["events"][0]
+        self.assertEqual(tombstone["native_id"], put["native_id"])
+        self.assertEqual(tombstone["content"]["target_native_id"], put["native_id"])
 
 
 if __name__ == "__main__":

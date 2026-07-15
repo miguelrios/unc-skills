@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "sha256": {
+    "corpus.jsonl": "827e69b07783688388b3e0be97cf6ce5188dc2d5bac54afd06c49b8eacccf1f7"
+  },
+  "expected": {
+    "cases": 8,
+    "valid": 4,
+    "invalid": 4,
+    "origins": 4,
+    "privacy_canaries": 1
+  }
+}

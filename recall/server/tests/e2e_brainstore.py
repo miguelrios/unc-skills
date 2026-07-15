@@ -19,8 +19,12 @@ import psycopg
 
 ROOT = Path(__file__).resolve().parents[3]
 SERVER = ROOT / "recall/server"
+RECALL = ROOT / "recall"
 sys.path.insert(0, str(SERVER))
+sys.path.insert(0, str(RECALL))
 
+from client.mac import BrainClient, ExportImporter, MemoryClient
+from collector.collector import Collector
 from recall_server.db import BrainStore, SearchDeadlineExceeded
 from recall_server.projectors import canonical_json, project
 
@@ -84,7 +88,7 @@ def main() -> None:
     store = BrainStore(dsn)
     store.migrate()
     with store.connect() as conn:
-        conn.execute("TRUNCATE chunks,items,sessions,projection_watermarks,source_events,ingest_batches,source_grants,sources,dead_letters,audit_events RESTART IDENTITY CASCADE")
+        conn.execute("TRUNCATE session_export_cursors,chunks,items,sessions,projection_watermarks,source_events,ingest_batches,source_grants,sources,dead_letters,audit_events RESTART IDENTITY CASCADE")
 
     with tempfile.TemporaryDirectory(prefix="recall-c1-e2e-") as tmp:
         log_path = Path(tmp) / "server.log"
@@ -102,6 +106,7 @@ def main() -> None:
                 raise AssertionError("server did not become healthy")
 
             first = make_envelope("session-1:turn-1", {"role": "user", "text": "quartz decision"})
+            first["provenance"]["private_internal"] = "synthetic-not-client-visible"
             status, ack = request(base, "POST", "/v1/ingest/batches", {"events": [first]}, "batch-first")
             assert status == 201 and ack["inserted"] == 1 and not ack["replay"]
 
@@ -116,8 +121,89 @@ def main() -> None:
             assert first_hit["path"] == "/evidence/codex-linux/session-1.jsonl"
             assert first_hit["receipt"].startswith("recall://codex:linux/session-1:turn-1?rev=1#item=")
             assert first_hit["tier"] >= 1 and first_hit["legs"]
+            first_resolved = request(
+                base, "GET", "/v1/receipts/resolve?" + urllib.parse.urlencode({"receipt": first_hit["receipt"]})
+            )[1]
+            assert first_resolved["event"]["provenance"]["original_path"] == first_hit["path"]
+            assert "private_internal" not in first_resolved["event"]["provenance"]
             diagnostics = searched["diagnostics"]
             assert diagnostics["deadline_ms"] < 500 and diagnostics["elapsed_ms"] >= 0
+
+            # C5 explicit memory is ordinary canonical evidence: write, rank, resolve,
+            # tombstone, then prove both search and the old receipt are unavailable.
+            memory_marker = "c5-explicit-memory-quartz-7db2e0"
+            memory = MemoryClient(
+                endpoint=base, token="development-only", source_id="memory:mac:e2e",
+                principal_id="owner", visibility="private",
+            )
+            put = memory.put(memory_marker, provenance={"uri": "manual://c5-e2e"})
+            memory_search = memory.search(memory_marker, limit=5)
+            memory_hits = [item for item in memory_search["results"] if item["receipt"].split("#", 1)[0] == put["receipt"]]
+            assert memory_hits and memory_search["results"].index(memory_hits[0]) < 5, memory_search
+            memory_resolved = memory.resolve(put["receipt"])
+            assert memory_resolved["event"]["kind"] == "memory"
+            assert memory_resolved["items"][0]["text_redacted"] == memory_marker
+            deleted = memory.delete(put["receipt"])
+            assert deleted["receipt"].endswith("?rev=2")
+            deleted_search = memory.search(memory_marker, limit=5)
+            assert not any(item["receipt"].split("#", 1)[0] == put["receipt"] for item in deleted_search["results"])
+            assert request(base, "GET", "/v1/receipts/resolve?" + urllib.parse.urlencode({"receipt": put["receipt"]}))[0] == 404
+
+            # Supported user exports retain member provenance and replay the same
+            # request idempotently without inspecting any application-private state.
+            export_marker = "c5-supported-export-ember-91b0"
+            export_path = Path(tmp) / "supported-export.jsonl"
+            export_path.write_text(json.dumps({"text": export_marker}) + "\n")
+            importer = ExportImporter(source_id="export:mac:e2e", principal_id="owner", visibility="private")
+            export_client = BrainClient(
+                endpoint=base, token="development-only", source_id="export:mac:e2e",
+                principal_id="owner", visibility="private",
+            )
+            first_import = importer.import_with(export_client, [export_path])
+            second_import = importer.import_with(export_client, [export_path])
+            assert first_import["acknowledgement"]["inserted"] == 1
+            assert second_import["acknowledgement"]["replay"] is True
+            export_search = export_client.search(export_marker, limit=5)
+            assert export_search["results"] and export_search["results"][0]["receipt"].startswith("recall://export:mac:e2e/")
+            export_hit = export_search["results"][0]
+            assert export_hit["path"].startswith("export://")
+            assert export_hit["path"].endswith("/supported-export.jsonl#record=0")
+            export_resolved = export_client.resolve(export_hit["receipt"])
+            assert export_resolved["event"]["provenance"]["member"] == "supported-export.jsonl#record=0"
+            assert export_resolved["event"]["provenance"]["original_path"] == export_hit["path"]
+
+            # The exact portable collector core survives an offline scan and only
+            # advances its committed cursor after the deployed API acknowledges it.
+            offline_marker = "c5-mac-offline-recovery-sable-42c9"
+            mac_root = Path(tmp) / "mac-claude"
+            mac_root.mkdir()
+            mac_source = mac_root / "session.jsonl"
+            mac_source.write_text(json.dumps({
+                "type": "user", "timestamp": "2026-07-13T00:00:00Z",
+                "message": {"content": offline_marker},
+            }) + "\n")
+            mac_spool = Path(tmp) / "mac-collector.db"
+            offline = Collector(
+                root=mac_root, harness="claude", source_id="claude:mac:e2e",
+                spool_path=mac_spool, endpoint="http://127.0.0.1:1", token="development-only",
+            )
+            offline_scan = offline.scan()
+            assert offline_scan["records_queued"] == 1
+            assert offline.flush()["acked"] == 0
+            assert offline.doctor()["committed_files"] == 0
+            offline.close()
+            recovery_started = time.monotonic()
+            online = Collector(
+                root=mac_root, harness="claude", source_id="claude:mac:e2e",
+                spool_path=mac_spool, endpoint=base, token="development-only",
+            )
+            recovery = online.flush()
+            recovery_seconds = time.monotonic() - recovery_started
+            assert recovery["acked"] == 1 and recovery_seconds < 30
+            recovered_receipt = online.db.execute("SELECT receipt FROM outbox WHERE state='acked'").fetchone()["receipt"]
+            assert offline_marker in json.dumps(memory.resolve(recovered_receipt))
+            assert online.flush()["acked"] == 0
+            online.close()
             assert diagnostics["legs"] and all(set(leg) == {"leg", "elapsed_ms", "n_results", "timed_out"} for leg in diagnostics["legs"])
             assert "quartz" not in json.dumps(diagnostics).lower()
             assert request(base, "GET", "/v1/receipts/resolve?" + urllib.parse.urlencode({"receipt": first_hit["receipt"]}))[0] == 200
@@ -310,6 +396,59 @@ def main() -> None:
                     assert status == 200
                     assert [item["text_redacted"] for item in resolved["items"]] == [item["text_redacted"] for item in expected]
 
+                export_page = store.session_export(target=fixture_ack["receipts"][0], limit=1000)
+                assert export_page and export_page["page"]["complete"]
+                projected = [item for _env, expected in fixture_records for item in expected]
+                expected_evidence = []
+                for (env, expected) in fixture_records:
+                    for item in expected:
+                        expected_evidence.append(store._session_evidence_id(
+                            env["source_id"], env["native_parent_id"], env["native_id"],
+                            item["ordinal"], item["text_redacted"],
+                        )[0])
+                assert [item["evidence_id"] for item in export_page["items"]] == expected_evidence
+                assert len(export_page["items"]) == len(projected)
+                assert [item.get("entities", []) for item in export_page["items"]] == [
+                    [{"kind": entity["kind"], "value": entity["value"]} for entity in item["entities"]]
+                    for item in projected
+                ]
+
+            # A 1,001-item snapshot cannot claim completion on page one. The opaque
+            # cursor replays the same final page and remains source-authorized.
+            paged_source = "codex:session-export"
+            paged = [
+                make_envelope(
+                    f"page-{index:04d}",
+                    {"text": "[REDACTED]" if index == 500 else f"page event {index}"},
+                    source=paged_source, parent="session-export-1001",
+                )
+                for index in range(1001)
+            ]
+            paged_ack = store.ingest("session-export-1001", paged)[0]
+            first_page = store.session_export(target=paged_ack["receipts"][0], limit=1000)
+            assert first_page and not first_page["page"]["complete"]
+            assert len(first_page["items"]) == 1000
+            cursor = first_page["page"]["next_cursor"]
+            assert cursor.startswith("rsc_") and "session-export" not in cursor
+            appended = make_envelope(
+                "page-1001", {"text": "appended after snapshot"},
+                source=paged_source, parent="session-export-1001",
+            )
+            store.ingest("session-export-appended", [appended])
+            final_page = store.session_export(target=None, cursor=cursor, limit=1000)
+            replay_page = store.session_export(target=None, cursor=cursor, limit=1000)
+            assert final_page["page"]["complete"] and len(final_page["items"]) == 1
+            assert final_page["session"]["source_snapshot_stable"] is False
+            assert [item["evidence_id"] for item in final_page["items"]] == [
+                item["evidence_id"] for item in replay_page["items"]
+            ]
+            assert store.session_export(
+                target=paged_ack["receipts"][0], limit=1000, authorized_source="source:alpha",
+            ) is None
+            assert store.session_export(
+                target=None, cursor=cursor, limit=1000, authorized_source="source:alpha",
+            ) is None
+
             # Secrets remain canonical in raw evidence but never enter projections/API/audit/logs.
             secret = "supersecretvalue123456"
             secret_env = make_envelope("session-secret:turn-1", {"text": f"safe\nAuthorization={secret}\nend"}, parent="session-secret")
@@ -317,6 +456,9 @@ def main() -> None:
             assert status == 201
             status, sanitized = request(base, "GET", "/v1/receipts/resolve?" + urllib.parse.urlencode({"receipt": secret_ack["receipts"][0]}))
             assert status == 200 and secret not in json.dumps(sanitized) and "[REDACTED]" in json.dumps(sanitized)
+            secret_export = store.session_export(target=secret_ack["receipts"][0], limit=1000)
+            assert secret_export and secret not in json.dumps(secret_export, default=str)
+            assert "[REDACTED]" in json.dumps(secret_export, default=str)
             assert request(base, "GET", "/v1/raw/events")[0] == 404
             with store.connect() as conn:
                 assert secret in json.dumps(conn.execute("SELECT envelope FROM source_events WHERE native_id='session-secret:turn-1'").fetchone()["envelope"])
@@ -345,7 +487,8 @@ def main() -> None:
             status, tomb_ack = request(base, "POST", "/v1/ingest/batches", {"events": [tombstone]}, "batch-tombstone")
             assert status == 201 and tomb_ack["receipts"][0].endswith("?rev=3")
             status, old_after_delete = request(base, "GET", "/v1/receipts/resolve?" + urllib.parse.urlencode({"receipt": ack["receipts"][0]}))
-            assert status == 200 and old_after_delete["items"] == []
+            assert status == 404 and old_after_delete == {"error": "not found"}
+            assert store.session_export(target=ack["receipts"][0], limit=1000) is None
             before = {}
             for receipt, _ in fixture_receipts:
                 before[receipt] = request(base, "GET", "/v1/receipts/resolve?" + urllib.parse.urlencode({"receipt": receipt}))[1]
@@ -405,6 +548,12 @@ def main() -> None:
                     "remote_related_context": True,
                     "remote_doctor_content_free": True,
                     "source_scoped_reads": True,
+                    "explicit_memory_rank_at_most_5": True,
+                    "explicit_memory_receipt_exact": True,
+                    "explicit_memory_delete_hides_search_and_receipt": True,
+                    "supported_export_idempotent_with_provenance": True,
+                    "mac_core_offline_recovery_seconds": round(recovery_seconds, 3),
+                    "mac_core_ack_before_cursor": True,
                 }
             assert summary["projection_lag"] == 0
             result = {"status": "pass", "runtime": {"python": sys.version.split()[0], "postgres": "17-alpine", "psycopg": psycopg.__version__}, "summary": summary}

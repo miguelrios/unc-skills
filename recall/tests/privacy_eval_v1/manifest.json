@@ -1,0 +1,15 @@
+{
+  "counts": {
+    "benign": 3,
+    "sensitive": 9,
+    "total": 12
+  },
+  "corpus_sha256": "bc67b12e40fb7a91c86696922cb07a334b270f968641180fbeb08928366506b1",
+  "policy_version": "recall-privacy-v1",
+  "thresholds": {
+    "benign_retention_percent": 100,
+    "safe_text_mutation_percent": 0,
+    "sensitive_canary_survival_percent": 0,
+    "sensitive_recall_percent": 100
+  }
+}
