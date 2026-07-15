@@ -1,0 +1,29 @@
+{
+  "contamination_guard": "pass",
+  "counts": {
+    "corpus_records": 204,
+    "cross-session-synthesis": 12,
+    "deduplication": 12,
+    "deletion-forgetting": 12,
+    "dev": 90,
+    "exact-identifier": 12,
+    "holdout": 42,
+    "negative-premise": 12,
+    "privacy-auth": 12,
+    "queries": 132,
+    "semantic-paraphrase": 12,
+    "session-reconstruction": 12,
+    "source-routed": 12,
+    "temporal-state": 12,
+    "workflow-gotcha": 12
+  },
+  "freeze_epoch": 1784073600,
+  "generator_sha256": "e234782aea8575488ae00e6c9c7437f0f4b8e9e186fec393beed79b292515cc1",
+  "holdout_policy": "Only aggregate scoring may be published for holdout; no tuning or per-query inspection.",
+  "schema_version": 2,
+  "sha256": {
+    "corpus.jsonl": "3913f6a9b929ad5b75c33585bfa045cde9dfb2230c26837bc1eacfcde3b09b41",
+    "queries-dev.jsonl": "1f1416000b0c7e0961814b35dd2d769668b7d165c88d148e54f053ba04200749",
+    "queries-holdout.jsonl": "ee7f8842352756e9620923beb6f4ea76c5e51453bd6d333c2f900db0a674ee28"
+  }
+}

@@ -53,7 +53,8 @@ jobs:
             e2e_connector_supervisor.py \
             e2e_export_inbox.py \
             e2e_federation_ranking.py \
-            e2e_grep_ai.py
+            e2e_grep_ai.py \
+            e2e_retrieval_eval.py
           do
             python "server/tests/$test"
           done
