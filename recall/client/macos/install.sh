@@ -59,7 +59,9 @@ if [ -n "$SOURCES" ] || [ -n "$EXPORT_INBOX" ]; then
   case "$VISIBILITY" in private|shared) ;; *) echo "visibility must be private or shared" >&2; exit 2 ;; esac
 fi
 NORMALIZED_SOURCES=""
-case ",$SOURCES," in *,,*) echo "invalid duplicate or empty source selection" >&2; exit 2 ;; esac
+if [ -n "$SOURCES" ]; then
+  case ",$SOURCES," in *,,*) echo "invalid duplicate or empty source selection" >&2; exit 2 ;; esac
+fi
 for SOURCE_NAME in $(echo "$SOURCES" | tr ',' ' '); do
   case "$SOURCE_NAME" in
     claude|claude-code) NORMALIZED=claude ;;

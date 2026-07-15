@@ -214,6 +214,7 @@ class MacPackageTest(unittest.TestCase):
         self.assertIn('--connector-supervisor-config', installer)
         self.assertIn('--reserved-export-inbox "$EXPORT_INBOX"', installer)
         self.assertIn('--disable-connector-supervisor', installer)
+        self.assertIn('if [ -n "$SOURCES" ]; then\n  case ",$SOURCES,"', installer)
         self.assertIn('"client.cli", "connector-supervisor-run"', installer)
         self.assertIn('"KeepAlive": True', installer)
         self.assertIn('while launchctl print "$TARGET"', installer)
