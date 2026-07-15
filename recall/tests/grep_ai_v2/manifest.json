@@ -1,0 +1,21 @@
+{
+  "schema_version": 2,
+  "corpus": "corpus.jsonl",
+  "corpus_sha256": "25e42f08e1d556b0ae32a45cf1145dcbb3b362b1330779c743f2ee488994bd08",
+  "cases": 20,
+  "unit_contract_matrix": {
+    "pagination": ["empty", "multi_page", "new_head", "opaque_cursor", "cursor_stall", "page_cap"],
+    "bodies": ["malformed_json", "non_utf8", "oversized", "wrong_content_type", "redirect", "alternate_host"],
+    "errors": [401, 402, 403, 404, 409, 422, 429, 500, 503],
+    "retry_after": ["absent", "malformed", "bounded"],
+    "privacy": ["credential_canary", "pii_canary", "private_path_canary", "raw_response_zero_bytes"]
+  },
+  "thresholds": {
+    "completed_projection": 1.0,
+    "nonterminal_projection": 0.0,
+    "invalid_acceptance": 0.0,
+    "sensitive_survival": 0.0,
+    "duplicate_live_items": 0,
+    "raw_response_persistence_bytes": 0
+  }
+}

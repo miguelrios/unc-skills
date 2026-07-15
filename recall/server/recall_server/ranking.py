@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .federation import federation_rank_components
+
 DEFAULT_SEARCH_DEADLINE_MS = 300
 
 
@@ -15,7 +17,9 @@ def should_run_partial(*, candidate_count: int, result_limit: int) -> bool:
 
 def evidence_rank_components(*, legs: set[str], surface: str, lexical_rank: float,
                              matched_count: int, informative_count: int,
-                             has_identifier: bool, recency_factor: float) -> dict:
+                             has_identifier: bool, recency_factor: float,
+                             quality: str = "unrated",
+                             corroborating_families: int = 1) -> dict:
     """Return an observable, content-free evidence vector and its ordering key."""
     if "identifier" in legs or ("entity" in legs and has_identifier):
         evidence_class, class_priority = "identifier", 4
@@ -33,8 +37,12 @@ def evidence_rank_components(*, legs: set[str], surface: str, lexical_rank: floa
         if evidence_class in {"structural", "broad"}
         else 1.0
     )
-    lexical_score = max(0.01, float(lexical_rank)) * surface_weight * recency_factor
+    lexical_score = max(0.01, float(lexical_rank)) * surface_weight
     coverage = matched_count / max(1, informative_count)
+    federation = federation_rank_components(
+        lexical_score=lexical_score, freshness_score=recency_factor,
+        quality=quality, corroborating_families=corroborating_families,
+    )
     return {
         "evidence_class": evidence_class,
         "class_priority": class_priority,
@@ -43,5 +51,6 @@ def evidence_rank_components(*, legs: set[str], surface: str, lexical_rank: floa
         "informative_count": informative_count,
         "coverage": round(coverage, 6),
         "lexical_score": round(lexical_score, 9),
-        "rank_key": [class_priority, origin_priority, lexical_score, coverage],
+        **federation,
+        "rank_key": [class_priority, origin_priority, federation["rank_score"], coverage],
     }

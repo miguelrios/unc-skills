@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Recall BrainStore API
-  version: 0.3.0-c4
+  version: 0.5.0-session-export
   license:
     name: MIT
     identifier: MIT
@@ -77,7 +77,7 @@ paths:
           schema: {type: string}
       responses:
         '200': {description: Sanitized event metadata and projected items}
-        '404': {description: Receipt not found}
+        '404': {description: Receipt not found or deleted by a later tombstone}
         '401': {description: Unauthorized}
   /v1/search:
     post:
@@ -109,6 +109,30 @@ paths:
       responses:
         '200': {description: Ordered sanitized chunks with receipts}
         '404': {description: Source session not found}
+        '401': {description: Unauthorized}
+  /v1/session-export:
+    post:
+      summary: Page through one immutable sanitized session snapshot
+      operationId: exportRecallSession
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                target: {type: string, description: Exact original path or canonical receipt}
+                cursor: {type: string, description: Opaque cursor from the preceding page}
+                limit: {type: integer, minimum: 1, maximum: 1000, default: 1000}
+              oneOf:
+                - required: [target]
+                - required: [cursor]
+      responses:
+        '200': {description: Ordered redacted evidence page with snapshot and coverage receipts}
+        '400': {description: Invalid target, cursor, or limit}
+        '404': {description: Session/cursor not found or outside caller source scope}
         '401': {description: Unauthorized}
   /v1/related:
     post:

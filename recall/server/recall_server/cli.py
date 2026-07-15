@@ -4,11 +4,11 @@ import argparse
 import json
 import logging
 import os
-from pathlib import Path
 
 from . import SCHEMA_VERSION
 from .app import serve, serve_unix
 from .db import BrainStore
+from .federation import QUALITY_SCORES, SOURCE_FAMILIES
 
 
 def main() -> None:
@@ -24,6 +24,12 @@ def main() -> None:
     sub.add_parser("export")
     create_token = sub.add_parser("token-create"); create_token.add_argument("name"); create_token.add_argument("--source"); create_token.add_argument("--scopes", default="read,write"); create_token.add_argument("--output", help="write the one-time plaintext credential to a new mode-0600 file")
     revoke_token = sub.add_parser("token-revoke"); revoke_token.add_argument("name")
+    source_profile = sub.add_parser("source-profile-set")
+    source_profile.add_argument("source_id")
+    source_profile.add_argument("--family", choices=sorted(SOURCE_FAMILIES), required=True)
+    source_profile.add_argument("--quality", choices=sorted(QUALITY_SCORES), required=True)
+    source_profile.add_argument("--freshness-half-life-days", type=int, required=True)
+    sub.add_parser("federation-scoreboard")
     server = sub.add_parser("serve"); server.add_argument("--host", default="127.0.0.1"); server.add_argument("--port", type=int, default=8788); server.add_argument("--unix-socket")
     args = ap.parse_args()
     if not args.dsn:
@@ -49,6 +55,15 @@ def main() -> None:
             print(json.dumps(credential, sort_keys=True))
     elif args.command == "token-revoke":
         print(json.dumps({"revoked": store.revoke_collector_token(args.name)}))
+    elif args.command == "source-profile-set":
+        print(json.dumps(store.set_source_profile({
+            "source_id": args.source_id,
+            "family": args.family,
+            "quality": args.quality,
+            "freshness_half_life_days": args.freshness_half_life_days,
+        }), sort_keys=True))
+    elif args.command == "federation-scoreboard":
+        print(json.dumps(store.federation_scoreboard(), sort_keys=True))
     else:
         if args.unix_socket:
             serve_unix(args.dsn, args.unix_socket)

@@ -13,25 +13,79 @@ usage() {
 
 fingerprint() {
   local dsn=$1
+  local snapshot=${2:-}
+  if [ -n "$snapshot" ]; then
+    psql "$dsn" -XAtq -v ON_ERROR_STOP=1 <<SQL
+BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SET TRANSACTION SNAPSHOT '$snapshot';
+SELECT count(*) || ':' || COALESCE(md5(string_agg(source_id || ':' || native_id || ':' || revision || ':' || content_sha256, '|' ORDER BY id)), md5('')) FROM source_events;
+COMMIT;
+SQL
+    return
+  fi
   psql "$dsn" -At -v ON_ERROR_STOP=1 -c \
     "SELECT count(*) || ':' || COALESCE(md5(string_agg(source_id || ':' || native_id || ':' || revision || ':' || content_sha256, '|' ORDER BY id)), md5('')) FROM source_events"
+}
+
+snapshot_newest_epoch() {
+  local dsn=$1 snapshot=$2
+  psql "$dsn" -XAtq -v ON_ERROR_STOP=1 <<SQL
+BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SET TRANSACTION SNAPSHOT '$snapshot';
+SELECT COALESCE(extract(epoch FROM max(created_at))::bigint,0) FROM source_events;
+COMMIT;
+SQL
 }
 
 case "$MODE" in
   backup)
     [ -n "$BACKUP_DIR" ] && [ -n "${RECALL_DATABASE_URL:-}" ] || usage
     mkdir -p "$BACKUP_DIR"
+    stage=$(mktemp -d "$BACKUP_DIR/.backup.XXXXXX")
+    snapshot_pid=''
+    snapshot_release="$stage/snapshot-release"
+    snapshot_output="$stage/snapshot-id"
+    mkfifo "$snapshot_release"
+    exec 9<>"$snapshot_release"
+    cleanup_backup() {
+      if [ -n "$snapshot_pid" ]; then
+        printf 'release\n' >&9 || true
+        wait "$snapshot_pid" 2>/dev/null || true
+      fi
+      exec 9>&- 9<&- || true
+      rm -rf "$stage"
+    }
+    trap cleanup_backup EXIT
     started=$(date -u +%s)
     started_ms=$(date -u +%s%3N)
-    docker run --rm --network host -v "$BACKUP_DIR:/backup" "$TOOLS_IMAGE" \
-      pg_dump "$RECALL_DATABASE_URL" --format=custom --no-owner --file=/backup/brain.dump
-    dump_sha=$(sha256sum "$BACKUP_DIR/brain.dump" | awk '{print $1}')
-    source_fingerprint=$(fingerprint "$RECALL_DATABASE_URL")
-    newest_epoch=$(psql "$RECALL_DATABASE_URL" -At -c "SELECT COALESCE(extract(epoch FROM max(created_at))::bigint,0) FROM source_events")
+    (
+      psql "$RECALL_DATABASE_URL" -XAtq -v ON_ERROR_STOP=1 <<SQL
+BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SELECT pg_export_snapshot();
+\! read ignored < "$snapshot_release"
+ROLLBACK;
+SQL
+    ) >"$snapshot_output" &
+    snapshot_pid=$!
+    for _ in $(seq 1 100); do
+      [ -s "$snapshot_output" ] && break
+      kill -0 "$snapshot_pid" 2>/dev/null || { wait "$snapshot_pid"; exit 1; }
+      sleep 0.05
+    done
+    read -r database_snapshot < "$snapshot_output"
+    case "$database_snapshot" in ''|*[!A-Fa-f0-9-]*) echo "invalid exported database snapshot" >&2; exit 1;; esac
+    source_fingerprint=$(fingerprint "$RECALL_DATABASE_URL" "$database_snapshot")
+    newest_epoch=$(snapshot_newest_epoch "$RECALL_DATABASE_URL" "$database_snapshot")
+    docker run --rm --network host -v "$stage:/backup" "$TOOLS_IMAGE" \
+      pg_dump "$RECALL_DATABASE_URL" --snapshot="$database_snapshot" --format=custom --no-owner --file=/backup/brain.dump
+    printf 'release\n' >&9
+    wait "$snapshot_pid"
+    snapshot_pid=''
+    dump_sha=$(sha256sum "$stage/brain.dump" | awk '{print $1}')
     completed=$(date -u +%s)
     completed_ms=$(date -u +%s%3N)
-    BACKUP_DIR="$BACKUP_DIR" STARTED="$started" COMPLETED="$completed" STARTED_MS="$started_ms" COMPLETED_MS="$completed_ms" DUMP_SHA="$dump_sha" \
-      SOURCE_FINGERPRINT="$source_fingerprint" NEWEST_EPOCH="$newest_epoch" TOOLS_IMAGE="$TOOLS_IMAGE" \
+    BACKUP_DIR="$stage" STARTED="$started" COMPLETED="$completed" STARTED_MS="$started_ms" COMPLETED_MS="$completed_ms" DUMP_SHA="$dump_sha" \
+      SOURCE_FINGERPRINT="$source_fingerprint" NEWEST_EPOCH="$newest_epoch" TOOLS_IMAGE="$TOOLS_IMAGE" DATABASE_SNAPSHOT="$database_snapshot" \
       python3 - <<'PY'
 import json, os
 from pathlib import Path
@@ -45,22 +99,33 @@ manifest = {
     "rpo_seconds_at_backup": max(0, int(os.environ["COMPLETED"]) - int(os.environ["NEWEST_EPOCH"])),
     "dump_sha256": os.environ["DUMP_SHA"],
     "source_fingerprint": os.environ["SOURCE_FINGERPRINT"],
+    "database_snapshot": os.environ["DATABASE_SNAPSHOT"],
     "pg_tools_image": os.environ["TOOLS_IMAGE"],
 }
 Path(os.environ["BACKUP_DIR"], "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 print(json.dumps(manifest, sort_keys=True))
 PY
+    mv -f "$stage/brain.dump" "$BACKUP_DIR/brain.dump"
+    mv -f "$stage/manifest.json" "$BACKUP_DIR/manifest.json"
+    rm -f "$stage/snapshot-release" "$stage/snapshot-id"
+    rmdir "$stage"
+    exec 9>&- 9<&-
+    trap - EXIT
     ;;
   restore-test)
     [ -n "$BACKUP_DIR" ] && [ -n "${RECALL_RESTORE_DATABASE_URL:-}" ] || usage
     [ -f "$BACKUP_DIR/brain.dump" ] && [ -f "$BACKUP_DIR/manifest.json" ] || usage
-    expected_sha=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["dump_sha256"])' "$BACKUP_DIR/manifest.json")
-    actual_sha=$(sha256sum "$BACKUP_DIR/brain.dump" | awk '{print $1}')
+    snapshot=$(mktemp -d "$BACKUP_DIR/.restore.XXXXXX")
+    trap 'rm -rf "$snapshot"' EXIT
+    cp --reflink=auto -- "$BACKUP_DIR/brain.dump" "$snapshot/brain.dump"
+    cp "$BACKUP_DIR/manifest.json" "$snapshot/manifest.json"
+    expected_sha=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["dump_sha256"])' "$snapshot/manifest.json")
+    actual_sha=$(sha256sum "$snapshot/brain.dump" | awk '{print $1}')
     [ "$expected_sha" = "$actual_sha" ] || { echo "dump hash mismatch" >&2; exit 1; }
-    expected_fingerprint=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_fingerprint"])' "$BACKUP_DIR/manifest.json")
+    expected_fingerprint=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_fingerprint"])' "$snapshot/manifest.json")
     started=$(date -u +%s)
     started_ms=$(date -u +%s%3N)
-    docker run --rm --network host -v "$BACKUP_DIR:/backup:ro" "$TOOLS_IMAGE" \
+    docker run --rm --network host -v "$snapshot:/backup:ro" "$TOOLS_IMAGE" \
       pg_restore --dbname="$RECALL_RESTORE_DATABASE_URL" --clean --if-exists --no-owner /backup/brain.dump
     actual_fingerprint=$(fingerprint "$RECALL_RESTORE_DATABASE_URL")
     completed=$(date -u +%s)
@@ -76,6 +141,8 @@ print(json.dumps({
     "rto_ms": int(os.environ["COMPLETED_MS"]) - int(os.environ["STARTED_MS"]),
 }, sort_keys=True))
 PY
+    rm -rf "$snapshot"
+    trap - EXIT
     ;;
   *) usage ;;
 esac

@@ -174,7 +174,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlsplit(self.path).path
-        if path in {"/v1/search", "/v1/show", "/v1/related"}:
+        if path in {"/v1/search", "/v1/show", "/v1/related", "/v1/session-export"}:
             principal = self.require("read")
             if not principal:
                 return
@@ -200,12 +200,19 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     if result is None:
                         self.send_json(404, {"error": "not found"}); return
-                else:
+                elif path == "/v1/related":
                     result = self.store.related(
                         cwd=body.get("cwd"), branch=body.get("branch"), limit=body.get("limit", 10),
                         mains_only=bool(body.get("mains_only", False)), fast=bool(body.get("fast", False)),
                         authorized_source=authorized_source,
                     )
+                else:
+                    result = self.store.session_export(
+                        target=body.get("target"), cursor=body.get("cursor"),
+                        limit=body.get("limit", 1000), authorized_source=authorized_source,
+                    )
+                    if result is None:
+                        self.send_json(404, {"error": "not found"}); return
                 self.send_json(200, result)
             except (ValueError, TypeError, json.JSONDecodeError) as exc:
                 self.send_json(400, {"error": str(exc)})
