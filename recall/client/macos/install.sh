@@ -173,6 +173,7 @@ value = {
     "RunAtLoad": True,
     "StartInterval": 30,
     "ProcessType": "Background",
+    "Umask": 0o077,
     "StandardOutPath": spool + ".stdout.log",
     "StandardErrorPath": spool + ".stderr.log",
 }
@@ -215,6 +216,7 @@ value = {
     "RunAtLoad": True,
     "StartInterval": 30,
     "ProcessType": "Background",
+    "Umask": 0o077,
     "StandardOutPath": spool + ".stdout.log",
     "StandardErrorPath": spool + ".stderr.log",
 }
@@ -257,6 +259,7 @@ value = {
     "RunAtLoad": True,
     "StartInterval": 30,
     "ProcessType": "Background",
+    "Umask": 0o077,
     "StandardOutPath": spool + ".stdout.log",
     "StandardErrorPath": spool + ".stderr.log",
 }
@@ -299,6 +302,7 @@ value = {
     "KeepAlive": True,
     "ThrottleInterval": 10,
     "ProcessType": "Background",
+    "Umask": 0o077,
     "StandardOutPath": state + ".stdout.log",
     "StandardErrorPath": state + ".stderr.log",
 }

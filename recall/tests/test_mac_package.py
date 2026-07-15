@@ -217,6 +217,7 @@ class MacPackageTest(unittest.TestCase):
         self.assertIn('if [ -n "$SOURCES" ]; then\n  case ",$SOURCES,"', installer)
         self.assertIn('"client.cli", "connector-supervisor-run"', installer)
         self.assertIn('"KeepAlive": True', installer)
+        self.assertEqual(installer.count('"Umask": 0o077'), 4)
         self.assertIn('while launchctl print "$TARGET"', installer)
         self.assertIn('launch agent stop did not converge', installer)
         self.assertIn('stop_launch_agent "$LABEL"', installer)
