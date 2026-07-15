@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import os
 import platform
 import re
 import ssl
@@ -35,6 +34,8 @@ SAFE_EXPORT_SUFFIXES = {".json", ".jsonl"}
 SOURCE_ID = re.compile(r"^[A-Za-z0-9_.:@-]{3,160}$")
 MAX_INGEST_BYTES = 8_000_000
 MAX_INGEST_EVENTS = 500
+MAX_EXPORT_BYTES = 256_000_000
+MAX_ARCHIVE_MEMBERS = 10_000
 
 
 class PrivacyError(ValueError):
@@ -67,6 +68,43 @@ def _validate_source_id(value: str) -> str:
     if not SOURCE_ID.fullmatch(value):
         raise ValueError("invalid source id")
     return value
+
+
+def _validated_endpoint(value: str) -> str:
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        port = parsed.port
+    except (AttributeError, TypeError, ValueError) as error:
+        raise ValueError("endpoint is invalid") from error
+    if (
+        not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("endpoint must not contain credentials, query, or fragment")
+    scheme = parsed.scheme.casefold()
+    if scheme == "https":
+        pass
+    elif (
+        scheme == "http"
+        and parsed.hostname.casefold() in {"127.0.0.1", "localhost"}
+        and port is not None
+        and port >= 1
+    ):
+        pass
+    else:
+        raise ValueError("endpoint must use HTTPS except for loopback tests with an explicit port")
+    return value.rstrip("/")
+
+
+def _read_bounded(path: Path) -> bytes:
+    with path.open("rb") as source:
+        data = source.read(MAX_EXPORT_BYTES + 1)
+    if len(data) > MAX_EXPORT_BYTES:
+        raise PrivacyError("supported export input exceeds the size limit")
+    return data
 
 
 def _forbid_private_app_path(path: Path, home: Path) -> None:
@@ -258,9 +296,7 @@ class BrainClient:
     def __init__(self, *, endpoint: str, token: str, source_id: str,
                  principal_id: str = "owner", visibility: str = "private",
                  privacy: PrivacyPolicy | None = None):
-        if not endpoint.startswith(("https://", "http://127.0.0.1:", "http://localhost:")):
-            raise ValueError("endpoint must use HTTPS except for loopback tests")
-        self.endpoint = endpoint.rstrip("/")
+        self.endpoint = _validated_endpoint(endpoint)
         self.token = token
         self.source_id = _validate_source_id(source_id)
         self.principal_id = principal_id
@@ -451,22 +487,33 @@ class ExportImporter:
             path = requested.resolve(strict=True)
             if not path.is_file():
                 raise PrivacyError(f"supported export input must be a regular file: {path}")
+            if path.stat().st_size > MAX_EXPORT_BYTES:
+                raise PrivacyError("supported export input exceeds the size limit")
             file_sha = sha256_file(path)
             files.append({"name": path.name, "bytes": path.stat().st_size, "sha256": file_sha})
             if path.suffix.casefold() == ".zip":
                 with zipfile.ZipFile(path) as archive:
-                    for info in sorted(archive.infolist(), key=lambda item: item.filename):
+                    members = archive.infolist()
+                    if len(members) > MAX_ARCHIVE_MEMBERS:
+                        raise PrivacyError("supported export archive has too many members")
+                    expanded_bytes = 0
+                    for info in sorted(members, key=lambda item: item.filename):
                         member = _safe_member(info)
                         suffix = member.suffix.casefold()
                         if info.is_dir() or suffix not in SAFE_EXPORT_SUFFIXES:
                             continue
+                        if info.file_size > MAX_EXPORT_BYTES or info.compress_size > MAX_EXPORT_BYTES:
+                            raise PrivacyError("supported export archive member exceeds the size limit")
+                        expanded_bytes += info.file_size
+                        if expanded_bytes > MAX_EXPORT_BYTES:
+                            raise PrivacyError("supported export archive exceeds the expansion limit")
                         for index, content in enumerate(_records_from_bytes(archive.read(info), suffix)):
                             decision = self.privacy.apply(content)
                             privacy_receipts.append(decision.receipt())
                             if decision.action != "drop":
                                 records.append(self._export_envelope(path, file_sha, f"{member.as_posix()}#record={index}", index, decision.value))
             elif path.suffix.casefold() in SAFE_EXPORT_SUFFIXES:
-                for index, content in enumerate(_records_from_bytes(path.read_bytes(), path.suffix.casefold())):
+                for index, content in enumerate(_records_from_bytes(_read_bounded(path), path.suffix.casefold())):
                     decision = self.privacy.apply(content)
                     privacy_receipts.append(decision.receipt())
                     if decision.action != "drop":

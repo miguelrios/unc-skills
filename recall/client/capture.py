@@ -142,4 +142,3 @@ class CaptureClient(MemoryClient):
             "native_id": deleted["native_id"], "receipt": deleted["receipt"],
             "replay": bool(deleted["acknowledgement"].get("replay", False)),
         }
-

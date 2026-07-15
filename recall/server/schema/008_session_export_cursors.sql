@@ -17,5 +17,5 @@ CREATE TABLE IF NOT EXISTS session_export_cursors (
 CREATE INDEX IF NOT EXISTS session_export_cursors_expiry_idx
     ON session_export_cursors(expires_at);
 
-INSERT INTO schema_migrations(version) VALUES (7) ON CONFLICT DO NOTHING;
+INSERT INTO schema_migrations(version) VALUES (8) ON CONFLICT DO NOTHING;
 COMMIT;

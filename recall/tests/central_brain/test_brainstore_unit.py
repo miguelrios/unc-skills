@@ -9,6 +9,7 @@ from pathlib import Path
 SERVER = Path(__file__).resolve().parents[2] / "server"
 sys.path.insert(0, str(SERVER))
 
+from recall_server import SCHEMA_VERSION
 from recall_server.projectors import advisory_lock_key, canonical_json, partial_lexical_probes, phrase_query_spec, preferred_phrase_probe, preferred_phrase_probes, project, redact_text, validate_envelope
 from recall_server.ranking import DEFAULT_SEARCH_DEADLINE_MS, evidence_rank_components, retrieval_leg_order, should_run_partial
 
@@ -31,6 +32,18 @@ def envelope(**updates):
     value.update(updates)
     value["content_sha256"] = hashlib.sha256(canonical_json(value["content"])).hexdigest()
     return value
+
+
+class SchemaMigrationContractTest(unittest.TestCase):
+    def test_migration_versions_are_unique_contiguous_and_current(self) -> None:
+        migrations = sorted((SERVER / "schema").glob("*.sql"))
+        versions = [int(path.name.split("_", 1)[0]) for path in migrations]
+        self.assertEqual(versions, list(range(1, SCHEMA_VERSION + 1)))
+        for version, path in zip(versions, migrations, strict=True):
+            self.assertRegex(
+                path.read_text(),
+                rf"schema_migrations\(version\) VALUES \({version}\)",
+            )
 
 
 class EnvelopeContractTest(unittest.TestCase):

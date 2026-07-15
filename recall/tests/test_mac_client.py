@@ -4,7 +4,6 @@ import hashlib
 import contextlib
 import io
 import json
-import os
 import tempfile
 import unittest
 import zipfile
@@ -12,7 +11,7 @@ from pathlib import Path
 from unittest import mock
 from client import cli as client_cli
 
-from client.mac import ExportImporter, MemoryClient, PrivacyError, dry_run_manifest
+from client.mac import BrainClient, ExportImporter, MemoryClient, PrivacyError, dry_run_manifest
 from privacy.policy import PrivacyPolicy
 
 
@@ -136,6 +135,32 @@ class SupportedExportTest(unittest.TestCase):
         with self.assertRaisesRegex(PrivacyError, "must not be a symlink"):
             importer.inventory([alias])
 
+    def test_export_file_member_count_and_expansion_limits_fail_closed(self) -> None:
+        importer = ExportImporter(
+            source_id="export:mac:test", principal_id="owner", visibility="private",
+        )
+        oversized = self.root / "oversized.jsonl"
+        oversized.write_bytes(b"{}\n" * 20)
+        with mock.patch("client.mac.MAX_EXPORT_BYTES", 32):
+            with self.assertRaisesRegex(PrivacyError, "size limit"):
+                importer.inventory([oversized])
+
+        too_many = self.root / "too-many.zip"
+        with zipfile.ZipFile(too_many, "w") as output:
+            output.writestr("one.json", "{}")
+            output.writestr("two.json", "{}")
+        with mock.patch("client.mac.MAX_ARCHIVE_MEMBERS", 1):
+            with self.assertRaisesRegex(PrivacyError, "too many members"):
+                importer.inventory([too_many])
+
+        expansion = self.root / "expansion.zip"
+        with zipfile.ZipFile(expansion, "w", compression=zipfile.ZIP_DEFLATED) as output:
+            output.writestr("large.json", json.dumps({"text": "x" * 4096}))
+        self.assertLess(expansion.stat().st_size, 512)
+        with mock.patch("client.mac.MAX_EXPORT_BYTES", 512):
+            with self.assertRaisesRegex(PrivacyError, "size limit|expansion limit"):
+                importer.inventory([expansion])
+
 
 class FakeResponse:
     def __init__(self, status: int, body: dict):
@@ -150,6 +175,29 @@ class FakeResponse:
 
     def read(self) -> bytes:
         return self.body
+
+
+class BrainEndpointValidationTest(unittest.TestCase):
+    def test_loopback_exception_is_parsed_instead_of_prefix_matched(self) -> None:
+        for endpoint in (
+            "http://127.0.0.1:8788",
+            "http://localhost:8788/base",
+            "https://brain.example.invalid",
+        ):
+            with self.subTest(endpoint=endpoint):
+                client = BrainClient(endpoint=endpoint, token="synthetic", source_id="test-source")
+                self.assertEqual(client.endpoint, endpoint)
+
+        for endpoint in (
+            "http://127.0.0.1:80@attacker.invalid",
+            "http://localhost:80@attacker.invalid",
+            "http://127.0.0.1",
+            "http://127.0.0.1:0",
+            "https://owner@brain.example.invalid",
+            "https://brain.example.invalid?redirect=https://attacker.invalid",
+        ):
+            with self.subTest(endpoint=endpoint), self.assertRaises(ValueError):
+                BrainClient(endpoint=endpoint, token="synthetic", source_id="test-source")
 
 
 class ExplicitMemoryTest(unittest.TestCase):

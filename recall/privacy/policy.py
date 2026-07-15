@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import copy
 from datetime import datetime, timedelta, timezone
+from itertools import pairwise
 import json
+import os
 import re
 import ssl
 import stat
@@ -26,6 +28,26 @@ SENSITIVE_KEY = re.compile(
     r"(?:litellm.*master.*key|api[_-]?key|password|secret|authorization|bearer|access[_-]?token|refresh[_-]?token|private[_-]?key)$",
     re.I,
 )
+APPROVED_JUDGE_BASE_URL_ENV = "RECALL_PRIVACY_JUDGE_ALLOWED_BASE_URL"
+
+
+def _canonical_https_base_url(value: str, *, label: str) -> tuple[str, str, int, str]:
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        port = parsed.port or 443
+    except (AttributeError, TypeError, ValueError) as error:
+        raise ValueError(f"{label} is invalid") from error
+    if (
+        parsed.scheme.casefold() != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(f"{label} must be an HTTPS URL without credentials, query, or fragment")
+    path = parsed.path.rstrip("/")
+    return "https", parsed.hostname.casefold().rstrip("."), port, path
 
 
 @dataclass(frozen=True)
@@ -117,7 +139,7 @@ def _validated_spans(spans: list[dict[str, Any]], text: str, *, agentic: bool) -
             raise ValueError("privacy judge returned an unsupported category")
         clean.append({"start": start, "end": end, "category": category})
     clean.sort(key=lambda item: (item["start"], item["end"]))
-    for left, right in zip(clean, clean[1:]):
+    for left, right in pairwise(clean):
         if right["start"] < left["end"]:
             raise ValueError("privacy spans overlap")
     return clean
@@ -127,10 +149,17 @@ class AgenticJudge:
     """Ephemeral, schema-validated contextual-PII adapter for staging LiteLLM."""
 
     def __init__(self, *, base_url: str, virtual_key: str, model: str, timeout: float = 20.0):
-        parsed = urllib.parse.urlparse(base_url)
-        hostname = (parsed.hostname or "").casefold()
-        if parsed.scheme != "https" or "staging" not in hostname or "litellm" not in hostname:
-            raise ValueError("privacy judge must use the staging LiteLLM router")
+        approved_base_url = os.environ.get(APPROVED_JUDGE_BASE_URL_ENV)
+        if not approved_base_url:
+            raise ValueError(
+                f"privacy judge requires an approved staging LiteLLM base URL in {APPROVED_JUDGE_BASE_URL_ENV}"
+            )
+        approved = _canonical_https_base_url(
+            approved_base_url, label="approved staging LiteLLM base URL",
+        )
+        configured = _canonical_https_base_url(base_url, label="privacy judge base URL")
+        if configured != approved:
+            raise ValueError("privacy judge must use the exact approved staging LiteLLM base URL")
         if not virtual_key or not model:
             raise ValueError("privacy judge requires a scoped virtual key and model")
         self.endpoint = base_url.rstrip("/") + "/chat/completions"

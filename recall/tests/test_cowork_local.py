@@ -111,9 +111,14 @@ class FakeBrain:
         if self.fail:
             raise OSError("synthetic unavailable")
         return {
+            "status": "committed",
+            "inserted": len(events),
+            "duplicate_events": 0,
             "receipts": [
-                f"recall://synthetic/{event['native_id']}?rev=1" for event in events
-            ]
+                f"recall://{event['source_id']}/{event['native_id']}?rev=1"
+                for event in events
+            ],
+            "replay": False,
         }
 
 

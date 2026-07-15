@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import tempfile
 import unittest
@@ -14,6 +15,7 @@ from privacy.policy import AgenticJudge, PrivacyPolicy
 
 CORPUS = Path(__file__).with_name("privacy_eval_v1") / "corpus.jsonl"
 MANIFEST = CORPUS.with_name("manifest.json")
+JUDGE_BASE_URL = "https://litellm.staging.example.invalid"
 
 
 def corpus() -> list[dict]:
@@ -84,6 +86,9 @@ class FrozenPrivacyEvalTest(unittest.TestCase):
         self.assertNotIn(canary, json.dumps(decision.receipt()))
 
 
+@mock.patch.dict(os.environ, {
+    "RECALL_PRIVACY_JUDGE_ALLOWED_BASE_URL": JUDGE_BASE_URL,
+})
 class AgenticJudgeContractTest(unittest.TestCase):
     def test_staging_router_schema_and_ephemeral_transport(self) -> None:
         response = mock.MagicMock()
@@ -94,7 +99,7 @@ class AgenticJudgeContractTest(unittest.TestCase):
             })}}]
         }).encode()
         judge = AgenticJudge(
-            base_url="https://litellm.staging.example.invalid",
+            base_url=JUDGE_BASE_URL,
             virtual_key="synthetic-scoped-virtual-key",
             model="privacy-judge",
         )
@@ -110,7 +115,7 @@ class AgenticJudgeContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "staging LiteLLM"):
             AgenticJudge(base_url="https://api.openai.com", virtual_key="scoped", model="judge")
         judge = AgenticJudge(
-            base_url="https://litellm.staging.example.invalid",
+            base_url=JUDGE_BASE_URL,
             virtual_key="scoped",
             model="judge",
         )
@@ -122,6 +127,19 @@ class AgenticJudgeContractTest(unittest.TestCase):
         with mock.patch("urllib.request.urlopen", return_value=response):
             with self.assertRaisesRegex(ValueError, "span"):
                 judge("synthetic")
+
+    def test_router_must_match_separately_approved_base_url_exactly(self) -> None:
+        for value in (
+            "https://staging-litellm.attacker.invalid",
+            "https://litellm.staging.example.invalid.attacker.invalid",
+            "https://owner@litellm.staging.example.invalid",
+            JUDGE_BASE_URL + "?redirect=https://attacker.invalid",
+        ):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "approved|credentials"):
+                AgenticJudge(base_url=value, virtual_key="scoped", model="judge")
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(ValueError, "ALLOWED_BASE_URL"):
+                AgenticJudge(base_url=JUDGE_BASE_URL, virtual_key="scoped", model="judge")
 
     def test_scoped_key_file_requires_private_mode_scope_and_expiry(self) -> None:
         from privacy.policy import load_scoped_virtual_key
