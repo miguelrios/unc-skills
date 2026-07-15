@@ -369,7 +369,7 @@ class BrainStore:
             source_id, native_id = source_native.split("/", 1)
             revision = int(query)
         except (ValueError, TypeError):
-            raise ValueError("invalid receipt")
+            raise ValueError("invalid receipt") from None
         with self.connect() as conn:
             event = conn.execute(
                 """SELECT id,source_id,native_id,native_parent_id,kind,occurred_at,observed_at,principal_id,
@@ -710,7 +710,7 @@ class BrainStore:
                     source_id, native_id = base.removeprefix("recall://").split("/", 1)
                     int(revision)
                 except (ValueError, TypeError):
-                    raise ValueError("invalid receipt")
+                    raise ValueError("invalid receipt") from None
                 identity = conn.execute(
                     "SELECT source_id,COALESCE(native_parent_id,native_id) AS session_native_id FROM source_events WHERE source_id=%s AND native_id=%s AND revision=%s AND (%s::text IS NULL OR source_id=%s)",
                     (source_id, native_id, int(revision), authorized_source, authorized_source),
@@ -797,7 +797,7 @@ class BrainStore:
                         source_id, native_id = base.removeprefix("recall://").split("/", 1)
                         int(revision)
                     except (ValueError, TypeError):
-                        raise ValueError("invalid receipt")
+                        raise ValueError("invalid receipt") from None
                     identity = conn.execute(
                         """SELECT source_id,COALESCE(native_parent_id,native_id) AS session_native_id
                            FROM source_events event WHERE source_id=%s AND native_id=%s AND revision=%s

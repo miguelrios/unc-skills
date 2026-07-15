@@ -8,7 +8,6 @@ import ctypes.util
 import json
 import os
 import shutil
-import stat
 import sys
 import urllib.error
 import zipfile

@@ -661,7 +661,6 @@ class RecallEngineTest(unittest.TestCase):
     def test_entity_boost_filters_and_codex_reader(self):
         c = self.write_claude("old.jsonl")
         # A generic recent session supplies a less-specific ordinary match.
-        uuid = "12345678-1234-1234-1234-123456789abc"
         (self.claude / "generic.jsonl").write_text(json.dumps({"type":"user","timestamp":"2026-07-01T00:00:00Z","cwd":"/other","message":{"content":"mention an unrelated identifier"}}) + "\n")
         codex = self.copy_codex(); self.cli("index")
         # Seed a matching legacy-style chunk with no entities: the exact UUID

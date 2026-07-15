@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -135,7 +134,7 @@ def main() -> int:
         print("(no matches)", file=sys.stderr)
         return 2
 
-    for i, (count, p, ts, snippet) in enumerate(results[: args.top]):
+    for _i, (count, p, ts, snippet) in enumerate(results[: args.top]):
         rel = p.relative_to(Path.home())
         print(f"[{count:3d} matches] {ts or '?':<28} ~/{rel}")
         if snippet:

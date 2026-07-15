@@ -4,7 +4,6 @@ import argparse
 import json
 import logging
 import os
-from pathlib import Path
 
 from . import SCHEMA_VERSION
 from .app import serve, serve_unix

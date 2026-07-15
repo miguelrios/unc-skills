@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from datetime import datetime
 from typing import Any
 from urllib.parse import urlparse
 
 from client.mac import MemoryClient, _envelope, canonical_json
-from privacy.policy import PrivacyPolicy, summarize_receipts
+from privacy.policy import summarize_receipts
 
 
 CAPTURE_SCHEMA_VERSION = 1

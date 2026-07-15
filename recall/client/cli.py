@@ -38,7 +38,6 @@ from connectors.supervisor import (
 )
 from connectors.host import (
     ConnectorHostError,
-    build_host,
     load_host_config,
     preview_host_config,
     run_host_daemon,

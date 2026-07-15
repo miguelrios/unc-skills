@@ -7,7 +7,6 @@ import os
 import socket
 import ssl
 import sys
-import time
 import urllib.error
 import urllib.parse
 import urllib.request

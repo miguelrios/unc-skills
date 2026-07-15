@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import plistlib
 import subprocess
 import sys
 import tarfile
@@ -207,21 +205,6 @@ class MacPackageTest(unittest.TestCase):
         self.assertEqual(invalid.returncode, 2)
         self.assertIn("mutually exclusive", invalid.stderr)
 
-        home = self.root / "home"
-        home.mkdir()
-        env = {**os.environ, "HOME": str(home)}
-        prefix = home / "Library" / "Application Support" / "RecallBrain"
-        launch_agents = home / "Library" / "LaunchAgents"
-        common = [
-            "--prefix", str(prefix),
-            "--launch-agents", str(launch_agents),
-            "--endpoint", "https://brain.example.ts.net",
-            "--host-id", "test-mac",
-            "--keychain-service", "ai.parcha.recall.test",
-            "--visibility", "private",
-            "--sources", "claude,codex",
-            "--no-load",
-        ]
         # Installation executes and validates the Mach-O runtime, so that E2E belongs
         # on the real Apple-arm64 target. This unit test pins its generated plist contract.
         self.assertIn('"ProgramArguments": [', installer)
