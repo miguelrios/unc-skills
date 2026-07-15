@@ -28,8 +28,31 @@ FTS_LEG_LIMIT = 400
 SECRET_RE = re.compile(
     r"[\"']?(?:api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|token|secret|password|bearer|authorization|\bkey)"
     r"[\"']?\s*[=:]\s*[\"']?(?:Bearer\s+)?\S{12,}|"
-    r"sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|"
-    r"(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}|AKIA[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{30,}",
+    r"sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{40,}|"
+    r"sk-(?!ant-|or-v1-)[A-Za-z0-9_-]{32,}|"
+    r"sk-ant-(?:api03|admin01)-[A-Za-z0-9_-]{80,}AA|"
+    r"sk-or-v1-[A-Za-z0-9_-]{20,}|gsk_[A-Za-z0-9]{20,}|"
+    r"xai-[A-Za-z0-9_-]{20,}|pplx-[A-Za-z0-9_-]{20,}|csk-[A-Za-z0-9_-]{20,}|"
+    r"xox[baprs]-[A-Za-z0-9-]{20,}|"
+    r"(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}|ops_[A-Za-z0-9_-]{20,}|"
+    r"A[KS]IA[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{35}|"
+    r"(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,}|"
+    r"pcsk_[A-Za-z0-9_-]{20,}|lsv2_[A-Za-z0-9_-]{20,}|"
+    r"Bearer\s+[A-Za-z0-9._~+/=-]{20,}|"
+    r"[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@",
+    re.I,
+)
+GENERIC_ASSIGNMENT_RE = re.compile(
+    r'''(?ix)(?<![A-Za-z0-9_.-])["']?[A-Za-z0-9_.-]*'''
+    r'''(?:api[_-]?key|apikey|api|token|secret|password|passwd|pass|credential|creds|key|'''
+    r'''access|private[_-]?key|'''
+    r'''access[_-]?key|client[_-]?secret|authorization|auth)[A-Za-z0-9_.-]*["']?'''
+    r'''\s*[:=]\s*["']?(?:Bearer\s+)?[^\s,"']{12,}'''
+)
+PROXIMITY_SECRET_RE = re.compile(
+    r"\bsntryu_[a-f0-9]{64}\b|"
+    r"sentry(?:.|[\n\r]){0,40}?\b[a-f0-9]{64}\b|"
+    r"(?:phrase|accessToken|access_token)(?:.|[\n\r]){0,40}?\b[a-z0-9]{64}\b",
     re.I,
 )
 PRIVATE_KEY_RE = re.compile(
@@ -346,8 +369,15 @@ def iso(value: str | None) -> float | None:
 def clean_text(value) -> str:
     if not isinstance(value, str):
         value = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    if any(
+        "\n" in match.group(0) or "\r" in match.group(0)
+        for match in GENERIC_ASSIGNMENT_RE.finditer(value)
+    ) or PROXIMITY_SECRET_RE.search(value):
+        return "[redacted-secret-line]"
     value = PRIVATE_KEY_RE.sub("[redacted-private-key-block]", value)
-    return "\n".join("[redacted-secret-line]" if SECRET_RE.search(line) else line
+    return "\n".join("[redacted-secret-line]" if (
+        SECRET_RE.search(line) or GENERIC_ASSIGNMENT_RE.search(line)
+    ) else line
                      for line in value.splitlines())
 
 
@@ -923,12 +953,14 @@ def session_evidence_id(source_id: str, session_id: str, event_native_id: str,
 def resolve_current_session() -> Path:
     claude, codex, _ = paths()
     thread_id = os.environ.get("CODEX_THREAD_ID")
+    claude_id = os.environ.get("CLAUDE_SESSION_ID")
+    if thread_id and claude_id:
+        raise ValueError("current harness identity is ambiguous; pass --target explicitly")
     if thread_id:
         matches = [path for path in codex.rglob(f"*{thread_id}*.jsonl") if path.name.startswith("rollout-")]
         if len(matches) != 1:
             raise ValueError(f"current Codex identity resolved to {len(matches)} sessions")
         return matches[0].resolve()
-    claude_id = os.environ.get("CLAUDE_SESSION_ID")
     if claude_id:
         matches = [path for path in claude.rglob(f"*{claude_id}*.jsonl") if path.is_file()]
         if len(matches) != 1:
@@ -980,6 +1012,16 @@ def _native_session_metadata(path: Path, harness: str) -> dict | None:
                     parent = spawn.get("parent_thread_id")
                 forked = payload.get("forked_from_id")
                 node_id = payload.get("id")
+                unsafe_relation = any(
+                    isinstance(value, str) and clean_text(value) != value
+                    for value in (node_id, parent, forked)
+                )
+                if unsafe_relation:
+                    return {
+                        "node_id": None, "harness": harness, "path": str(path.resolve()),
+                        "parent_id": None, "forked_from_id": None,
+                        "relationship_error": "unsafe_native_identity",
+                    }
                 if not isinstance(node_id, str):
                     if isinstance(parent, str) or isinstance(forked, str):
                         return {
@@ -1002,6 +1044,16 @@ def _native_session_metadata(path: Path, harness: str) -> dict | None:
                 agent_id = record.get("agentId")
                 if not isinstance(session_id, str):
                     continue
+                forked_id = record.get("forkedFromSessionId")
+                if any(
+                    isinstance(value, str) and clean_text(value) != value
+                    for value in (session_id, agent_id, forked_id)
+                ):
+                    return {
+                        "node_id": None, "harness": harness, "path": str(path.resolve()),
+                        "parent_id": None, "forked_from_id": None,
+                        "relationship_error": "unsafe_native_identity",
+                    }
                 is_child = bool(record.get("isSidechain")) or isinstance(agent_id, str) or "subagents" in path.parts
                 if is_child and not isinstance(agent_id, str):
                     return {
@@ -1015,10 +1067,7 @@ def _native_session_metadata(path: Path, harness: str) -> dict | None:
                     "path": str(path.resolve()),
                     "kind": "child" if is_child else "main",
                     "parent_id": session_id if is_child else None,
-                    "forked_from_id": (
-                        record.get("forkedFromSessionId")
-                        if isinstance(record.get("forkedFromSessionId"), str) else None
-                    ),
+                    "forked_from_id": forked_id if isinstance(forked_id, str) else None,
                 }
     return None
 
