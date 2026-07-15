@@ -239,6 +239,82 @@ class RecallEngineTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "resolved to 2"):
             engine.resolve_current_session()
 
+    def test_session_relations_selects_codex_children_and_fork_chain_exactly(self):
+        def write_codex(name, node_id, *, parent=None, forked=None):
+            target = self.codex / "2026/07/14" / f"rollout-{name}.jsonl"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            payload = {"id": node_id, "cwd": "/workspace"}
+            if parent:
+                payload["source"] = {"subagent": {"thread_spawn": {"parent_thread_id": parent}}}
+            if forked:
+                payload["forked_from_id"] = forked
+            target.write_text(json.dumps({"type": "session_meta", "payload": payload}) + "\n")
+            return target
+
+        main = write_codex("main", "main-id")
+        write_codex("child", "child-id", parent="main-id")
+        write_codex("nested", "nested-id", parent="child-id")
+        write_codex("fork", "fork-id", forked="main-id")
+        write_codex("unrelated", "other-id")
+        graph = json.loads(self.cli(
+            "session-relations", "--target", str(main), "--include-children", "--chain",
+        ))
+        self.assertTrue(graph["graph_complete"])
+        self.assertEqual({node["node_id"] for node in graph["nodes"]},
+                         {"main-id", "child-id", "nested-id", "fork-id"})
+        self.assertNotIn("other-id", {node["node_id"] for node in graph["nodes"]})
+        self.assertEqual({edge["type"] for edge in graph["edges"]}, {"child", "continuation"})
+
+    def test_session_relations_maps_claude_sidechain_without_filename_guessing(self):
+        session_id = "claude-main-id"
+        main = self.claude / "project" / "opaque-main.jsonl"
+        child = self.claude / "project" / "subagents" / "opaque-child.jsonl"
+        main.parent.mkdir(parents=True)
+        child.parent.mkdir(parents=True)
+        main.write_text(json.dumps({"sessionId": session_id, "type": "user", "message": {"content": "x"}}) + "\n")
+        child.write_text(json.dumps({
+            "sessionId": session_id, "agentId": "claude-child-id", "isSidechain": True,
+            "type": "assistant", "message": {"content": "y"},
+        }) + "\n")
+        graph = json.loads(self.cli(
+            "session-relations", "--target", str(main), "--include-children",
+        ))
+        self.assertEqual([node["node_id"] for node in graph["nodes"]],
+                         [session_id, "claude-child-id"])
+        self.assertEqual(graph["edges"], [{"from": session_id, "to": "claude-child-id", "type": "child"}])
+
+    def test_session_relations_fails_closed_for_missing_fork_ancestor(self):
+        target = self.codex / "rollout-fork.jsonl"
+        target.write_text(json.dumps({
+            "type": "session_meta", "payload": {"id": "fork-id", "forked_from_id": "missing-id"},
+        }) + "\n")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = engine.main(["session-relations", "--target", str(target), "--chain"])
+        self.assertEqual(code, 2)
+        graph = json.loads(out.getvalue())
+        self.assertFalse(graph["graph_complete"])
+        self.assertEqual(graph["incomplete_relations"][0]["reason"], "missing")
+
+    def test_session_relations_fails_closed_for_claude_child_without_agent_id(self):
+        main = self.claude / "project" / "main.jsonl"
+        child = self.claude / "project" / "subagents" / "broken.jsonl"
+        main.parent.mkdir(parents=True)
+        child.parent.mkdir(parents=True)
+        main.write_text(json.dumps({"sessionId": "main-id", "type": "user"}) + "\n")
+        child.write_text(json.dumps({
+            "sessionId": "main-id", "isSidechain": True, "type": "assistant",
+        }) + "\n")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = engine.main([
+                "session-relations", "--target", str(main), "--include-children",
+            ])
+        self.assertEqual(code, 2)
+        graph = json.loads(out.getvalue())
+        self.assertEqual(graph["incomplete_relations"][0]["reason"], "missing_agent_id")
+        self.assertNotIn(str(child), out.getvalue())
+
     def test_secret_redaction_tool_cap_and_fts_injection(self):
         secret = "sk-ABCDEFGHIJKLMNOPQRSTUVWX"
         huge = "z" * 5000
