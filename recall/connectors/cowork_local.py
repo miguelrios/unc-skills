@@ -16,7 +16,7 @@ from connectors.sdk import ConnectorContractError, ConnectorPage, ConnectorRecor
 CONNECTOR_ID = "anthropic.cowork-local"
 MAX_TEXT_CHARS = 500_000
 MAX_FILE_BYTES = 256_000_000
-MAX_LINE_BYTES = 1_000_000
+MAX_LINE_BYTES = 1_048_576
 MAX_FILES = 10_000
 SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@=-]{0,127}\Z")
 CURSOR = re.compile(r"cowork-v1:(\d{1,12}):(\d{1,12}):([0-9a-f]{64})\Z")
