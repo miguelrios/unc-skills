@@ -28,8 +28,31 @@ FTS_LEG_LIMIT = 400
 SECRET_RE = re.compile(
     r"[\"']?(?:api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|token|secret|password|bearer|authorization|\bkey)"
     r"[\"']?\s*[=:]\s*[\"']?(?:Bearer\s+)?\S{12,}|"
-    r"sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|"
-    r"(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}|AKIA[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{30,}",
+    r"sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{40,}|"
+    r"sk-(?!ant-|or-v1-)[A-Za-z0-9_-]{32,}|"
+    r"sk-ant-(?:api03|admin01)-[A-Za-z0-9_-]{80,}AA|"
+    r"sk-or-v1-[A-Za-z0-9_-]{20,}|gsk_[A-Za-z0-9]{20,}|"
+    r"xai-[A-Za-z0-9_-]{20,}|pplx-[A-Za-z0-9_-]{20,}|csk-[A-Za-z0-9_-]{20,}|"
+    r"xox[baprs]-[A-Za-z0-9-]{20,}|"
+    r"(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}|ops_[A-Za-z0-9_-]{20,}|"
+    r"A[KS]IA[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{35}|"
+    r"(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,}|"
+    r"pcsk_[A-Za-z0-9_-]{20,}|lsv2_[A-Za-z0-9_-]{20,}|"
+    r"Bearer\s+[A-Za-z0-9._~+/=-]{20,}|"
+    r"[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@",
+    re.I,
+)
+GENERIC_ASSIGNMENT_RE = re.compile(
+    r'''(?ix)(?<![A-Za-z0-9_.-])["']?[A-Za-z0-9_.-]*'''
+    r'''(?:api[_-]?key|apikey|api|token|secret|password|passwd|pass|credential|creds|key|'''
+    r'''access|private[_-]?key|'''
+    r'''access[_-]?key|client[_-]?secret|authorization|auth)[A-Za-z0-9_.-]*["']?'''
+    r'''\s*[:=]\s*["']?(?:Bearer\s+)?[^\s,"']{12,}'''
+)
+PROXIMITY_SECRET_RE = re.compile(
+    r"\bsntryu_[a-f0-9]{64}\b|"
+    r"sentry(?:.|[\n\r]){0,40}?\b[a-f0-9]{64}\b|"
+    r"(?:phrase|accessToken|access_token)(?:.|[\n\r]){0,40}?\b[a-z0-9]{64}\b",
     re.I,
 )
 PRIVATE_KEY_RE = re.compile(
@@ -346,8 +369,15 @@ def iso(value: str | None) -> float | None:
 def clean_text(value) -> str:
     if not isinstance(value, str):
         value = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    if any(
+        "\n" in match.group(0) or "\r" in match.group(0)
+        for match in GENERIC_ASSIGNMENT_RE.finditer(value)
+    ) or PROXIMITY_SECRET_RE.search(value):
+        return "[redacted-secret-line]"
     value = PRIVATE_KEY_RE.sub("[redacted-private-key-block]", value)
-    return "\n".join("[redacted-secret-line]" if SECRET_RE.search(line) else line
+    return "\n".join("[redacted-secret-line]" if (
+        SECRET_RE.search(line) or GENERIC_ASSIGNMENT_RE.search(line)
+    ) else line
                      for line in value.splitlines())
 
 
@@ -923,12 +953,36 @@ def session_evidence_id(source_id: str, session_id: str, event_native_id: str,
 def resolve_current_session() -> Path:
     claude, codex, _ = paths()
     thread_id = os.environ.get("CODEX_THREAD_ID")
+    claude_ids = {
+        value for value in (
+            os.environ.get("CLAUDE_SESSION_ID"),
+            os.environ.get("CLAUDE_CODE_SESSION_ID"),
+        ) if value
+    }
+    if len(claude_ids) > 1:
+        raise ValueError("current Claude identity is ambiguous; pass --target explicitly")
+    claude_id = next(iter(claude_ids), None)
+    claude_active = (
+        os.environ.get("CLAUDECODE") == "1"
+        or bool(os.environ.get("CLAUDE_CODE_ENTRYPOINT"))
+    )
+    if claude_active:
+        if not claude_id:
+            raise ValueError(
+                "current Claude identity unavailable; inherited Codex identity was ignored; "
+                "pass --target explicitly"
+            )
+        matches = [path for path in claude.rglob(f"*{claude_id}*.jsonl") if path.is_file()]
+        if len(matches) != 1:
+            raise ValueError(f"current Claude identity resolved to {len(matches)} sessions")
+        return matches[0].resolve()
+    if thread_id and claude_id:
+        raise ValueError("current harness identity is ambiguous; pass --target explicitly")
     if thread_id:
         matches = [path for path in codex.rglob(f"*{thread_id}*.jsonl") if path.name.startswith("rollout-")]
         if len(matches) != 1:
             raise ValueError(f"current Codex identity resolved to {len(matches)} sessions")
         return matches[0].resolve()
-    claude_id = os.environ.get("CLAUDE_SESSION_ID")
     if claude_id:
         matches = [path for path in claude.rglob(f"*{claude_id}*.jsonl") if path.is_file()]
         if len(matches) != 1:
@@ -947,6 +1001,223 @@ def resolve_current_session() -> Path:
         "current session identity unavailable; pass --target explicitly"
         + ("; ranked_candidate_receipts=" + ",".join(receipts) if receipts else "")
     )
+
+
+def _native_session_metadata(path: Path, harness: str) -> dict | None:
+    """Read only bounded native identity/relationship metadata from one transcript."""
+    limit = 1024 * 1024
+    consumed = 0
+    with path.open("rb") as source:
+        for _ in range(128):
+            line = source.readline(limit - consumed + 1)
+            consumed += len(line)
+            if consumed > limit:
+                break
+            try:
+                record = json.loads(line)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if not isinstance(record, dict):
+                continue
+            if harness == "codex" and record.get("type") == "session_meta":
+                payload = record.get("payload")
+                if not isinstance(payload, dict):
+                    return None
+                source_meta = payload.get("source")
+                spawn = None
+                if isinstance(source_meta, dict):
+                    candidate = source_meta.get("subagent")
+                    if isinstance(candidate, dict):
+                        spawn = candidate.get("thread_spawn")
+                parent = payload.get("parent_thread_id")
+                if not isinstance(parent, str) and isinstance(spawn, dict):
+                    parent = spawn.get("parent_thread_id")
+                forked = payload.get("forked_from_id")
+                node_id = payload.get("id")
+                unsafe_relation = any(
+                    isinstance(value, str) and clean_text(value) != value
+                    for value in (node_id, parent, forked)
+                )
+                if unsafe_relation:
+                    return {
+                        "node_id": None, "harness": harness, "path": str(path.resolve()),
+                        "parent_id": None, "forked_from_id": None,
+                        "relationship_error": "unsafe_native_identity",
+                    }
+                if not isinstance(node_id, str):
+                    if isinstance(parent, str) or isinstance(forked, str):
+                        return {
+                            "node_id": None, "harness": harness, "path": str(path.resolve()),
+                            "parent_id": parent if isinstance(parent, str) else None,
+                            "forked_from_id": forked if isinstance(forked, str) else None,
+                            "relationship_error": "missing_native_id",
+                        }
+                    return None
+                return {
+                    "node_id": node_id,
+                    "harness": harness,
+                    "path": str(path.resolve()),
+                    "kind": "child" if isinstance(parent, str) else "main",
+                    "parent_id": parent if isinstance(parent, str) else None,
+                    "forked_from_id": forked if isinstance(forked, str) else None,
+                }
+            if harness == "claude":
+                session_id = record.get("sessionId")
+                agent_id = record.get("agentId")
+                if not isinstance(session_id, str):
+                    continue
+                forked_id = record.get("forkedFromSessionId")
+                if any(
+                    isinstance(value, str) and clean_text(value) != value
+                    for value in (session_id, agent_id, forked_id)
+                ):
+                    return {
+                        "node_id": None, "harness": harness, "path": str(path.resolve()),
+                        "parent_id": None, "forked_from_id": None,
+                        "relationship_error": "unsafe_native_identity",
+                    }
+                is_child = bool(record.get("isSidechain")) or isinstance(agent_id, str) or "subagents" in path.parts
+                if is_child and not isinstance(agent_id, str):
+                    return {
+                        "node_id": None, "harness": harness, "path": str(path.resolve()),
+                        "parent_id": session_id, "forked_from_id": None,
+                        "relationship_error": "missing_agent_id",
+                    }
+                return {
+                    "node_id": agent_id if is_child and isinstance(agent_id, str) else session_id,
+                    "harness": harness,
+                    "path": str(path.resolve()),
+                    "kind": "child" if is_child else "main",
+                    "parent_id": session_id if is_child else None,
+                    "forked_from_id": forked_id if isinstance(forked_id, str) else None,
+                }
+    return None
+
+
+def _native_session_graph() -> tuple[list[dict], dict[str, list[dict]], list[dict]]:
+    claude, codex, _ = paths()
+    nodes, unresolved = [], []
+    for root, harness in ((claude, "claude"), (codex, "codex")):
+        if not root.exists():
+            continue
+        for path in discover(root, harness):
+            try:
+                node = _native_session_metadata(path, harness)
+            except OSError:
+                node = None
+            if node is not None:
+                (nodes if isinstance(node.get("node_id"), str) else unresolved).append(node)
+    by_id: dict[str, list[dict]] = {}
+    for node in nodes:
+        by_id.setdefault(node["node_id"], []).append(node)
+    return nodes, by_id, unresolved
+
+
+def local_session_relations(args) -> int:
+    if recall_mode() == "remote":
+        raise ValueError("session-relations requires local native transcript metadata")
+    target = resolve_current_session() if args.current else Path(args.target).expanduser().resolve()
+    if not target.is_file():
+        raise ValueError("session target does not exist")
+    harness = "codex" if target.name.startswith("rollout-") else "claude"
+    export_root_for(target, harness)
+    nodes, by_id, unresolved = _native_session_graph()
+    selected_matches = [node for node in nodes if Path(node["path"]) == target]
+    if len(selected_matches) != 1:
+        raise ValueError(f"session relationship identity resolved to {len(selected_matches)} nodes")
+    selected = selected_matches[0]
+    if len(by_id.get(selected["node_id"], [])) != 1:
+        raise ValueError("selected native session identity is ambiguous")
+
+    included = {selected["node_id"]}
+    reasons: dict[str, set[str]] = {selected["node_id"]: {"selected"}}
+    depth: dict[str, int] = {selected["node_id"]: 0}
+    incomplete = []
+
+    if args.chain:
+        queue = [selected["node_id"]]
+        while queue:
+            node_id = queue.pop(0)
+            node = by_id[node_id][0]
+            for candidate in (item for item in unresolved if item.get("forked_from_id") == node_id):
+                incomplete.append({
+                    "type": "continuation", "from": node_id, "to": None,
+                    "reason": candidate.get("relationship_error", "incomplete_native_metadata"),
+                    "path_receipt": hashlib.sha256(candidate["path"].encode()).hexdigest()[:16],
+                })
+            neighbors = []
+            if node.get("forked_from_id"):
+                neighbors.append(node["forked_from_id"])
+            neighbors.extend(
+                candidate["node_id"] for candidate in nodes
+                if candidate.get("forked_from_id") == node_id
+            )
+            for neighbor in neighbors:
+                matches = by_id.get(neighbor, [])
+                if len(matches) != 1:
+                    incomplete.append({"type": "continuation", "from": node_id, "to": neighbor,
+                                       "reason": "missing" if not matches else "ambiguous"})
+                    continue
+                if neighbor not in included:
+                    included.add(neighbor)
+                    reasons[neighbor] = {"continuation"}
+                    depth[neighbor] = depth[node_id] + 1
+                    queue.append(neighbor)
+                else:
+                    reasons[neighbor].add("continuation")
+
+    if args.include_children:
+        queue = list(included)
+        visited = set()
+        while queue:
+            parent_id = queue.pop(0)
+            if parent_id in visited:
+                continue
+            visited.add(parent_id)
+            for candidate in (item for item in unresolved if item.get("parent_id") == parent_id):
+                incomplete.append({
+                    "type": "child", "from": parent_id, "to": None,
+                    "reason": candidate.get("relationship_error", "incomplete_native_metadata"),
+                    "path_receipt": hashlib.sha256(candidate["path"].encode()).hexdigest()[:16],
+                })
+            for child in (node for node in nodes if node.get("parent_id") == parent_id):
+                child_id = child["node_id"]
+                matches = by_id.get(child_id, [])
+                if len(matches) != 1:
+                    incomplete.append({"type": "child", "from": parent_id, "to": child_id,
+                                       "reason": "ambiguous"})
+                    continue
+                if child_id not in included:
+                    included.add(child_id)
+                    reasons[child_id] = {"child"}
+                    depth[child_id] = depth[parent_id] + 1
+                else:
+                    reasons[child_id].add("child")
+                queue.append(child_id)
+
+    selected_nodes = []
+    for node_id in sorted(included, key=lambda value: (depth.get(value, 0), value)):
+        node = dict(by_id[node_id][0])
+        node["selection_reasons"] = sorted(reasons[node_id])
+        node["graph_depth"] = depth.get(node_id, 0)
+        selected_nodes.append(node)
+    edges = []
+    for node in selected_nodes:
+        if node.get("parent_id") in included:
+            edges.append({"type": "child", "from": node["parent_id"], "to": node["node_id"]})
+        if node.get("forked_from_id") in included:
+            edges.append({"type": "continuation", "from": node["forked_from_id"], "to": node["node_id"]})
+    result = {
+        "schema_version": "recall.session-relations.v1",
+        "selected_node_id": selected["node_id"],
+        "requested": {"include_children": bool(args.include_children), "chain": bool(args.chain)},
+        "graph_complete": not incomplete,
+        "incomplete_relations": incomplete,
+        "nodes": selected_nodes,
+        "edges": sorted(edges, key=lambda edge: (edge["type"], edge["from"], edge["to"])),
+    }
+    print(json.dumps(result, sort_keys=True))
+    return 0 if result["graph_complete"] else 2
 
 
 def export_cursor_connection() -> sqlite3.Connection:
@@ -1072,7 +1343,7 @@ def local_session_export(args) -> int:
                         state["metadata"][key] = clean_text(str(value))
                 native_id = f"{session_file_key(path, Path(state['root']), state['harness'])}-{line_start:016x}"
                 start_index = next_skip if line_start == state["byte_offset"] else 0
-                for item_index, (occurred_at, surface, text, _entities) in enumerate(parsed):
+                for item_index, (occurred_at, surface, text, entities) in enumerate(parsed):
                     if item_index < start_index:
                         continue
                     evidence_id, text_sha = session_evidence_id(
@@ -1091,6 +1362,16 @@ def local_session_export(args) -> int:
                         "receipt": None,
                         "projector_version": PARSER_VERSION,
                     }
+                    safe_entities = [
+                        {"kind": kind, "value": clean_text(str(value))}
+                        for kind, value in entities
+                    ]
+                    if safe_entities:
+                        item["entities"] = safe_entities
+                    if surface in {"tool_input", "tool_output"} and len(text) >= (
+                        MAX_TOOL_INPUT if surface == "tool_input" else MAX_TOOL_OUTPUT
+                    ):
+                        item["possibly_truncated"] = True
                     if len(returned) == args.limit:
                         next_byte, next_skip, found_extra = line_start, item_index, True
                         break
@@ -1269,6 +1550,13 @@ def main(argv=None) -> int:
     target.add_argument("--cursor")
     p.add_argument("--limit", type=int, default=1000)
     p.set_defaults(func=local_session_export)
+    p = sub.add_parser("session-relations", help="resolve exact local child and continuation boundaries")
+    target = p.add_mutually_exclusive_group(required=True)
+    target.add_argument("--current", action="store_true")
+    target.add_argument("--target")
+    p.add_argument("--include-children", action="store_true")
+    p.add_argument("--chain", action="store_true")
+    p.set_defaults(func=local_session_relations)
     p = sub.add_parser("related"); p.add_argument("--cwd"); p.add_argument("--branch"); p.add_argument("--limit", type=int, default=10); p.add_argument("--mains-only", action="store_true", help="exclude subagent transcripts"); p.add_argument("--fast", action="store_true", help="tight caps for the session-start hook budget"); p.set_defaults(func=related)
     p = sub.add_parser("doctor"); p.set_defaults(func=doctor)
     p = sub.add_parser("put"); p.add_argument("text", nargs="?"); p.add_argument("--source-id"); p.add_argument("--principal-id"); p.add_argument("--visibility", choices=("private", "shared")); p.add_argument("--provenance-uri", default="manual://recall_put")
