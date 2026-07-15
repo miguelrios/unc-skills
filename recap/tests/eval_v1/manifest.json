@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "corpus": "corpus.json",
+  "corpus_sha256": "051237353e458e073f900a706c4141217cae6609f209400e93231c1700c2b9bc",
+  "scenario_count": 8,
+  "capability_count": 12,
+  "mutation_policy": "Create eval_v2; never edit this corpus after L0 exits."
+}

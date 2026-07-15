@@ -1,0 +1,33 @@
+{
+  "name": "recap",
+  "version": "0.1.0",
+  "description": "Reconstruct one exact coding-agent session with Recall, git, and complete evidence accounting.",
+  "author": {
+    "name": "Miguel Rios",
+    "url": "https://github.com/miguelrios"
+  },
+  "homepage": "https://github.com/miguelrios/unc-skills/tree/main/recap",
+  "repository": "https://github.com/miguelrios/unc-skills/tree/main/recap",
+  "license": "MIT",
+  "keywords": [
+    "session-recap",
+    "evidence",
+    "handoff",
+    "recall"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Recap",
+    "shortDescription": "Explain one agent session end to end",
+    "longDescription": "Reconstruct goals, decisions, actions, git state, tests, failures, final state, and open work from one exact Claude Code or Codex session boundary.",
+    "developerName": "Miguel Rios",
+    "category": "Productivity",
+    "capabilities": [
+      "Read"
+    ],
+    "websiteURL": "https://github.com/miguelrios/unc-skills/tree/main/recap",
+    "defaultPrompt": [
+      "Recap this session with evidence and exact coverage."
+    ]
+  }
+}
