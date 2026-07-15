@@ -36,6 +36,7 @@ class RecallEngineTest(unittest.TestCase):
         self.old_env = {key: os.environ.get(key) for key in (
             "RECALL_CLAUDE_ROOT", "RECALL_CODEX_ROOT", "RECALL_DB", "RECALL_SESSION_CURSOR_DB",
             "RECALL_EXPORT_SOURCE_ID", "CODEX_THREAD_ID", "CLAUDE_SESSION_ID",
+            "CLAUDE_CODE_SESSION_ID", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT",
         )}
         os.environ.update(
             RECALL_CLAUDE_ROOT=str(self.claude), RECALL_CODEX_ROOT=str(self.codex), RECALL_DB=str(self.db),
@@ -44,6 +45,9 @@ class RecallEngineTest(unittest.TestCase):
         )
         os.environ.pop("CODEX_THREAD_ID", None)
         os.environ.pop("CLAUDE_SESSION_ID", None)
+        os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+        os.environ.pop("CLAUDECODE", None)
+        os.environ.pop("CLAUDE_CODE_ENTRYPOINT", None)
 
     def tearDown(self):
         for key, value in self.old_env.items():
@@ -286,6 +290,22 @@ class RecallEngineTest(unittest.TestCase):
         os.environ["CLAUDE_SESSION_ID"] = "claude-id"
         with self.assertRaisesRegex(ValueError, "ambiguous"):
             engine.resolve_current_session()
+
+    def test_active_claude_refuses_an_inherited_codex_identity(self):
+        os.environ["CLAUDECODE"] = "1"
+        os.environ["CODEX_THREAD_ID"] = "parent-codex-id"
+        with self.assertRaisesRegex(ValueError, "inherited Codex identity was ignored"):
+            engine.resolve_current_session()
+
+    def test_active_claude_prefers_its_exact_identity_over_inherited_codex(self):
+        session_id = "12345678-4321-4321-4321-cba987654321"
+        session = self.claude / "project" / f"{session_id}.jsonl"
+        session.parent.mkdir()
+        session.write_text(json.dumps({"type": "user", "message": {"content": "exact"}}) + "\n")
+        os.environ["CLAUDE_CODE_ENTRYPOINT"] = "cli"
+        os.environ["CLAUDE_CODE_SESSION_ID"] = session_id
+        os.environ["CODEX_THREAD_ID"] = "parent-codex-id"
+        self.assertEqual(engine.resolve_current_session(), session.resolve())
 
     def test_session_relations_selects_codex_children_and_fork_chain_exactly(self):
         def write_codex(name, node_id, *, parent=None, forked=None):
