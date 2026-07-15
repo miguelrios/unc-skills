@@ -29,7 +29,7 @@ from git_provenance import (
     validate_git_provenance,
 )
 from synthesis import render_markdown, validate_synthesis
-from privacy import PRIVACY_POLICY_VERSION, REDACTION_MARKERS, sanitize, sanitize_structure
+from privacy import PRIVACY_POLICY_VERSION, sanitize, sanitize_structure
 
 
 SCHEMA_VERSION = "recap.manifest.v0.4"
@@ -50,7 +50,7 @@ def changed_leaf_count(before: Any, after: Any) -> int:
     if isinstance(before, dict) and isinstance(after, dict):
         return sum(changed_leaf_count(value, after.get(key)) for key, value in before.items())
     if isinstance(before, list) and isinstance(after, list):
-        return sum(changed_leaf_count(left, right) for left, right in zip(before, after))
+        return sum(changed_leaf_count(left, right) for left, right in zip(before, after, strict=True))
     return int(before != after)
 
 
@@ -589,7 +589,7 @@ def validate_boundary_set(
             errors.append("relationship edge references an unknown member")
     if isinstance(selected, str) and selected in valid_ids:
         adjacency = {node_id: set() for node_id in valid_ids}
-        for edge_type, source, target in seen_edges:
+        for _edge_type, source, target in seen_edges:
             if source in valid_ids and target in valid_ids:
                 adjacency[source].add(target)
                 adjacency[target].add(source)

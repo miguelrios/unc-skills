@@ -344,7 +344,7 @@ def validate_synthesis(
                     break
     if set(event_details) != referenced_event_ids:
         errors.append("synthesis references event evidence absent from the ledger")
-    for section, item in all_items:
+    for _section, item in all_items:
         if item.get("source_label") == "agent_report" and any(
             event_details.get(event_id, {}).get("surface") != "assistant"
             for event_id in item.get("evidence_ids", [])

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+from itertools import pairwise
 import json
 from pathlib import Path
 from typing import Any
@@ -57,7 +58,7 @@ def _intervals(groups: list[dict[str, Any]]) -> tuple[list[tuple[int, int, str]]
         for first, last in ranges:
             intervals.append((first, last, group["group_id"]))
     intervals.sort()
-    for previous, current in zip(intervals, intervals[1:]):
+    for previous, current in pairwise(intervals):
         if current[0] <= previous[1]:
             errors.append("low-signal ranges overlap")
             break
