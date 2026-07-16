@@ -132,6 +132,10 @@ def main() -> None:
     assert runtime.plan_calls == planner_calls and runtime.query_calls > 0
     assert [row["source_id"] for row in result["results"]] == ["source-a"]
     assert len(bounded["results"]) <= 1
+    assert all(
+        not leg["leg"].startswith("rewrite-")
+        for leg in bounded["diagnostics"]["legs"]
+    )
     legs = [leg["leg"] for leg in result["diagnostics"]["legs"]]
     assert legs.index("semantic-0") < legs.index("rewrite-0")
     assert result["results"][0]["native_id"] == "target"
