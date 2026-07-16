@@ -110,6 +110,7 @@ def main() -> None:
         "stopped repeated upstream failures with a trip and cooldown guard", {}, 5,
         authorized_source="source-a",
     )
+    planner_calls_before_dense_bounded = runtime.plan_calls
     bounded = store.search(
         "stopped repeated upstream failures with a trip and cooldown guard", {}, 1,
         authorized_source="source-a",
@@ -132,6 +133,7 @@ def main() -> None:
     assert runtime.plan_calls == planner_calls and runtime.query_calls > 0
     assert [row["source_id"] for row in result["results"]] == ["source-a"]
     assert len(bounded["results"]) <= 1
+    assert runtime.plan_calls == planner_calls_before_dense_bounded
     assert all(
         not leg["leg"].startswith("rewrite-")
         for leg in bounded["diagnostics"]["legs"]
@@ -140,7 +142,9 @@ def main() -> None:
     assert legs.index("semantic-0") < legs.index("rewrite-0")
     assert result["results"][0]["native_id"] == "target"
     assert "semantic" in result["results"][0]["legs"]
+    planner_calls_before_sparse = runtime.plan_calls
     abstained = store.search("nonexistent orchard premise", {}, 5)
+    assert runtime.plan_calls == planner_calls_before_sparse + 1
     assert abstained["results"] == []
     assert any(
         leg["leg"] == "semantic-0" for leg in abstained["diagnostics"]["legs"]

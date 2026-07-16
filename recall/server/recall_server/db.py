@@ -802,18 +802,12 @@ class BrainStore:
         semantic_vectors: list[list[float]] = []
         semantic_error = None
         planner_error = None
-        planner_started = time.monotonic()
+        planner_elapsed_ms = 0.0
         if self.semantic_runtime is not None and not identifiers:
             try:
                 semantic_vectors = self.semantic_runtime.embed_queries([query])
             except Exception as exc:
                 semantic_error = type(exc).__name__
-            if len(informative) > 1 and redact_text(query) == query:
-                try:
-                    plan = self.semantic_runtime.plan(query)
-                except Exception as exc:
-                    planner_error = type(exc).__name__
-        planner_elapsed_ms = round((time.monotonic() - planner_started) * 1000, 3)
         candidates: dict[int, dict] = {}
         database_started = time.monotonic()
         deadline_at = database_started + self.search_deadline_ms / 1000
@@ -894,16 +888,13 @@ class BrainStore:
                             routed_source_ids=routed_source_ids,
                         )))
                     # Dense retrieval is the primary natural-language leg. Run it
-                    # before optional planner rewrites so a slow lexical rescue
-                    # cannot consume the complete database deadline.
+                    # before optional planner rewrites. The planner is invoked
+                    # lazily only when dense evidence cannot fill the result set.
                     for vector_index, semantic_vector in enumerate(semantic_vectors):
-                        minimum_similarity = (
-                            0.4 if plan is not None and not plan.searchable else 0.35
-                        )
                         semantic_rows = run_leg(f"semantic-{vector_index}", lambda semantic_vector=semantic_vector: self._semantic_leg(
                             conn, semantic_vector, filters, authorized_source=authorized_source,
                             routed_source_ids=routed_source_ids, deadline_at=deadline_at,
-                            limit=max(100, limit * 10), minimum_similarity=minimum_similarity,
+                            limit=max(100, limit * 10), minimum_similarity=0.35,
                         ))
                         if vector_index == 0:
                             for semantic_row in semantic_rows:
@@ -913,6 +904,27 @@ class BrainStore:
                                 if len(dense_anchor_keys) >= max(1, limit - 1):
                                     break
                         merge(semantic_rows)
+                    if (
+                        self.semantic_runtime is not None
+                        and len(dense_anchor_keys) < max(1, limit - 1)
+                        and len(informative) > 1
+                        and redact_text(query) == query
+                    ):
+                        # Release the read snapshot before optional model I/O.
+                        # A slow planner must never hold a database transaction.
+                        conn.commit()
+                        planner_started = time.monotonic()
+                        try:
+                            plan = self.semantic_runtime.plan(query)
+                        except Exception as exc:
+                            planner_error = type(exc).__name__
+                        planner_elapsed_ms = round(
+                            (time.monotonic() - planner_started) * 1000, 3,
+                        )
+                        # The deadline is a database-work budget. An approved
+                        # optional planner wait must not consume the remaining
+                        # bounded SQL time for the rescue it produces.
+                        deadline_at += planner_elapsed_ms / 1000
                     if (
                         plan is not None and plan.searchable and plan.phrases
                         and len(dense_anchor_keys) < max(1, limit - 1)
@@ -1058,7 +1070,10 @@ class BrainStore:
         diagnostics = {
             "deadline_ms": self.search_deadline_ms,
             "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
-            "database_elapsed_ms": round((time.monotonic() - database_started) * 1000, 3),
+            "database_elapsed_ms": round(max(
+                0.0,
+                (time.monotonic() - database_started) * 1000 - planner_elapsed_ms,
+            ), 3),
             "deadline_exceeded": deadline_exceeded,
             "legs": leg_timings,
             "routing": routing,
