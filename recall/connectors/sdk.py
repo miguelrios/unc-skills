@@ -19,6 +19,7 @@ from privacy.policy import PrivacyPolicy, summarize_receipts
 
 
 CONNECTOR_SCHEMA_VERSION = 1
+CONNECTOR_SCHEMA_VERSION_V2 = 2
 MAX_PAGE_RECORDS = 500
 MAX_RECORD_BYTES = 1_000_000
 MAX_PAGE_BYTES = 8_000_000
@@ -258,6 +259,96 @@ def _timestamp(value: str) -> str:
     return value
 
 
+def _load_typed_record_fields() -> dict[str, dict[str, Any]]:
+    path = Path(__file__).resolve().parents[1] / "contracts" / "connector_v2.json"
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError("connector v2 contract is unavailable") from error
+    if not isinstance(value, dict) or value.get("schema_version") != 2:
+        raise RuntimeError("connector v2 contract is invalid")
+    kinds = value.get("record_kinds")
+    if not isinstance(kinds, dict) or not kinds:
+        raise RuntimeError("connector v2 contract is invalid")
+    result = {}
+    for kind, schema in kinds.items():
+        if (
+            not isinstance(kind, str) or not isinstance(schema, dict)
+            or set(schema) != {"required", "optional", "properties"}
+            or not isinstance(schema["required"], list)
+            or not isinstance(schema["optional"], list)
+            or not isinstance(schema["properties"], dict)
+        ):
+            raise RuntimeError("connector v2 contract is invalid")
+        required = set(schema["required"])
+        optional = set(schema["optional"])
+        if (
+            "kind" not in required or required & optional
+            or required | optional != set(schema["properties"])
+        ):
+            raise RuntimeError("connector v2 contract is invalid")
+        properties = _json_copy(schema["properties"], "connector v2 properties")
+        result[kind] = {"required": required, "optional": optional, "properties": properties}
+    return result
+
+
+TYPED_RECORD_FIELDS = _load_typed_record_fields()
+
+
+def _validate_typed_value(value: Any, specification: dict[str, Any]) -> bool:
+    value_type = specification.get("type")
+    valid = (
+        (value_type == "string" and isinstance(value, str))
+        or (value_type == "boolean" and type(value) is bool)
+        or (value_type == "number" and type(value) in {int, float})
+        or (value_type == "object" and isinstance(value, dict))
+        or (
+            value_type == "string_list" and isinstance(value, list)
+            and all(isinstance(item, str) for item in value)
+        )
+        or (
+            value_type == "object_list" and isinstance(value, list)
+            and all(isinstance(item, dict) for item in value)
+        )
+    )
+    return (
+        valid
+        and ("const" not in specification or value == specification["const"])
+        and ("enum" not in specification or value in specification["enum"])
+    )
+
+
+def _validate_record_common(record: Any) -> None:
+    if not isinstance(record.native_id, str) or not IDENTITY.fullmatch(record.native_id):
+        raise ConnectorContractError("native_id is invalid")
+    if record.native_parent_id is not None and (
+        not isinstance(record.native_parent_id, str)
+        or not IDENTITY.fullmatch(record.native_parent_id)
+    ):
+        raise ConnectorContractError("native_parent_id is invalid")
+    _timestamp(record.occurred_at)
+    if not isinstance(record.content, dict):
+        raise ConnectorContractError("content must be an object")
+    if not isinstance(record.provenance, dict) or set(record.provenance) == set():
+        raise ConnectorContractError("provenance must be a non-empty object")
+    if not all(isinstance(key, str) and key for key in record.provenance):
+        raise ConnectorContractError("provenance keys must be strings")
+    uri = record.provenance.get("uri")
+    parsed = urlparse(uri) if isinstance(uri, str) else None
+    if not parsed or parsed.scheme not in ALLOWED_PROVENANCE_SCHEMES:
+        raise ConnectorContractError("provenance uri scheme is not allowed")
+    if parsed.scheme == "https" and not parsed.hostname:
+        raise ConnectorContractError("HTTPS provenance must include a host")
+    if parsed.query or parsed.fragment or parsed.username or parsed.password:
+        raise ConnectorContractError("provenance uri must not contain credentials, query, or fragment")
+    if not isinstance(record.deleted, bool):
+        raise ConnectorContractError("deleted must be boolean")
+    object.__setattr__(record, "content", _json_copy(record.content, "content"))
+    object.__setattr__(record, "provenance", _json_copy(record.provenance, "provenance"))
+    if len(json.dumps({"content": record.content, "provenance": record.provenance}).encode()) > MAX_RECORD_BYTES:
+        raise ConnectorContractError("record exceeds maximum byte count")
+
+
 @dataclass(frozen=True)
 class ConnectorRecord:
     schema_version: int
@@ -271,34 +362,7 @@ class ConnectorRecord:
     def __post_init__(self) -> None:
         if self.schema_version != CONNECTOR_SCHEMA_VERSION:
             raise ConnectorContractError("unsupported connector record schema_version")
-        if not isinstance(self.native_id, str) or not IDENTITY.fullmatch(self.native_id):
-            raise ConnectorContractError("native_id is invalid")
-        if self.native_parent_id is not None and (
-            not isinstance(self.native_parent_id, str)
-            or not IDENTITY.fullmatch(self.native_parent_id)
-        ):
-            raise ConnectorContractError("native_parent_id is invalid")
-        _timestamp(self.occurred_at)
-        if not isinstance(self.content, dict):
-            raise ConnectorContractError("content must be an object")
-        if not isinstance(self.provenance, dict) or set(self.provenance) == set():
-            raise ConnectorContractError("provenance must be a non-empty object")
-        if not all(isinstance(key, str) and key for key in self.provenance):
-            raise ConnectorContractError("provenance keys must be strings")
-        uri = self.provenance.get("uri")
-        parsed = urlparse(uri) if isinstance(uri, str) else None
-        if not parsed or parsed.scheme not in ALLOWED_PROVENANCE_SCHEMES:
-            raise ConnectorContractError("provenance uri scheme is not allowed")
-        if parsed.scheme == "https" and not parsed.hostname:
-            raise ConnectorContractError("HTTPS provenance must include a host")
-        if parsed.query or parsed.fragment or parsed.username or parsed.password:
-            raise ConnectorContractError("provenance uri must not contain credentials, query, or fragment")
-        if not isinstance(self.deleted, bool):
-            raise ConnectorContractError("deleted must be boolean")
-        object.__setattr__(self, "content", _json_copy(self.content, "content"))
-        object.__setattr__(self, "provenance", _json_copy(self.provenance, "provenance"))
-        if len(json.dumps({"content": self.content, "provenance": self.provenance}).encode()) > MAX_RECORD_BYTES:
-            raise ConnectorContractError("record exceeds maximum byte count")
+        _validate_record_common(self)
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any]) -> "ConnectorRecord":
@@ -313,6 +377,51 @@ class ConnectorRecord:
         if missing:
             raise ConnectorContractError("record is missing fields")
         return cls(**value)
+
+    def to_mapping(self) -> dict[str, Any]:
+        value = {
+            "schema_version": self.schema_version,
+            "native_id": self.native_id,
+            "occurred_at": self.occurred_at,
+            "content": _json_copy(self.content, "content"),
+            "provenance": _json_copy(self.provenance, "provenance"),
+            "deleted": self.deleted,
+        }
+        if self.native_parent_id is not None:
+            value["native_parent_id"] = self.native_parent_id
+        return value
+
+
+@dataclass(frozen=True)
+class ConnectorRecordV2(ConnectorRecord):
+    """Typed v2 record; v1 remains a separate strict compatibility contract."""
+
+    def __post_init__(self) -> None:
+        if self.schema_version != CONNECTOR_SCHEMA_VERSION_V2:
+            raise ConnectorContractError("unsupported connector record schema_version")
+        _validate_record_common(self)
+        kind = self.content.get("kind")
+        schema = TYPED_RECORD_FIELDS.get(kind)
+        if schema is None:
+            raise ConnectorContractError("record kind is unsupported")
+        fields = set(self.content)
+        required = {"kind"} if self.deleted else schema["required"]
+        optional = set() if self.deleted else schema["optional"]
+        missing = required - fields
+        unknown = fields - required - optional
+        if missing:
+            raise ConnectorContractError("record content is missing fields")
+        if unknown:
+            raise ConnectorContractError("record has unknown content fields")
+        if any(
+            not _validate_typed_value(self.content[field], schema["properties"][field])
+            for field in fields
+        ):
+            raise ConnectorContractError("record content has invalid field values")
+
+    @property
+    def record_kind(self) -> str:
+        return self.content["kind"]
 
 
 @dataclass(frozen=True)
@@ -424,7 +533,11 @@ class ConnectorRunner:
         self.db.execute("DELETE FROM meta WHERE key='last_error_code'")
 
     def _event(self, record: ConnectorRecord, content: dict[str, Any], provenance: dict[str, Any]) -> dict[str, Any]:
-        provenance = {**provenance, "connector_id": self.connector_id}
+        provenance = {
+            **provenance,
+            "connector_id": self.connector_id,
+            "connector_schema_version": record.schema_version,
+        }
         if record.deleted:
             return canonical_envelope(
                 source_id=self.source_id, native_id=record.native_id, kind="tombstone",

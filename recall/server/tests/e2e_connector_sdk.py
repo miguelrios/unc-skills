@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "recall"))
 sys.path.insert(0, str(ROOT / "recall/server"))
 
-from connectors.sdk import ConnectorPage, ConnectorRecord, ConnectorRunner
+from connectors.sdk import ConnectorPage, ConnectorRecord, ConnectorRecordV2, ConnectorRunner
 from privacy.policy import PrivacyPolicy
 from recall_server.db import BrainStore
 from recall_server.projectors import canonical_json
@@ -32,6 +32,19 @@ def value(native_id: str, text: str, *, deleted: bool = False) -> ConnectorRecor
     })
 
 
+def typed_value() -> ConnectorRecordV2:
+    return ConnectorRecordV2.from_mapping({
+        "schema_version": 2, "native_id": "typed-message", "native_parent_id": "typed-thread",
+        "occurred_at": "2026-07-14T00:00:00Z",
+        "content": {
+            "kind": "communication_message.v1", "conversation_id": "typed-thread",
+            "message_id": "typed-message", "direction": "inbound",
+            "subject": "synthetic typed subject", "text": "typed connector evidence",
+        },
+        "provenance": {"uri": "connector://synthetic/typed-message"}, "deleted": False,
+    })
+
+
 class Pages:
     connector_id = "synthetic.postgres"
     source_id = SOURCE
@@ -41,6 +54,7 @@ class Pages:
             None: ConnectorPage(records=(
                 value("safe-one", "connector postgres exact safe marker"),
                 value("scrub-one", "keep context api_key=connector-postgres-secret-canary after"),
+                typed_value(),
             ), next_cursor="page-1", has_more=True),
             "page-1": ConnectorPage(records=(
                 value("scrub-one", "keep context api_key=connector-postgres-secret-canary after"),
@@ -80,13 +94,14 @@ def main() -> None:
             privacy=PrivacyPolicy(mode="scrub"),
         )
         first = runner.run_once()
-        assert first["acked"] == 2
-        assert first["privacy"]["actions"] == {"keep": 1, "scrub": 1}
+        assert first["acked"] == 3
+        assert first["privacy"]["actions"] == {"keep": 2, "scrub": 1}
         assert store.search("connector postgres exact safe marker", authorized_source=SOURCE)["results"]
+        assert store.search("synthetic typed subject", authorized_source=SOURCE)["results"]
         assert store.search("connector-postgres-secret-canary", authorized_source=SOURCE)["results"] == []
         with store.connect() as connection:
-            assert connection.execute("SELECT count(*) AS n FROM source_events").fetchone()["n"] == 2
-            assert connection.execute("SELECT count(*) AS n FROM items WHERE deleted_at IS NULL").fetchone()["n"] == 2
+            assert connection.execute("SELECT count(*) AS n FROM source_events").fetchone()["n"] == 3
+            assert connection.execute("SELECT count(*) AS n FROM items WHERE deleted_at IS NULL").fetchone()["n"] == 3
         second = runner.run_once()
         assert second["acked"] == 1
         assert second["deduplicated"] == 1
@@ -99,7 +114,8 @@ def main() -> None:
         runner.close()
         assert b"connector-postgres-secret-canary" not in spool.read_bytes()
         print(json.dumps({
-            "status": "pass", "records_acked": 3, "exact_repeats_suppressed": 2,
+            "status": "pass", "records_acked": 4, "typed_records_acked": 1,
+            "typed_search_hits": 1, "exact_repeats_suppressed": 2,
             "searchable_before_delete": 1,
             "searchable_after_delete": 0, "canary_search_hits": 0,
             "spool_canary_hits": 0, "pending": 0,

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from privacy.policy import PrivacyPolicy
+from connectors.sdk import TYPED_RECORD_FIELDS
 
 
 IDENTITY = re.compile(r"[a-z][a-z0-9_.-]{2,63}\Z")
@@ -34,6 +35,26 @@ RUNTIME_ERROR_CODES = {
 FIELDS = {
     "schema_version", "connector_id", "command", "mode", "authority_slots",
     "visibility_modes", "privacy_modes", "checkpoint", "deletion",
+}
+V2_FIELDS = FIELDS | {
+    "source_family", "record_kinds", "execution_placement",
+    "minimum_external_scopes", "backfill_modes", "edit_semantics",
+    "retention_modes", "attachment_capability", "default_privacy_mode",
+}
+SOURCE_FAMILIES = {
+    "coding_history", "deliberate_capture", "user_export", "third_party_research",
+    "communications", "schedule", "contacts", "social", "documents",
+    "work_activity", "local_activity", "personal_media",
+}
+PLACEMENTS = {"source_local", "always_on_api", "either"}
+BACKFILL_MODES = {"full", "incremental", "export"}
+EDIT_SEMANTICS = {"content_revision", "immutable"}
+RETENTION_MODES = {"source_controlled", "bounded", "forever"}
+GOOGLE_READ_SCOPES = {
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/contacts.readonly",
+    "https://www.googleapis.com/auth/drive.readonly",
 }
 
 
@@ -111,6 +132,78 @@ class ConnectorDefinition:
         }
 
 
+@dataclass(frozen=True)
+class ConnectorDefinitionV2(ConnectorDefinition):
+    source_family: str
+    record_kinds: tuple[str, ...]
+    execution_placement: str
+    minimum_external_scopes: tuple[str, ...]
+    backfill_modes: tuple[str, ...]
+    edit_semantics: str
+    retention_modes: tuple[str, ...]
+    attachment_capability: bool
+    default_privacy_mode: str
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 2 or isinstance(self.schema_version, bool):
+            raise ConnectorRegistryError("invalid_schema_version")
+        if not isinstance(self.connector_id, str) or not IDENTITY.fullmatch(self.connector_id):
+            raise ConnectorRegistryError("invalid_connector_id")
+        if not isinstance(self.command, str) or not COMMAND.fullmatch(self.command):
+            raise ConnectorRegistryError("invalid_command")
+        if self.mode != "pull":
+            raise ConnectorRegistryError("invalid_mode")
+        for value, label, allowed in (
+            (self.authority_slots, "authority_slots", AUTHORITIES),
+            (self.visibility_modes, "visibility_modes", VISIBILITIES),
+            (self.privacy_modes, "privacy_modes", PRIVACY_MODES),
+            (self.record_kinds, "record_kinds", set(TYPED_RECORD_FIELDS)),
+            (self.minimum_external_scopes, "minimum_external_scopes", GOOGLE_READ_SCOPES),
+            (self.backfill_modes, "backfill_modes", BACKFILL_MODES),
+            (self.retention_modes, "retention_modes", RETENTION_MODES),
+        ):
+            normalized = _closed_tuple(value, label, allowed)
+            object.__setattr__(self, label, normalized)
+        if self.authority_slots != ("brain", "source"):
+            raise ConnectorRegistryError("authority_slots_mismatch")
+        if self.visibility_modes != ("private",):
+            raise ConnectorRegistryError("invalid_visibility_modes")
+        if self.checkpoint != "ack_cursor":
+            raise ConnectorRegistryError("invalid_checkpoint")
+        if self.deletion != "explicit_receipt":
+            raise ConnectorRegistryError("invalid_deletion")
+        if self.source_family not in SOURCE_FAMILIES:
+            raise ConnectorRegistryError("invalid_source_family")
+        if self.execution_placement not in PLACEMENTS:
+            raise ConnectorRegistryError("invalid_execution_placement")
+        if self.edit_semantics not in EDIT_SEMANTICS:
+            raise ConnectorRegistryError("invalid_edit_semantics")
+        if not isinstance(self.attachment_capability, bool):
+            raise ConnectorRegistryError("invalid_attachment_capability")
+        if self.default_privacy_mode not in self.privacy_modes:
+            raise ConnectorRegistryError("invalid_default_privacy_mode")
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "ConnectorDefinitionV2":
+        if not isinstance(value, Mapping) or set(value) != V2_FIELDS:
+            raise ConnectorRegistryError("invalid_definition_shape")
+        return cls(**dict(value))
+
+    def to_public(self) -> dict[str, Any]:
+        return {
+            **super().to_public(),
+            "source_family": self.source_family,
+            "record_kinds": list(self.record_kinds),
+            "execution_placement": self.execution_placement,
+            "minimum_external_scopes": list(self.minimum_external_scopes),
+            "backfill_modes": list(self.backfill_modes),
+            "edit_semantics": self.edit_semantics,
+            "retention_modes": list(self.retention_modes),
+            "attachment_capability": self.attachment_capability,
+            "default_privacy_mode": self.default_privacy_mode,
+        }
+
+
 REGISTRY = (
     ConnectorDefinition.from_mapping({
         "schema_version": 1, "connector_id": "recall.capture", "command": "mcp-serve",
@@ -129,6 +222,54 @@ REGISTRY = (
         "mode": "pull", "authority_slots": ["brain", "source"],
         "visibility_modes": ["private"], "privacy_modes": ["drop", "scrub"],
         "checkpoint": "ack_cursor", "deletion": "explicit_receipt",
+    }),
+    ConnectorDefinitionV2.from_mapping({
+        "schema_version": 2, "connector_id": "google.gmail", "command": "workspace-sync",
+        "mode": "pull", "authority_slots": ["brain", "source"],
+        "visibility_modes": ["private"], "privacy_modes": ["drop", "scrub"],
+        "checkpoint": "ack_cursor", "deletion": "explicit_receipt",
+        "source_family": "communications", "record_kinds": ["communication_message.v1"],
+        "execution_placement": "always_on_api",
+        "minimum_external_scopes": ["https://www.googleapis.com/auth/gmail.readonly"],
+        "backfill_modes": ["full", "incremental"], "edit_semantics": "content_revision",
+        "retention_modes": ["source_controlled"], "attachment_capability": True,
+        "default_privacy_mode": "scrub",
+    }),
+    ConnectorDefinitionV2.from_mapping({
+        "schema_version": 2, "connector_id": "google.calendar", "command": "workspace-sync",
+        "mode": "pull", "authority_slots": ["brain", "source"],
+        "visibility_modes": ["private"], "privacy_modes": ["drop", "scrub"],
+        "checkpoint": "ack_cursor", "deletion": "explicit_receipt",
+        "source_family": "schedule", "record_kinds": ["calendar_event.v1"],
+        "execution_placement": "always_on_api",
+        "minimum_external_scopes": ["https://www.googleapis.com/auth/calendar.readonly"],
+        "backfill_modes": ["full", "incremental"], "edit_semantics": "content_revision",
+        "retention_modes": ["source_controlled"], "attachment_capability": False,
+        "default_privacy_mode": "scrub",
+    }),
+    ConnectorDefinitionV2.from_mapping({
+        "schema_version": 2, "connector_id": "google.contacts", "command": "workspace-sync",
+        "mode": "pull", "authority_slots": ["brain", "source"],
+        "visibility_modes": ["private"], "privacy_modes": ["drop", "scrub"],
+        "checkpoint": "ack_cursor", "deletion": "explicit_receipt",
+        "source_family": "contacts", "record_kinds": ["contact_identity.v1"],
+        "execution_placement": "always_on_api",
+        "minimum_external_scopes": ["https://www.googleapis.com/auth/contacts.readonly"],
+        "backfill_modes": ["full", "incremental"], "edit_semantics": "content_revision",
+        "retention_modes": ["source_controlled"], "attachment_capability": False,
+        "default_privacy_mode": "scrub",
+    }),
+    ConnectorDefinitionV2.from_mapping({
+        "schema_version": 2, "connector_id": "google.drive", "command": "workspace-sync",
+        "mode": "pull", "authority_slots": ["brain", "source"],
+        "visibility_modes": ["private"], "privacy_modes": ["drop", "scrub"],
+        "checkpoint": "ack_cursor", "deletion": "explicit_receipt",
+        "source_family": "documents", "record_kinds": ["document.v1"],
+        "execution_placement": "always_on_api",
+        "minimum_external_scopes": ["https://www.googleapis.com/auth/drive.readonly"],
+        "backfill_modes": ["full", "incremental"], "edit_semantics": "content_revision",
+        "retention_modes": ["source_controlled"], "attachment_capability": True,
+        "default_privacy_mode": "scrub",
     }),
 )
 def _index(items: tuple[ConnectorDefinition, ...]) -> dict[str, ConnectorDefinition]:
@@ -162,7 +303,7 @@ def validate_policy(connector_id: str, *, visibility: str, privacy_mode: str,
 
 def preview() -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "mode": "connector-registry-preview",
         "credential_reads": 0,
         "source_reads": 0,

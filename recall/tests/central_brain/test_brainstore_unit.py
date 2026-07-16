@@ -29,6 +29,7 @@ from recall_server import SCHEMA_VERSION
 from recall_server import cli as server_cli
 from recall_server.app import Handler, serve, serve_unix
 from recall_server.db import BrainStore
+from recall_server.federation import SOURCE_FAMILIES, SourceProfile
 from recall_server.projectors import advisory_lock_key, canonical_json, effective_session_id, partial_lexical_probes, phrase_query_spec, preferred_phrase_probe, preferred_phrase_probes, project, redact_text, validate_envelope
 from recall_server.ranking import DEFAULT_SEARCH_DEADLINE_MS, evidence_rank_components, retrieval_leg_order, should_run_partial
 
@@ -63,6 +64,67 @@ class SchemaMigrationContractTest(unittest.TestCase):
                 path.read_text(),
                 rf"schema_migrations\(version\) VALUES \({version}\)",
             )
+
+    def test_connector_v2_source_families_are_host_owned_and_migrated(self) -> None:
+        added = {
+            "communications", "schedule", "contacts", "social", "documents",
+            "work_activity", "local_activity", "personal_media",
+        }
+        self.assertTrue(added.issubset(SOURCE_FAMILIES))
+        for family in added:
+            profile = SourceProfile.from_mapping({
+                "source_id": "synthetic:source:v2", "family": family,
+                "quality": "standard", "freshness_half_life_days": 30,
+            })
+            self.assertEqual(profile.family, family)
+        migration = SERVER / "schema" / "012_source_profile_families.sql"
+        self.assertTrue(migration.is_file())
+        rendered = migration.read_text()
+        self.assertTrue(all(f"'{family}'" in rendered for family in added))
+
+
+class TypedConnectorProjectionTest(unittest.TestCase):
+    def test_v2_communication_projects_clean_conversation_evidence(self) -> None:
+        value = envelope(
+            kind="connector_record", native_id="message-1", native_parent_id="thread-1",
+            content={
+                "kind": "communication_message.v1", "conversation_id": "thread-1",
+                "message_id": "message-1", "direction": "inbound",
+                "subject": "Synthetic subject", "text": "Synthetic body",
+            },
+            provenance={"connector_id": "google.gmail", "connector_schema_version": 2},
+        )
+        validate_envelope(value)
+        items, metadata = project(value, 1)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["surface"], "communication_message.v1")
+        self.assertEqual(items[0]["role"], "inbound")
+        self.assertEqual(items[0]["text_redacted"], "Synthetic subject\nSynthetic body")
+        self.assertEqual(metadata["record_kind"], "communication_message.v1")
+
+    def test_v2_connector_record_rejects_unknown_or_mismatched_kind(self) -> None:
+        for content in (
+            {"kind": "runtime_plugin.v1", "text": "synthetic"},
+            {"text": "synthetic"},
+        ):
+            value = envelope(
+                kind="connector_record", content=content,
+                provenance={"connector_id": "synthetic.pull", "connector_schema_version": 2},
+            )
+            with self.subTest(content=content), self.assertRaises(ValueError):
+                validate_envelope(value)
+
+    def test_v2_connector_record_rejects_invalid_field_value(self) -> None:
+        value = envelope(
+            kind="connector_record",
+            content={
+                "kind": "communication_message.v1", "conversation_id": "thread-1",
+                "message_id": "message-1", "direction": "sideways", "text": "synthetic",
+            },
+            provenance={"connector_id": "synthetic.pull", "connector_schema_version": 2},
+        )
+        with self.assertRaisesRegex(ValueError, "invalid typed connector record"):
+            validate_envelope(value)
 
 
 class SourceScopedReadContractTest(unittest.TestCase):

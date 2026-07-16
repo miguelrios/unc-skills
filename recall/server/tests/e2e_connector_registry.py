@@ -23,11 +23,19 @@ def main() -> None:
         "recall.capture": ("private", "scrub", {"brain"}),
         "openai.export-inbox": ("private", "drop", {"brain"}),
         "grep.ai": ("private", "drop", {"brain", "source"}),
+        "google.gmail": ("private", "scrub", {"brain", "source"}),
+        "google.calendar": ("private", "scrub", {"brain", "source"}),
+        "google.contacts": ("private", "scrub", {"brain", "source"}),
+        "google.drive": ("private", "scrub", {"brain", "source"}),
     }
     tests = {
         "recall.capture": "e2e_capture_mcp.py",
         "openai.export-inbox": "e2e_export_inbox.py",
         "grep.ai": "e2e_grep_ai.py",
+        "google.gmail": "e2e_workspace_rail.py",
+        "google.calendar": "e2e_workspace_rail.py",
+        "google.contacts": "e2e_workspace_rail.py",
+        "google.drive": "e2e_workspace_rail.py",
     }
     results = {}
     for item in REGISTRY:

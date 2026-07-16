@@ -1,4 +1,4 @@
 """Recall central BrainStore service."""
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 PROJECTOR_VERSION = 3

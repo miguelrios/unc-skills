@@ -1,0 +1,110 @@
+{
+  "schema_version": 2,
+  "record_kinds": {
+    "calendar_event.v1": {
+      "optional": ["all_day", "attendee_ids", "busy", "conference_url", "description", "instance_id", "location", "organizer_id", "series_id", "source_url", "status", "surface", "text", "timezone", "visibility"],
+      "required": ["calendar_id", "end", "event_id", "kind", "start", "title"],
+      "properties": {
+        "all_day": {"type": "boolean"},
+        "attendee_ids": {"type": "string_list"},
+        "busy": {"type": "boolean"},
+        "calendar_id": {"type": "string"},
+        "conference_url": {"type": "string"},
+        "description": {"type": "string"},
+        "end": {"type": "string"},
+        "event_id": {"type": "string"},
+        "instance_id": {"type": "string"},
+        "kind": {"const": "calendar_event.v1", "type": "string"},
+        "location": {"type": "string"},
+        "organizer_id": {"type": "string"},
+        "series_id": {"type": "string"},
+        "source_url": {"type": "string"},
+        "start": {"type": "string"},
+        "status": {"type": "string"},
+        "surface": {"type": "string"},
+        "text": {"type": "string"},
+        "timezone": {"type": "string"},
+        "title": {"type": "string"},
+        "visibility": {"type": "string"}
+      }
+    },
+    "communication_message.v1": {
+      "optional": ["attachments", "author_id", "deleted_at", "edited_at", "format", "participant_ids", "received_at", "reply_to_id", "role", "sent_at", "source_url", "subject", "surface"],
+      "required": ["conversation_id", "direction", "kind", "message_id", "text"],
+      "properties": {
+        "attachments": {"type": "object_list"},
+        "author_id": {"type": "string"},
+        "conversation_id": {"type": "string"},
+        "deleted_at": {"type": "string"},
+        "direction": {"enum": ["inbound", "outbound", "system"], "type": "string"},
+        "edited_at": {"type": "string"},
+        "format": {"type": "string"},
+        "kind": {"const": "communication_message.v1", "type": "string"},
+        "message_id": {"type": "string"},
+        "participant_ids": {"type": "string_list"},
+        "received_at": {"type": "string"},
+        "reply_to_id": {"type": "string"},
+        "role": {"type": "string"},
+        "sent_at": {"type": "string"},
+        "source_url": {"type": "string"},
+        "subject": {"type": "string"},
+        "surface": {"type": "string"},
+        "text": {"type": "string"}
+      }
+    },
+    "contact_identity.v1": {
+      "optional": ["confidence", "identifier", "organization", "role", "surface", "text", "title"],
+      "required": ["display_name", "identifier_type", "identity_id", "kind"],
+      "properties": {
+        "confidence": {"type": "number"},
+        "display_name": {"type": "string"},
+        "identifier": {"type": "string"},
+        "identifier_type": {"type": "string"},
+        "identity_id": {"type": "string"},
+        "kind": {"const": "contact_identity.v1", "type": "string"},
+        "organization": {"type": "string"},
+        "role": {"enum": ["other", "self"], "type": "string"},
+        "surface": {"type": "string"},
+        "text": {"type": "string"},
+        "title": {"type": "string"}
+      }
+    },
+    "document.v1": {
+      "optional": ["attachments", "modified_at", "owner_ids", "parent_id", "participant_ids", "source_url", "surface", "text"],
+      "required": ["document_id", "kind", "mime_type", "name"],
+      "properties": {
+        "attachments": {"type": "object_list"},
+        "document_id": {"type": "string"},
+        "kind": {"const": "document.v1", "type": "string"},
+        "mime_type": {"type": "string"},
+        "modified_at": {"type": "string"},
+        "name": {"type": "string"},
+        "owner_ids": {"type": "string_list"},
+        "parent_id": {"type": "string"},
+        "participant_ids": {"type": "string_list"},
+        "source_url": {"type": "string"},
+        "surface": {"type": "string"},
+        "text": {"type": "string"}
+      }
+    },
+    "social_post.v1": {
+      "optional": ["created_at", "deleted_at", "edited_at", "metrics", "reply_to_id", "source_url", "surface", "thread_id"],
+      "required": ["author_id", "kind", "post_id", "stream_type", "text"],
+      "properties": {
+        "author_id": {"type": "string"},
+        "created_at": {"type": "string"},
+        "deleted_at": {"type": "string"},
+        "edited_at": {"type": "string"},
+        "kind": {"const": "social_post.v1", "type": "string"},
+        "metrics": {"type": "object"},
+        "post_id": {"type": "string"},
+        "reply_to_id": {"type": "string"},
+        "source_url": {"type": "string"},
+        "stream_type": {"enum": ["bookmark", "home", "mention", "own"], "type": "string"},
+        "surface": {"type": "string"},
+        "text": {"type": "string"},
+        "thread_id": {"type": "string"}
+      }
+    }
+  }
+}
