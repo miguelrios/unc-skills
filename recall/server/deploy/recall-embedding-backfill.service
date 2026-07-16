@@ -1,0 +1,16 @@
+[Unit]
+Description=Recall resumable embedding backfill
+After=recall-embedding.service recall-brain.service
+Requires=recall-embedding.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/services/recall-brain/recall/server
+EnvironmentFile=%h/.config/recall-brain/service.env
+ExecStart=%h/.config/recall-brain/venv/bin/python -m recall_server.cli backfill-embeddings --batch-size 128 --max-batches 4
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.config/recall-brain

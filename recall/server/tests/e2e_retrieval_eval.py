@@ -19,6 +19,7 @@ sys.path.insert(0, str(SERVER))
 
 from evals.runner import evaluate_store, load_jsonl, load_synthetic_corpus, public_report, safe_pins, write_json  # noqa: E402
 from recall_server.db import BrainStore  # noqa: E402
+from recall_server.semantic import SemanticRuntime  # noqa: E402
 
 
 FIXTURES = ROOT / "tests/central_brain/retrieval_eval_v2"
@@ -33,7 +34,11 @@ def request(base: str, path: str, body: dict) -> dict:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(value, timeout=5) as response:
+        # A cold semantic query includes a bounded planner call before local
+        # embedding and database retrieval. Keep the transport outside that
+        # server-side budget so the E2E measures the response instead of
+        # abandoning valid work at an arbitrary five-second client cutoff.
+        with urllib.request.urlopen(value, timeout=45) as response:
             return json.loads(response.read())
     except urllib.error.HTTPError as exc:
         raise AssertionError(f"HTTP {exc.code}: {exc.read().decode(errors='replace')[:200]}") from None
@@ -58,7 +63,7 @@ def main() -> None:
     dsn = os.environ["RECALL_DATABASE_URL"]
     port = int(os.environ.get("RECALL_RETRIEVAL_E2E_PORT", "18791"))
     base = f"http://127.0.0.1:{port}"
-    store = BrainStore(dsn)
+    store = BrainStore(dsn, semantic_runtime=SemanticRuntime.from_env())
     store.migrate()
     with store.connect() as connection:
         connection.execute(
@@ -67,6 +72,13 @@ def main() -> None:
             "RESTART IDENTITY CASCADE"
         )
     ingest = load_synthetic_corpus(store, load_jsonl(FIXTURES / "corpus.jsonl"))
+    semantic_enabled = store.semantic_runtime is not None
+    embedding = (
+        store.embed_pending(batch_size=128, max_batches=None)
+        if semantic_enabled
+        else {"processed": 0, "batches": 0}
+    )
+    embedding_metrics = store.service_metrics()
     # Source-scoped auth cases use BrainStore directly because this E2E server deliberately runs
     # without fabricated credentials. Every other case traverses the real HTTP boundary.
     all_cases = load_jsonl(FIXTURES / "queries-dev.jsonl") + load_jsonl(FIXTURES / "queries-holdout.jsonl")
@@ -105,8 +117,16 @@ def main() -> None:
 
     first = evaluate_store(store, all_cases, source_routing_supported=True)
     second = evaluate_store(store, all_cases, source_routing_supported=True)
-    assert first_http["rankings"] == second_http["rankings"], "retrieval rankings changed between runs"
-    assert first["rankings"] == second["rankings"], "direct retrieval rankings changed between runs"
+    changed_http = sorted(
+        case_id for case_id, ranking in first_http["rankings"].items()
+        if ranking != second_http["rankings"].get(case_id)
+    )
+    changed_direct = sorted(
+        case_id for case_id, ranking in first["rankings"].items()
+        if ranking != second["rankings"].get(case_id)
+    )
+    assert not changed_http, f"HTTP rankings changed for {len(changed_http)} cases: {','.join(changed_http)}"
+    assert not changed_direct, f"direct rankings changed for {len(changed_direct)} cases: {','.join(changed_direct)}"
     assert first["strata"]["exact-identifier"]["hit@1"] == 1.0
     assert first["behavior"]["session_reconstruction_accuracy"] == 1.0
     assert first["behavior"]["deletion_resurrection_rate"] == 0.0
@@ -114,6 +134,11 @@ def main() -> None:
     assert first["aggregate"]["unauthorized_hit_rate"] == 0.0
     assert first["strata"]["source-routed"]["backend_error_rate"] == 0.0
     assert first["strata"]["source-routed"]["recall@5"] == 1.0
+    if semantic_enabled:
+        for report in (first, first_http):
+            assert report["strata"]["semantic-paraphrase"]["recall@5"] >= 0.8
+            assert report["strata"]["workflow-gotcha"]["recall@5"] >= 0.8
+            assert report["strata"]["cross-session-synthesis"]["recall@5"] >= 0.8
     assert all(
         metrics["backend_error_rate"] == 0.0
         for stratum, metrics in first["strata"].items()
@@ -132,6 +157,14 @@ def main() -> None:
         "queries": len(all_cases),
         "exact_hit_at_1": first["strata"]["exact-identifier"]["hit@1"],
         "semantic_recall_at_5": first["strata"]["semantic-paraphrase"]["recall@5"],
+        "workflow_recall_at_5": first["strata"]["workflow-gotcha"]["recall@5"],
+        "cross_session_recall_at_5": first["strata"]["cross-session-synthesis"]["recall@5"],
+        "http_semantic_recall_at_5": first_http["strata"]["semantic-paraphrase"]["recall@5"],
+        "http_workflow_recall_at_5": first_http["strata"]["workflow-gotcha"]["recall@5"],
+        "http_cross_session_recall_at_5": first_http["strata"]["cross-session-synthesis"]["recall@5"],
+        "backfilled_items": embedding["processed"],
+        "embedded_items": embedding_metrics["embedded_items"],
+        "embedding_lag": embedding_metrics["embedding_lag"],
         "source_routing_backend_error_rate": first["strata"]["source-routed"]["backend_error_rate"],
         "session_reconstruction_accuracy": first["behavior"]["session_reconstruction_accuracy"],
         "deduplication_accuracy": ingest["deduplication_accuracy"],

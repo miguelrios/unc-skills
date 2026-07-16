@@ -837,7 +837,10 @@ def filters_sql(args):
 
 
 def query_terms(query: str) -> list[str]:
-    return [x for x in re.findall(r"[A-Za-z0-9_./#-]+", query) if x]
+    # A sentence-final period is punctuation, not part of an identifier. Keep
+    # interior dots for filenames, versions, hosts, and qualified names.
+    return [cleaned for value in re.findall(r"[A-Za-z0-9_./#-]+", query)
+            if (cleaned := value.rstrip("."))]
 
 
 def informative_terms(query: str) -> list[str]:

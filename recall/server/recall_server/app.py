@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 from .db import BrainStore, IdempotencyConflict
+from .semantic import SemanticRuntime
 
 LOG = logging.getLogger("recall.brainstore")
 MAX_BODY_BYTES = 12 * 1024 * 1024
@@ -135,6 +136,8 @@ class Handler(BaseHTTPRequestHandler):
             f"recall_dead_letters {db['dead_letters']}",
             f"recall_projection_lag {db['projection_lag']}",
             f"recall_source_freshness_seconds {db['source_freshness_seconds']}",
+            f"recall_embedded_items {db['embedded_items']}",
+            f"recall_embedding_lag {db['embedding_lag']}",
             "",
         ]
         return "\n".join(lines).encode()
@@ -276,7 +279,7 @@ def serve(dsn: str, host: str = "127.0.0.1", port: int = 8788) -> None:
         "127.0.0.1", "localhost", "::1",
     }:
         raise RuntimeError("authentication is required for a non-loopback TCP bind")
-    Handler.store = BrainStore(dsn)
+    Handler.store = BrainStore(dsn, semantic_runtime=SemanticRuntime.from_env())
     server = ThreadingHTTPServer((host, port), Handler)
     LOG.info("brainstore listening host=%s port=%s", host, port)
     server.serve_forever()
@@ -296,7 +299,7 @@ def serve_unix(dsn: str, path: str) -> None:
         if not stat.S_ISSOCK(existing.st_mode):
             raise RuntimeError("refusing to replace a non-socket Unix path")
         os.unlink(path)
-    Handler.store = BrainStore(dsn)
+    Handler.store = BrainStore(dsn, semantic_runtime=SemanticRuntime.from_env())
     server = ThreadingUnixHTTPServer(path, Handler)
     os.chmod(path, 0o600)
     LOG.info("brainstore listening unix_socket=%s", path)

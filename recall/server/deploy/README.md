@@ -14,13 +14,23 @@ points at a contributor's active checkout.
 git worktree add --detach ~/services/recall-brain <reviewed-merged-sha>
 python3 -m venv ~/.config/recall-brain/venv
 ~/.config/recall-brain/venv/bin/pip install -r ~/services/recall-brain/recall/server/requirements.txt
+docker pull ghcr.io/huggingface/text-embeddings-inference@sha256:ad950d30878eceb72aaf32024d26fa2b1d04a75304fa0b4776b49aa1941fea07
 install -m 0600 ~/services/recall-brain/recall/server/deploy/service.env.example ~/.config/recall-brain/service.env
 install -m 0644 ~/services/recall-brain/recall/server/deploy/recall-brain.service ~/.config/systemd/user/
 install -m 0644 ~/services/recall-brain/recall/server/deploy/recall-brain-backup.service ~/.config/systemd/user/
 install -m 0644 ~/services/recall-brain/recall/server/deploy/recall-brain-backup.timer ~/.config/systemd/user/
+install -m 0644 ~/services/recall-brain/recall/server/deploy/recall-embedding.service ~/.config/systemd/user/
+install -m 0644 ~/services/recall-brain/recall/server/deploy/recall-embedding-backfill.service ~/.config/systemd/user/
+install -m 0644 ~/services/recall-brain/recall/server/deploy/recall-embedding-backfill.timer ~/.config/systemd/user/
+# Fill in service.env, then apply every schema before starting services or timers.
+set -a; source ~/.config/recall-brain/service.env; set +a
+cd ~/services/recall-brain/recall/server
+~/.config/recall-brain/venv/bin/python -m recall_server.cli migrate
 systemctl --user daemon-reload
+systemctl --user enable --now recall-embedding
 systemctl --user enable --now recall-brain
 systemctl --user enable --now recall-brain-backup.timer
+systemctl --user enable --now recall-embedding-backfill.timer
 tailscale serve --bg --https=9443 unix:/run/user/$(id -u)/recall-brain.sock
 ```
 
@@ -36,6 +46,34 @@ same blank-database restore/fingerprint contract remains the gate.
 Searches have a 300ms database-work budget by default. Override it only within the validated
 10–2000ms range with `RECALL_SEARCH_DEADLINE_MS`; the response and service log expose only
 content-free per-leg timings, result counts, and the deadline outcome.
+
+Semantic retrieval requires PostgreSQL with pgvector and a loopback-only embedding sidecar. The
+packaged unit pins TEI 1.9 and Qwen3-Embedding-0.6B, binds only `127.0.0.1:8089`, and never exposes
+an embedding route through Tailscale Serve. Keep `RECALL_EMBEDDING_BATCH_SIZE=1`: the derivation
+fingerprint and backfill deliberately trade background throughput for reproducible Qwen document
+vectors. The runtime verifies the exact model commit and float32 dtype against TEI `/info` before
+sending text. Search ignores stale fingerprints, dimensions, projector versions, and content hashes.
+
+Query planning is optional but, when enabled, must use the staging LiteLLM HTTPS router plus a
+short-lived model-scoped virtual key in a non-symlink owner-only file. A separate secret-manager
+timer must atomically replace that file before expiry. Never place a LiteLLM master key in
+`service.env`, pass it to Recall, or call a model provider directly. Recall rereads the key on every
+uncached plan and keeps only bounded hash-keyed in-memory caches; it does not persist query text or
+planner output. Set `RECALL_LITELLM_APPROVED_URL` to the exact same approved staging-router base URL;
+startup fails if the planner points anywhere else.
+
+After schema 011, converge the derived embedding projection online. The timer holds a dedicated
+advisory lock, processes bounded batches, and is safe to replay. It never rewrites canonical events,
+items, or receipts:
+
+```bash
+RECALL_DATABASE_URL=... RECALL_EMBEDDING_URL=http://127.0.0.1:8089 \
+  python -m recall_server.cli backfill-embeddings --batch-size 128
+```
+
+`recall_embedding_lag` must reach zero before semantic retrieval is considered ready. The service
+continues exact and lexical retrieval if the local sidecar or scoped planner is unavailable; stale
+vectors are never searched.
 
 Federated ranking uses explicit host-owned source profiles. Ingest envelopes and model tools
 cannot set family, quality, or freshness policy. After a source has ingested at least one event,

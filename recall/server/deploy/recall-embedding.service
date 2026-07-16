@@ -1,0 +1,17 @@
+[Unit]
+Description=Recall loopback Qwen3 embedding sidecar
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=-/usr/bin/docker rm -f recall-embedding
+ExecStart=/usr/bin/docker run --rm --name recall-embedding --pull never -p 127.0.0.1:8089:80 -v recall-embedding-models:/data ghcr.io/huggingface/text-embeddings-inference@sha256:ad950d30878eceb72aaf32024d26fa2b1d04a75304fa0b4776b49aa1941fea07 --model-id Qwen/Qwen3-Embedding-0.6B --revision 97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3 --dtype float32 --tokenization-workers 4 --max-client-batch-size 128 --max-batch-tokens 4096
+ExecStop=/usr/bin/docker stop -t 20 recall-embedding
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=10min
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

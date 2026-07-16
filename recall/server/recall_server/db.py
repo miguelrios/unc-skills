@@ -19,6 +19,7 @@ from . import PROJECTOR_VERSION
 from .federation import SourceProfile, freshness_score, normalized_evidence
 from .projectors import advisory_lock_key, canonical_json, effective_session_id, event_receipt, legacy_engine, partial_lexical_probes, phrase_query_spec, preferred_phrase_probes, project, redact_text, validate_envelope
 from .ranking import DEFAULT_SEARCH_DEADLINE_MS, evidence_rank_components, should_run_partial
+from .semantic import SemanticRuntime
 
 
 class IdempotencyConflict(Exception):
@@ -30,12 +31,16 @@ class SearchDeadlineExceeded(Exception):
 
 
 class BrainStore:
-    def __init__(self, dsn: str, search_deadline_ms: int | None = None):
+    def __init__(self, dsn: str, search_deadline_ms: int | None = None,
+                 semantic_runtime: SemanticRuntime | None = None):
         self.dsn = dsn
         configured = search_deadline_ms if search_deadline_ms is not None else int(os.environ.get("RECALL_SEARCH_DEADLINE_MS", str(DEFAULT_SEARCH_DEADLINE_MS)))
         if not 10 <= configured <= 2000:
             raise ValueError("search deadline must be between 10 and 2000 milliseconds")
         self.search_deadline_ms = configured
+        if semantic_runtime is not None and semantic_runtime.dimensions != 512:
+            raise ValueError("BrainStore semantic runtime requires 512 dimensions")
+        self.semantic_runtime = semantic_runtime
 
     def connect(self):
         return psycopg.connect(self.dsn, row_factory=dict_row)
@@ -186,7 +191,7 @@ class BrainStore:
 
     def service_metrics(self) -> dict:
         with self.connect() as conn:
-            return {
+            metrics = {
                 "source_events": conn.execute("SELECT count(*) AS n FROM source_events").fetchone()["n"],
                 "dead_letters": conn.execute("SELECT count(*) AS n FROM dead_letters").fetchone()["n"],
                 "projection_lag": conn.execute(
@@ -198,6 +203,108 @@ class BrainStore:
                     "SELECT COALESCE(GREATEST(0, extract(epoch FROM now() - max(created_at)))::bigint, 0) AS n FROM source_events"
                 ).fetchone()["n"],
             }
+            if conn.execute("SELECT to_regclass('public.item_embeddings') AS value").fetchone()["value"]:
+                compatibility = ""
+                values: list[Any] = []
+                if self.semantic_runtime is not None:
+                    compatibility = """ AND embedding.model=%s
+                       AND embedding.runtime_fingerprint=%s AND embedding.dimensions=%s
+                       AND embedding.projector_version=item.projector_version
+                       AND embedding.content_sha256=
+                           encode(sha256(convert_to(item.text_redacted,'UTF8')),'hex')"""
+                    values = [
+                        self.semantic_runtime.model,
+                        self.semantic_runtime.fingerprint,
+                        self.semantic_runtime.dimensions,
+                    ]
+                row = conn.execute(
+                    f"""SELECT count(*) AS embedded,
+                               (SELECT count(*) FROM items WHERE deleted_at IS NULL) AS live
+                        FROM item_embeddings embedding
+                        JOIN items item ON item.id=embedding.item_id
+                        WHERE item.deleted_at IS NULL{compatibility}""",
+                    values,
+                ).fetchone()
+                metrics["embedded_items"] = row["embedded"]
+                metrics["embedding_lag"] = max(0, row["live"] - row["embedded"])
+            else:
+                metrics["embedded_items"] = 0
+                metrics["embedding_lag"] = conn.execute(
+                    "SELECT count(*) AS n FROM items WHERE deleted_at IS NULL"
+                ).fetchone()["n"]
+            return metrics
+
+    def embed_pending(self, batch_size: int = 128, max_batches: int | None = None) -> dict[str, Any]:
+        if self.semantic_runtime is None:
+            raise ValueError("semantic runtime is not configured")
+        if not 1 <= batch_size <= 1000 or (max_batches is not None and max_batches < 1):
+            raise ValueError("invalid embedding backfill bounds")
+        processed = batches = 0
+        with self.connect() as conn:
+            locked = conn.execute(
+                "SELECT pg_try_advisory_lock(hashtextextended('recall:item-embeddings',0)) AS value"
+            ).fetchone()["value"]
+            if not locked:
+                return {"status": "busy", "processed": 0, "batches": 0}
+            try:
+                while max_batches is None or batches < max_batches:
+                    rows = conn.execute(
+                        """SELECT item.id,item.source_id,item.text_redacted,item.projector_version
+                           FROM items item
+                           LEFT JOIN item_embeddings embedding ON embedding.item_id=item.id
+                           WHERE item.deleted_at IS NULL AND (
+                             embedding.item_id IS NULL OR embedding.model<>%s
+                             OR embedding.runtime_fingerprint<>%s
+                             OR embedding.dimensions<>%s
+                             OR embedding.projector_version<>item.projector_version
+                             OR embedding.content_sha256<>
+                                encode(sha256(convert_to(item.text_redacted,'UTF8')),'hex')
+                           )
+                           ORDER BY item.id LIMIT %s""",
+                        (
+                            self.semantic_runtime.model,
+                            self.semantic_runtime.fingerprint,
+                            self.semantic_runtime.dimensions,
+                            batch_size,
+                        ),
+                    ).fetchall()
+                    if not rows:
+                        break
+                    vectors = self.semantic_runtime.embed_documents(
+                        [row["text_redacted"] for row in rows],
+                    )
+                    values = []
+                    for row, vector in zip(rows, vectors, strict=True):
+                        content_hash = hashlib.sha256(row["text_redacted"].encode()).hexdigest()
+                        values.append((
+                            row["id"], row["source_id"], self.semantic_runtime.model,
+                            self.semantic_runtime.dimensions, row["projector_version"],
+                            content_hash, self.semantic_runtime.fingerprint,
+                            json.dumps(vector, separators=(",", ":")),
+                        ))
+                    with conn.transaction():
+                        with conn.cursor() as cursor:
+                            cursor.executemany(
+                                """INSERT INTO item_embeddings(
+                                     item_id,source_id,model,dimensions,projector_version,
+                                     content_sha256,runtime_fingerprint,embedding
+                                   ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s::halfvec)
+                                   ON CONFLICT(item_id) DO UPDATE SET
+                                     source_id=excluded.source_id,model=excluded.model,
+                                     dimensions=excluded.dimensions,
+                                     projector_version=excluded.projector_version,
+                                     content_sha256=excluded.content_sha256,
+                                     runtime_fingerprint=excluded.runtime_fingerprint,
+                                     embedding=excluded.embedding,embedded_at=now()""",
+                                values,
+                            )
+                    processed += len(rows)
+                    batches += 1
+            finally:
+                conn.execute(
+                    "SELECT pg_advisory_unlock(hashtextextended('recall:item-embeddings',0))"
+                )
+        return {"status": "complete", "processed": processed, "batches": batches}
 
     def record_dead_letter(self, error_code: str, summary: str) -> None:
         """Record rejection metadata only; never persist the rejected payload."""
@@ -581,10 +688,63 @@ class BrainStore:
         ).fetchall()
         return [{**dict(row), "leg": "entity", "tier": tier} for row in rows]
 
+    def _semantic_leg(self, conn, vector: list[float], filters: dict,
+                      *, authorized_source: str | None = None, limit: int = 100,
+                      routed_source_ids: list[str] | None = None,
+                      deadline_at: float | None = None) -> list[dict]:
+        if self.semantic_runtime is None:
+            return []
+        where, params = self._read_filters(filters, authorized_source, routed_source_ids)
+        encoded = json.dumps(vector, separators=(",", ":"))
+        # RRF depends on a stable position in each leg. pgvector's relaxed mode
+        # explicitly permits out-of-order results, so use strict ordering and
+        # a durable item-id tie break for reproducible rankings.
+        conn.execute("SELECT set_config('hnsw.iterative_scan','strict_order',true)")
+        rows = self._execute_bounded(
+            conn,
+            f"""
+            SELECT i.id,i.source_id,i.session_native_id,i.event_native_id,i.occurred_at,i.surface,
+                   i.text_redacted,i.receipt,i.projector_version,s.started_at,s.ended_at,s.metadata,
+                   se.envelope #>> '{{provenance,original_path}}' AS path,se.observed_at,
+                   coalesce(sp.family,'unclassified') AS source_family,
+                   coalesce(sp.quality,'unrated') AS source_quality,
+                   coalesce(sp.freshness_half_life_days,180) AS freshness_half_life_days,
+                   (sp.source_id IS NOT NULL) AS source_profiled,
+                   1-(embedding.embedding <=> %s::halfvec) AS lexical_rank
+            FROM item_embeddings embedding
+            JOIN items i ON i.id=embedding.item_id
+            JOIN sessions s ON s.source_id=i.source_id AND s.native_id=i.session_native_id
+            JOIN source_events se ON se.id=i.event_id
+            LEFT JOIN source_profiles sp ON sp.source_id=i.source_id
+            WHERE embedding.model=%s
+              AND embedding.runtime_fingerprint=%s
+              AND embedding.dimensions=%s
+              AND embedding.projector_version=i.projector_version
+              AND embedding.content_sha256=
+                  encode(sha256(convert_to(i.text_redacted,'UTF8')),'hex')
+              AND {where}
+            ORDER BY embedding.embedding <=> %s::halfvec,i.id DESC
+            LIMIT %s
+            """,
+            [
+                encoded,
+                self.semantic_runtime.model,
+                self.semantic_runtime.fingerprint,
+                self.semantic_runtime.dimensions,
+                *params,
+                encoded,
+                limit,
+            ],
+            deadline_at,
+        ).fetchall()
+        return [{**dict(row), "leg": "semantic", "tier": 2} for row in rows]
+
     def search(self, query: str, filters: dict | None = None, limit: int = 10,
                authorized_source: str | None = None) -> dict:
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query is required")
+        if len(query) > 8192:
+            raise ValueError("query is too large")
         if not isinstance(limit, int) or not 1 <= limit <= 20:
             raise ValueError("limit must be between 1 and 20")
         filters = filters or {}
@@ -606,24 +766,69 @@ class BrainStore:
                     "deadline_exceeded": False, "legs": [], "routing": routing,
                 },
             }
-        candidates: dict[int, dict] = {}
         started = time.monotonic()
-        deadline_at = started + self.search_deadline_ms / 1000
+        identifiers = sorted(
+            engine.identifier_terms(informative),
+            key=lambda value: (
+                bool(re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", value)),
+                bool(re.fullmatch(r"[0-9a-f]{8,}", value)), len(value),
+            ),
+            reverse=True,
+        )
+        plan = None
+        semantic_vectors: list[list[float]] = []
+        semantic_error = None
+        planner_started = time.monotonic()
+        if self.semantic_runtime is not None and not identifiers:
+            try:
+                if len(informative) == 1:
+                    semantic_vectors = self.semantic_runtime.embed_queries([query])
+                elif redact_text(query) != query:
+                    # Sensitive-looking queries stay entirely local. They can
+                    # still use dense retrieval, but never leave through the
+                    # optional remote lexical planner.
+                    semantic_vectors = self.semantic_runtime.embed_queries([query])
+                else:
+                    plan = self.semantic_runtime.plan(query)
+                    if plan is not None and plan.searchable:
+                        semantic_vectors = self.semantic_runtime.embed_queries([query])
+            except Exception as exc:
+                semantic_error = type(exc).__name__
+                plan = None
+                semantic_vectors = []
+        planner_elapsed_ms = round((time.monotonic() - planner_started) * 1000, 3)
+        candidates: dict[int, dict] = {}
+        database_started = time.monotonic()
+        deadline_at = database_started + self.search_deadline_ms / 1000
         leg_timings: list[dict[str, Any]] = []
         deadline_exceeded = False
+        dense_anchor_keys: list[tuple[str, str]] = []
+        exact_rescue_scores: dict[tuple[str, str], tuple[int, int, float]] = {}
 
         def merge(rows: list[dict]) -> None:
-            for row in rows:
+            for position, row in enumerate(rows, 1):
+                contribution = 1.0 / (60 + position)
+                leg = row.pop("leg")
                 existing = candidates.get(row["id"])
                 if existing is None:
-                    row["legs"] = {row.pop("leg")}
+                    row["legs"] = {leg}
+                    row["leg_contributions"] = {leg: contribution}
+                    row["fusion_score"] = contribution
                     candidates[row["id"]] = row
                 else:
-                    existing["legs"].add(row["leg"])
+                    existing["legs"].add(leg)
+                    existing["leg_contributions"][leg] = max(
+                        contribution,
+                        existing["leg_contributions"].get(leg, 0.0),
+                    )
+                    existing["fusion_score"] = sum(existing["leg_contributions"].values())
                     if (row["tier"], float(row["lexical_rank"])) > (existing["tier"], float(existing["lexical_rank"])):
                         legs = existing["legs"]
+                        leg_contributions = existing["leg_contributions"]
+                        fusion_score = existing["fusion_score"]
                         row["legs"] = legs
-                        row.pop("leg")
+                        row["leg_contributions"] = leg_contributions
+                        row["fusion_score"] = fusion_score
                         candidates[row["id"]] = row
 
         def run_leg(name: str, operation) -> list[dict]:
@@ -644,14 +849,6 @@ class BrainStore:
                 })
                 raise
 
-        identifiers = sorted(
-            engine.identifier_terms(informative),
-            key=lambda value: (
-                bool(re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", value)),
-                bool(re.fullmatch(r"[0-9a-f]{8,}", value)), len(value),
-            ),
-            reverse=True,
-        )
         try:
             with self.connect() as conn:
                 routed_source_ids = self._resolve_routed_source_ids(conn, filters)
@@ -672,7 +869,51 @@ class BrainStore:
                             break
                 else:
                     phrase_spec = phrase_query_spec(preferred_phrase_probes(engine.phrase_queries(query)))
-                    if phrase_spec:
+                    if phrase_spec and len(informative) >= 2:
+                        phrase_query, phrase_function = phrase_spec
+                        merge(run_leg("phrase", lambda: self._lexical_leg(
+                            conn, phrase_query, phrase_function, filters, "phrase", 3,
+                            limit=100, authorized_source=authorized_source, deadline_at=deadline_at,
+                            routed_source_ids=routed_source_ids,
+                        )))
+                    if plan is not None and plan.searchable and plan.phrases:
+                        # Rewrites may only add high-precision evidence. Broad OR
+                        # rewrites let one generic model phrase reshuffle an
+                        # otherwise stable dense baseline. Exact multiword probes
+                        # rescue canonical labels without rewarding synonyms that
+                        # are absent from the evidence.
+                        for rewrite_index, rewrite_phrase in enumerate(plan.phrases):
+                            if len(re.findall(r"[A-Za-z0-9_./#-]+", rewrite_phrase)) < 2:
+                                continue
+                            rewrite_rows = run_leg(f"rewrite-{rewrite_index}", lambda rewrite_phrase=rewrite_phrase: self._lexical_leg(
+                                conn, rewrite_phrase, "phraseto_tsquery", filters, "rewrite", 2,
+                                exact=rewrite_phrase, limit=20, authorized_source=authorized_source,
+                                deadline_at=deadline_at, routed_source_ids=routed_source_ids,
+                            ))
+                            for rewrite_row in rewrite_rows:
+                                key = (rewrite_row["source_id"], rewrite_row["session_native_id"])
+                                score = (
+                                    -len(normalized_evidence(rewrite_row["text_redacted"])),
+                                    -rewrite_index,
+                                    float(rewrite_row["lexical_rank"]),
+                                )
+                                exact_rescue_scores[key] = max(score, exact_rescue_scores.get(key, score))
+                            merge(rewrite_rows)
+                    for vector_index, semantic_vector in enumerate(semantic_vectors):
+                        semantic_rows = run_leg(f"semantic-{vector_index}", lambda semantic_vector=semantic_vector: self._semantic_leg(
+                            conn, semantic_vector, filters, authorized_source=authorized_source,
+                            routed_source_ids=routed_source_ids, deadline_at=deadline_at,
+                            limit=max(100, limit * 10),
+                        ))
+                        if vector_index == 0:
+                            for semantic_row in semantic_rows:
+                                anchor = (semantic_row["source_id"], semantic_row["session_native_id"])
+                                if anchor not in dense_anchor_keys:
+                                    dense_anchor_keys.append(anchor)
+                                if len(dense_anchor_keys) >= max(1, limit - 1):
+                                    break
+                        merge(semantic_rows)
+                    if phrase_spec and len(informative) == 1 and len(candidates) < limit:
                         phrase_query, phrase_function = phrase_spec
                         merge(run_leg("phrase", lambda: self._lexical_leg(
                             conn, phrase_query, phrase_function, filters, "phrase", 3,
@@ -701,7 +942,7 @@ class BrainStore:
                             limit=100, authorized_source=authorized_source, deadline_at=deadline_at,
                             routed_source_ids=routed_source_ids,
                         )))
-                if not any(row["tier"] >= 3 for row in candidates.values()):
+                if len(candidates) < limit and not any(row["tier"] >= 3 for row in candidates.values()):
                     merge(run_leg("all", lambda: self._lexical_leg(
                         conn, " ".join(informative), "plainto_tsquery", filters, "all", 1,
                         authorized_source=authorized_source, deadline_at=deadline_at,
@@ -739,12 +980,33 @@ class BrainStore:
                 has_identifier=bool(identifiers), recency_factor=recency_factor,
                 quality=row["source_quality"],
                 corroborating_families=corroborating_families,
+                fusion_score=float(row.get("fusion_score", 0.0)),
             )
             key = (row["source_id"], row["session_native_id"])
             rank_key = tuple(evidence["rank_key"])
             if key not in grouped or rank_key > grouped[key][0]:
                 grouped[key] = (rank_key, {**row, "matched_terms": matched, "evidence": evidence})
-        ranked = sorted(grouped.values(), key=lambda value: value[0], reverse=True)[:limit]
+        ranked_all = sorted(grouped.items(), key=lambda value: value[1][0], reverse=True)
+        if dense_anchor_keys:
+            # Preserve the deterministic local dense baseline and reserve one
+            # result slot for the best complementary lexical/planner evidence.
+            selected_keys = [key for key in dense_anchor_keys if key in grouped][:max(1, limit - 1)]
+            for key in sorted(exact_rescue_scores, key=lambda value: (exact_rescue_scores[value], value), reverse=True):
+                if key in grouped and key not in selected_keys:
+                    selected_keys.append(key)
+                    break
+            for key, _value in ranked_all:
+                if key not in selected_keys:
+                    selected_keys.append(key)
+                if len(selected_keys) >= limit:
+                    break
+            ranked = sorted(
+                (grouped[key] for key in selected_keys),
+                key=lambda value: value[0],
+                reverse=True,
+            )
+        else:
+            ranked = [value for _key, value in ranked_all[:limit]]
         results = []
         for _rank, row in ranked:
             metadata = row["metadata"] or {}
@@ -770,9 +1032,18 @@ class BrainStore:
         diagnostics = {
             "deadline_ms": self.search_deadline_ms,
             "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+            "database_elapsed_ms": round((time.monotonic() - database_started) * 1000, 3),
             "deadline_exceeded": deadline_exceeded,
             "legs": leg_timings,
             "routing": routing,
+            "semantic": {
+                "configured": self.semantic_runtime is not None,
+                "planner_used": plan is not None,
+                "searchable": None if plan is None else plan.searchable,
+                "phrase_count": 0 if plan is None else len(plan.phrases),
+                "planner_elapsed_ms": planner_elapsed_ms,
+                "error_type": semantic_error,
+            },
         }
         return {
             "results": results,
@@ -1118,7 +1389,10 @@ class BrainStore:
             with conn.transaction():
                 before = conn.execute("SELECT count(*) AS n FROM items WHERE deleted_at IS NULL").fetchone()["n"]
                 entities_before = conn.execute("SELECT count(*) AS n FROM entities").fetchone()["n"]
-                conn.execute("TRUNCATE entities,chunks,items,sessions,projection_watermarks RESTART IDENTITY")
+                conn.execute(
+                    "TRUNCATE item_embeddings,entities,chunks,items,sessions,"
+                    "projection_watermarks RESTART IDENTITY"
+                )
                 rows = conn.execute("SELECT id,envelope,revision FROM source_events ORDER BY id").fetchall()
                 for row in rows:
                     self._project_one(conn, row["id"], row["envelope"], row["revision"])
