@@ -17,7 +17,7 @@ from psycopg.rows import dict_row
 
 from . import PROJECTOR_VERSION
 from .federation import SourceProfile, freshness_score, normalized_evidence
-from .projectors import advisory_lock_key, canonical_json, effective_session_id, event_receipt, legacy_engine, partial_lexical_probes, phrase_query_spec, preferred_phrase_probes, project, redact_text, validate_envelope
+from .projectors import SOURCE_ID_RE, advisory_lock_key, canonical_json, effective_session_id, event_receipt, legacy_engine, partial_lexical_probes, phrase_query_spec, preferred_phrase_probes, project, redact_text, validate_envelope
 from .ranking import DEFAULT_SEARCH_DEADLINE_MS, evidence_rank_components, should_run_partial
 from .semantic import SemanticRuntime
 
@@ -234,11 +234,16 @@ class BrainStore:
                 ).fetchone()["n"]
             return metrics
 
-    def embed_pending(self, batch_size: int = 128, max_batches: int | None = None) -> dict[str, Any]:
+    def embed_pending(
+        self, batch_size: int = 128, max_batches: int | None = None,
+        source_id: str | None = None,
+    ) -> dict[str, Any]:
         if self.semantic_runtime is None:
             raise ValueError("semantic runtime is not configured")
         if not 1 <= batch_size <= 1000 or (max_batches is not None and max_batches < 1):
             raise ValueError("invalid embedding backfill bounds")
+        if source_id is not None and not SOURCE_ID_RE.fullmatch(source_id):
+            raise ValueError("invalid embedding source")
         processed = batches = 0
         with self.connect() as conn:
             locked = conn.execute(
@@ -252,7 +257,9 @@ class BrainStore:
                         """SELECT item.id,item.source_id,item.text_redacted,item.projector_version
                            FROM items item
                            LEFT JOIN item_embeddings embedding ON embedding.item_id=item.id
-                           WHERE item.deleted_at IS NULL AND (
+                           WHERE item.deleted_at IS NULL
+                             AND (%s::text IS NULL OR item.source_id=%s)
+                             AND (
                              embedding.item_id IS NULL OR embedding.model<>%s
                              OR embedding.runtime_fingerprint<>%s
                              OR embedding.dimensions<>%s
@@ -262,6 +269,8 @@ class BrainStore:
                            )
                            ORDER BY item.id LIMIT %s""",
                         (
+                            source_id,
+                            source_id,
                             self.semantic_runtime.model,
                             self.semantic_runtime.fingerprint,
                             self.semantic_runtime.dimensions,
@@ -304,7 +313,10 @@ class BrainStore:
                 conn.execute(
                     "SELECT pg_advisory_unlock(hashtextextended('recall:item-embeddings',0))"
                 )
-        return {"status": "complete", "processed": processed, "batches": batches}
+        return {
+            "status": "complete", "processed": processed, "batches": batches,
+            "source_scoped": source_id is not None,
+        }
 
     def record_dead_letter(self, error_code: str, summary: str) -> None:
         """Record rejection metadata only; never persist the rejected payload."""

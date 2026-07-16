@@ -20,9 +20,11 @@ QUERY_INSTRUCTION = (
     "Instruct: Retrieve passages from a private personal work memory that answer the query.\n"
     "Query: "
 )
-DOCUMENT_EMBEDDING_CONTRACT = "recall.document-embedding.v4"
+DOCUMENT_EMBEDDING_CONTRACT = "recall.document-embedding.v5:head-tail-4096"
 DEFAULT_EMBEDDING_REVISION = "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
 MAX_SEMANTIC_RESPONSE_BYTES = 8 * 1024 * 1024
+MAX_DOCUMENT_CHARS = 4096
+DOCUMENT_CLIP_MARKER = "\n[...clipped for embedding...]\n"
 PLANNER_PROMPT = """You are a high-precision lexical query planner for a private personal work memory.
 Infer canonical engineering or business concepts described indirectly. Return up to eight independent
 likely verbatim search phrases, each one to three words. Include the standard canonical term when one
@@ -219,13 +221,24 @@ class SemanticRuntime:
         self._ensure_embedding_identity()
         result = []
         for start in range(0, len(texts), self.embedding_batch_size):
-            batch = texts[start:start + self.embedding_batch_size]
+            batch = [self._document_text(value) for value in texts[
+                start:start + self.embedding_batch_size
+            ]]
             values = self._post(
                 self.embedding_url + "/embed",
                 {"inputs": batch, "truncate": True, "dimensions": self.dimensions},
             )
             result.extend(self._validate_vectors(values, len(batch)))
         return result
+
+    @staticmethod
+    def _document_text(value: str) -> str:
+        if len(value) <= MAX_DOCUMENT_CHARS:
+            return value
+        remaining = MAX_DOCUMENT_CHARS - len(DOCUMENT_CLIP_MARKER)
+        head = (remaining + 1) // 2
+        tail = remaining - head
+        return value[:head] + DOCUMENT_CLIP_MARKER + value[-tail:]
 
     def embed_queries(self, queries: list[str]) -> list[list[float]]:
         """Embed query expansions in one local batch, caching by content hash."""

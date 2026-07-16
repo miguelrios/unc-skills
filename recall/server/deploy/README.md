@@ -51,8 +51,13 @@ Semantic retrieval requires PostgreSQL with pgvector and a loopback-only embeddi
 packaged unit pins TEI 1.9 and Qwen3-Embedding-0.6B, binds only `127.0.0.1:8089`, and never exposes
 an embedding route through Tailscale Serve. Keep `RECALL_EMBEDDING_BATCH_SIZE=1`: the derivation
 fingerprint and backfill deliberately trade background throughput for reproducible Qwen document
-vectors. The runtime verifies the exact model commit and float32 dtype against TEI `/info` before
-sending text. Search ignores stale fingerprints, dimensions, projector versions, and content hashes.
+vectors. The sidecar admits only one single-input request at a time because this Qwen/TEI CPU path is
+not reproducible across batched requests. An overlapping request is rejected and retrieval safely
+falls back to exact and lexical legs; a backfill retry converges later. Oversized
+documents use a fingerprinted 4,096-character
+head-and-tail projection so a giant tool result cannot stall a complete backfill batch. The runtime
+verifies the exact model commit and float32 dtype against TEI `/info` before sending text. Search
+ignores stale fingerprints, dimensions, projector versions, and content hashes.
 
 Query planning is optional but, when enabled, must use the staging LiteLLM HTTPS router plus a
 short-lived model-scoped virtual key in a non-symlink owner-only file. A separate secret-manager
@@ -70,6 +75,15 @@ items, or receipts:
 RECALL_DATABASE_URL=... RECALL_EMBEDDING_URL=http://127.0.0.1:8089 \
   python -m recall_server.cli backfill-embeddings --batch-size 128
 ```
+
+On a large existing brain, converge high-value sources first without changing global correctness:
+
+```bash
+python -m recall_server.cli backfill-embeddings --source-id SOURCE_ID --batch-size 128
+```
+
+The source selector changes scheduling only. Metrics and search compatibility remain global, and an
+unscoped replay finishes every remaining source.
 
 `recall_embedding_lag` must reach zero before semantic retrieval is considered ready. The service
 continues exact and lexical retrieval if the local sidecar or scoped planner is unavailable; stale

@@ -12,6 +12,8 @@ sys.path.insert(0, str(SERVER))
 
 from recall_server.semantic import (  # noqa: E402
     DEFAULT_EMBEDDING_REVISION,
+    DOCUMENT_CLIP_MARKER,
+    MAX_DOCUMENT_CHARS,
     QUERY_INSTRUCTION,
     SearchPlan,
     SemanticRuntime,
@@ -96,6 +98,19 @@ class SemanticRuntimeContractTest(unittest.TestCase):
             self.assertEqual(len(runtime.embed_documents(["a", "b", "c", "d", "e"])), 5)
         self.assertEqual([len(call.args[1]["inputs"]) for call in post.call_args_list], [2, 2, 1])
         self.assertRegex(runtime.fingerprint, r"^[0-9a-f]{64}$")
+
+    def test_oversized_documents_keep_a_bounded_head_and_tail(self) -> None:
+        runtime = self.runtime()
+        runtime._embedding_identity_checked = True
+        value = "H" * 5000 + "T" * 5000
+        vector = [0.0] * 512
+        with mock.patch.object(runtime, "_post", return_value=[vector]) as post:
+            runtime.embed_documents([value])
+        projected = post.call_args.args[1]["inputs"][0]
+        self.assertEqual(len(projected), MAX_DOCUMENT_CHARS)
+        self.assertIn(DOCUMENT_CLIP_MARKER, projected)
+        self.assertTrue(projected.startswith("H"))
+        self.assertTrue(projected.endswith("T"))
 
     def test_embedding_revision_is_verified_before_content_leaves(self) -> None:
         runtime = self.runtime()
