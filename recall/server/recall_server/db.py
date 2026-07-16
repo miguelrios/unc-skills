@@ -425,7 +425,11 @@ class BrainStore:
             return {"event": {key: value for key, value in event.items() if key != "id"}, "items": items}
 
     @staticmethod
-    def _read_filters(filters: dict, authorized_source: str | None = None) -> tuple[str, list[Any]]:
+    def _read_filters(
+        filters: dict,
+        authorized_source: str | None = None,
+        routed_source_ids: list[str] | None = None,
+    ) -> tuple[str, list[Any]]:
         allowed = {"since", "until", "cwd", "branch", "harness", "source_id", "source_family", "source_alias"}
         if set(filters) - allowed:
             raise ValueError("unsupported search filter")
@@ -445,13 +449,13 @@ class BrainStore:
             family = filters["source_family"]
             if family not in {"coding_history", "deliberate_capture", "user_export", "third_party_research"}:
                 raise ValueError("unsupported source_family filter")
-            clauses.append("sp.family = %s"); params.append(family)
         if filters.get("source_alias"):
             alias = filters["source_alias"]
             if not isinstance(alias, str) or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{1,63}", alias):
                 raise ValueError("invalid source_alias filter")
-            clauses.append("i.source_id = (SELECT source_id FROM source_aliases WHERE alias = %s)")
-            params.append(alias)
+        if routed_source_ids is not None:
+            clauses.append("i.source_id = ANY(%s)")
+            params.append(routed_source_ids)
         if filters.get("since"):
             clauses.append("i.occurred_at >= %s::timestamptz"); params.append(filters["since"])
         if filters.get("until"):
@@ -466,13 +470,39 @@ class BrainStore:
             clauses.append("s.harness = %s"); params.append(filters["harness"])
         return " AND ".join(clauses), params
 
+    @staticmethod
+    def _resolve_routed_source_ids(conn, filters: dict) -> list[str] | None:
+        routed: set[str] | None = None
+        family = filters.get("source_family")
+        if family is not None:
+            if family not in {"coding_history", "deliberate_capture", "user_export", "third_party_research"}:
+                raise ValueError("unsupported source_family filter")
+            family_sources = {
+                row["source_id"] for row in conn.execute(
+                    "SELECT source_id FROM source_profiles WHERE family=%s ORDER BY source_id",
+                    (family,),
+                ).fetchall()
+            }
+            routed = family_sources
+        alias = filters.get("source_alias")
+        if alias is not None:
+            if not isinstance(alias, str) or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{1,63}", alias):
+                raise ValueError("invalid source_alias filter")
+            row = conn.execute(
+                "SELECT source_id FROM source_aliases WHERE alias=%s", (alias,),
+            ).fetchone()
+            alias_sources = {row["source_id"]} if row else set()
+            routed = alias_sources if routed is None else routed & alias_sources
+        return None if routed is None else sorted(routed)
+
     def _lexical_leg(self, conn, query: str, query_function: str, filters: dict,
                      leg: str, tier: int, *, exact: str | None = None,
                      limit: int = 400, authorized_source: str | None = None,
+                     routed_source_ids: list[str] | None = None,
                      deadline_at: float | None = None) -> list[dict]:
         if query_function not in {"plainto_tsquery", "phraseto_tsquery", "websearch_to_tsquery"}:
             raise ValueError("unsupported query function")
-        where, params = self._read_filters(filters, authorized_source)
+        where, params = self._read_filters(filters, authorized_source, routed_source_ids)
         exact_sql = ""
         query_params: list[Any] = [query]
         if exact is not None:
@@ -520,11 +550,12 @@ class BrainStore:
 
     def _entity_leg(self, conn, values: list[str], filters: dict,
                     *, authorized_source: str | None = None, limit: int = 400,
+                    routed_source_ids: list[str] | None = None,
                     deadline_at: float | None = None, tier: int = 3) -> list[dict]:
         normalized = sorted({value.casefold() for value in values if value})
         if not normalized:
             return []
-        where, params = self._read_filters(filters, authorized_source)
+        where, params = self._read_filters(filters, authorized_source, routed_source_ids)
         rows = self._execute_bounded(
             conn,
             f"""
@@ -623,15 +654,18 @@ class BrainStore:
         )
         try:
             with self.connect() as conn:
+                routed_source_ids = self._resolve_routed_source_ids(conn, filters)
                 if identifiers:
                     merge(run_leg("entity", lambda: self._entity_leg(
                         conn, identifiers, filters, authorized_source=authorized_source,
+                        routed_source_ids=routed_source_ids,
                         deadline_at=deadline_at, tier=3,
                     )))
                     for identifier in identifiers[:3]:
                         exact_rows = run_leg("identifier", lambda identifier=identifier: self._lexical_leg(
                             conn, identifier, "plainto_tsquery", filters, "identifier", 3,
                             exact=identifier, limit=100, authorized_source=authorized_source, deadline_at=deadline_at,
+                            routed_source_ids=routed_source_ids,
                         ))
                         merge(exact_rows)
                         if exact_rows:
@@ -643,6 +677,7 @@ class BrainStore:
                         merge(run_leg("phrase", lambda: self._lexical_leg(
                             conn, phrase_query, phrase_function, filters, "phrase", 3,
                             limit=100, authorized_source=authorized_source, deadline_at=deadline_at,
+                            routed_source_ids=routed_source_ids,
                         )))
                     entity_values = [
                         part
@@ -653,6 +688,7 @@ class BrainStore:
                     if entity_values:
                         merge(run_leg("entity", lambda: self._entity_leg(
                             conn, entity_values, filters, authorized_source=authorized_source,
+                            routed_source_ids=routed_source_ids,
                             deadline_at=deadline_at, tier=2,
                         )))
                 if not identifiers and should_run_partial(candidate_count=len(candidates), result_limit=limit):
@@ -663,11 +699,13 @@ class BrainStore:
                         merge(run_leg(leg, lambda probe=probe, leg=leg, tier=tier: self._lexical_leg(
                             conn, probe, "plainto_tsquery", filters, leg, tier,
                             limit=100, authorized_source=authorized_source, deadline_at=deadline_at,
+                            routed_source_ids=routed_source_ids,
                         )))
                 if not any(row["tier"] >= 3 for row in candidates.values()):
                     merge(run_leg("all", lambda: self._lexical_leg(
                         conn, " ".join(informative), "plainto_tsquery", filters, "all", 1,
                         authorized_source=authorized_source, deadline_at=deadline_at,
+                        routed_source_ids=routed_source_ids,
                     )))
         except SearchDeadlineExceeded:
             pass

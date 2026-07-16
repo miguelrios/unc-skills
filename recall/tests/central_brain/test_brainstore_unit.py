@@ -66,15 +66,39 @@ class SchemaMigrationContractTest(unittest.TestCase):
 
 
 class SourceScopedReadContractTest(unittest.TestCase):
+    def test_family_and_alias_resolve_once_to_an_intersected_source_set(self) -> None:
+        connection = mock.MagicMock()
+
+        def execute(sql, _params):
+            result = mock.MagicMock()
+            if "source_profiles" in sql:
+                result.fetchall.return_value = [
+                    {"source_id": "source-a"}, {"source_id": "source-b"},
+                ]
+            else:
+                result.fetchone.return_value = {"source_id": "source-b"}
+            return result
+
+        connection.execute.side_effect = execute
+        self.assertEqual(
+            BrainStore._resolve_routed_source_ids(connection, {
+                "source_family": "coding_history", "source_alias": "cowork",
+            }),
+            ["source-b"],
+        )
+        self.assertEqual(connection.execute.call_count, 2)
+
     def test_requested_source_filters_intersect_with_authorized_scope(self) -> None:
         where, params = BrainStore._read_filters(
             {"source_id": "source-b", "source_family": "coding_history", "source_alias": "cowork"},
             authorized_source="source-a",
+            routed_source_ids=["source-b", "source-c"],
         )
         self.assertEqual(where.count("i.source_id = %s"), 2)
-        self.assertIn("sp.family = %s", where)
-        self.assertIn("SELECT source_id FROM source_aliases", where)
-        self.assertEqual(params, ["source-a", "source-b", "coding_history", "cowork"])
+        self.assertNotIn("sp.family", where)
+        self.assertNotIn("SELECT source_id FROM source_aliases", where)
+        self.assertIn("i.source_id = ANY(%s)", where)
+        self.assertEqual(params, ["source-a", "source-b", ["source-b", "source-c"]])
 
     def test_resolve_filters_by_the_authenticated_collector_source(self) -> None:
         connection = mock.MagicMock()
