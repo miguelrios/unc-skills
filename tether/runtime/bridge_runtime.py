@@ -327,6 +327,26 @@ class Store:
                 ).fetchone()
             return self.decode(row)
 
+    def replace_source(self, bridge_id: str, kind: str, raw_source: dict[str, Any]) -> Bridge:
+        if kind not in SOURCE_FIELDS:
+            raise ValueError("unsupported bridge source kind")
+        if not isinstance(raw_source, dict) or set(raw_source) - SOURCE_FIELDS[kind]:
+            raise ValueError("invalid bridge source")
+        if not all(isinstance(key, str) and isinstance(value, str) for key, value in raw_source.items()):
+            raise ValueError("bridge source values must be strings")
+        source = {key: value for key, value in raw_source.items() if value}
+        if any(len(value) > MAX_SOURCE_VALUE for value in source.values()):
+            raise ValueError("bridge source value is too large")
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            changed = db.execute(
+                "UPDATE bridges SET source_kind=?,source_json=? WHERE bridge_id=? AND status='active'",
+                (kind, json.dumps(source, separators=(",", ":")), bridge_id),
+            ).rowcount
+            if changed != 1:
+                raise ValueError("active bridge not found")
+            return self.decode(db.execute("SELECT * FROM bridges WHERE bridge_id=?", (bridge_id,)).fetchone())  # type: ignore[return-value]
+
     def mark_participation(self, team_id: str, channel_id: str, thread_ts: str) -> None:
         if not channel_id or not thread_ts:
             raise ValueError("channel and thread timestamp are required")
@@ -602,7 +622,7 @@ class Broker:
         status = {
             "ok": True,
             "implementation": "tether",
-            "protocol_version": 3,
+            "protocol_version": 4,
             "channel_configured": bool(effective_channel(config)),
             "owner_configured": bool(config.default_owner or allowed_users),
             "allowed_user_count": len(allowed_users),
@@ -718,6 +738,29 @@ class Broker:
             "deduplicated": False,
         }
 
+    def _rebind(self, request: BridgeRequest, config: Config) -> dict[str, Any]:
+        channel = str(request.get("channel_id") or effective_channel(config))
+        team = str(request.get("team_id") or config.team_id)
+        thread_ts = str(request.get("thread_ts") or "")
+        if not channel or not thread_ts:
+            raise ValueError("Slack channel and existing thread timestamp are required")
+        existing = self.store.find(team, channel, thread_ts)
+        if existing is None:
+            raise ValueError("active bridge not found for Slack thread")
+        kind = str(request.get("source_kind") or "")
+        source = request.get("source")
+        if kind != "zellij_pane" or not isinstance(source, dict):
+            raise ValueError("rebind requires the caller's live ambient Zellij pane")
+        bridge = self.store.replace_source(existing.bridge_id, kind, source)
+        self.store.mark_participation(bridge.team_id, bridge.channel_id, thread_ts)
+        return {
+            "ok": True,
+            "bridge_id": bridge.bridge_id,
+            "thread_ts": bridge.thread_ts,
+            "source_kind": bridge.source_kind,
+            "pane_id": bridge.source.get("pane_id", ""),
+        }
+
     def _history(self, request: BridgeRequest, config: Config) -> dict[str, Any]:
         limit = max(1, min(int(request.get("limit", 15)), 100))
         channel = str(request.get("channel_id") or effective_channel(config))
@@ -784,6 +827,9 @@ class Broker:
         if operation == "attach":
             with self._notify_lock:
                 return self._attach(request, config, allowed_users)
+        if operation == "rebind":
+            with self._notify_lock:
+                return self._rebind(request, config)
         if operation == "reply":
             return self._reply(request)
         if operation == "history":

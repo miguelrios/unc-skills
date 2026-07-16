@@ -181,7 +181,7 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(bridge.owner_user_id, "*", "Hermes's explicit allowlist is shared by default")
         self.assertEqual(status["allowed_user_count"], 2)
         self.assertEqual(status["implementation"], "tether")
-        self.assertEqual(status["protocol_version"], 3)
+        self.assertEqual(status["protocol_version"], 4)
         self.assertNotIn("allowed_users", status, "status reports readiness, never identities")
 
     def test_thread_history_stays_behind_broker_and_returns_sanitized_messages(self):
@@ -278,6 +278,39 @@ class StoreTest(unittest.TestCase):
         request["source"] = {"session_id": "claude-2", "cwd": "/tmp/parcha"}
         with self.assertRaisesRegex(ValueError, "already has an active"):
             broker.handle(request)
+
+    def test_rebind_replaces_only_the_existing_threads_zellij_source(self):
+        broker = self.runtime.Broker("test-token", self.store)
+        broker.handle({
+            "op": "attach", "source_kind": "claude_session",
+            "source": {"session_id": "wrong-session", "cwd": "/tmp/wrong"},
+            "owner_user_id": "U12345678", "team_id": "T12345678",
+            "channel_id": "C12345678", "thread_ts": "123.456",
+            "idempotency_key": "wrong-binding",
+        })
+        result = broker.handle({
+            "op": "rebind", "source_kind": "zellij_pane",
+            "source": {
+                "session_name": "work", "pane_id": "7", "cwd": "/tmp/right",
+                "pane_agent": "codex", "pane_command_hash": "expected",
+            },
+            "team_id": "T12345678", "channel_id": "C12345678",
+            "thread_ts": "123.456",
+        })
+        self.assertEqual(result["pane_id"], "7")
+        bridge = self.store.find("T12345678", "C12345678", "123.456")
+        self.assertEqual(bridge.source_kind, "zellij_pane")
+        self.assertEqual(bridge.source["pane_id"], "7")
+
+    def test_rebind_refuses_non_zellij_or_unknown_thread(self):
+        broker = self.runtime.Broker("test-token", self.store)
+        with self.assertRaisesRegex(ValueError, "active bridge not found"):
+            broker.handle({
+                "op": "rebind", "source_kind": "zellij_pane",
+                "source": {"session_name": "work", "pane_id": "7"},
+                "team_id": "T12345678", "channel_id": "C12345678",
+                "thread_ts": "123.456",
+            })
 
     def test_thread_participation_survives_store_reopen_and_team_lookup(self):
         self.store.mark_participation("T12345678", "C12345678", "123.456")
@@ -580,6 +613,20 @@ class NotifierTest(unittest.TestCase):
         self.assertEqual(kind, "zellij_pane")
         self.assertEqual(source["pane_command_hash"], "abc123")
         capture.assert_called_once_with("work", "7", str(pathlib.Path.cwd()))
+
+    def test_rebind_source_ignores_native_session_ids_and_requires_ambient_pane(self):
+        identity = {
+            "session_name": "work", "pane_id": "7", "cwd": str(pathlib.Path.cwd()),
+            "pane_agent": "codex", "pane_command_hash": "abc123",
+        }
+        with mock.patch.dict(os.environ, {
+            "CODEX_THREAD_ID": "must-not-be-used",
+            "ZELLIJ_SESSION_NAME": "work", "ZELLIJ_PANE_ID": "7",
+        }, clear=True), mock.patch.object(self.notifier, "zellij_pane_identity", return_value=identity):
+            kind, source = self.notifier.ambient_zellij_source()
+        self.assertEqual(kind, "zellij_pane")
+        self.assertEqual(source["pane_id"], "7")
+        self.assertNotIn("session_id", source)
 
     def test_noninteractive_setup_delegates_manifest_to_hermes(self):
         args = types.SimpleNamespace(non_interactive=True, no_restart=False)

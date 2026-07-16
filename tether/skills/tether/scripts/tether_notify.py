@@ -77,6 +77,14 @@ def attached_source(args: argparse.Namespace) -> tuple[str, dict[str, str]]:
     return detected_source(args)
 
 
+def ambient_zellij_source() -> tuple[str, dict[str, str]]:
+    session = os.getenv("ZELLIJ_SESSION_NAME", "")
+    pane = os.getenv("ZELLIJ_PANE_ID", "")
+    if not session or not pane:
+        raise SystemExit("rebind must run inside the intended live Zellij pane")
+    return "zellij_pane", zellij_pane_identity(session, pane, str(Path.cwd()))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Send or answer a resumable Hermes Slack thread")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -103,6 +111,11 @@ def build_parser() -> argparse.ArgumentParser:
     attach.add_argument("--hermes-session-id")
     attach.add_argument("--cwd")
     attach.add_argument("--json", action="store_true")
+    rebind = sub.add_parser("rebind")
+    rebind.add_argument("--channel", required=True)
+    rebind.add_argument("--thread-ts", required=True)
+    rebind.add_argument("--team")
+    rebind.add_argument("--json", action="store_true")
     post = sub.add_parser("post")
     post.add_argument("--channel", required=True)
     post.add_argument("--thread-ts", required=True)
@@ -243,6 +256,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             "owner_user_id": args.owner or "", "channel_id": args.channel,
             "team_id": args.team or "", "thread_ts": args.thread_ts,
             "idempotency_key": args.idempotency_key,
+        })
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False))
+            return 0
+    elif args.command == "rebind":
+        kind, source = ambient_zellij_source()
+        result = broker_call({
+            "op": "rebind", "source_kind": kind, "source": source,
+            "channel_id": args.channel, "team_id": args.team or "",
+            "thread_ts": args.thread_ts,
         })
         if args.json:
             print(json.dumps(result, ensure_ascii=False))

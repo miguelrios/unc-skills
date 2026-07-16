@@ -53,6 +53,16 @@ tether attach \
 
 The local broker refuses to replace another active binding. After attaching, use `tether reply --bridge-id ...` for the native session's result; subsequent human replies resume that captured session. Do not use attach to guess or repair a stale session identity.
 
+## Correct A Zellij Binding
+
+If an existing thread was explicitly bound to the wrong Zellij pane, enter the intended pane and run:
+
+```bash
+tether rebind --channel C12345678 --thread-ts 1234567890.123456 --json
+```
+
+Rebind captures `ZELLIJ_SESSION_NAME`, `ZELLIJ_PANE_ID`, the live allowlisted agent command, and cwd from that pane. It accepts no pane-id argument, so an operator cannot guess a neighboring pane from another shell. Tether atomically replaces only that exact active thread binding and posts nothing.
+
 ## Operate safely
 
 - Keep secrets, raw credentials, private prompts, and sensitive findings out of notification text and source metadata.
