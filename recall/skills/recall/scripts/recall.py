@@ -483,16 +483,24 @@ def iso(value: str | None) -> float | None:
 def clean_text(value) -> str:
     if not isinstance(value, str):
         value = json.dumps(value, ensure_ascii=False, sort_keys=True)
-    if any(
-        "\n" in match.group(0) or "\r" in match.group(0)
-        for match in GENERIC_ASSIGNMENT_RE.finditer(value)
-    ) or PROXIMITY_SECRET_RE.search(value):
-        return "[redacted-secret-line]"
-    value = PRIVATE_KEY_RE.sub("[redacted-private-key-block]", value)
-    return "\n".join("[redacted-secret-line]" if (
-        SECRET_RE.search(line) or GENERIC_ASSIGNMENT_RE.search(line)
-    ) else line
-                     for line in value.splitlines())
+    # Redaction can expose a second structural match. For example, replacing a
+    # secret-bearing line with a marker can make that marker look like the value
+    # of a key on the preceding line. Iterate to a stable representation so the
+    # exported digest is valid under every downstream defense pass.
+    for _ in range(4):
+        if any(
+            "\n" in match.group(0) or "\r" in match.group(0)
+            for match in GENERIC_ASSIGNMENT_RE.finditer(value)
+        ) or PROXIMITY_SECRET_RE.search(value):
+            return "[redacted-secret-line]"
+        redacted = PRIVATE_KEY_RE.sub("[redacted-private-key-block]", value)
+        redacted = "\n".join("[redacted-secret-line]" if (
+            SECRET_RE.search(line) or GENERIC_ASSIGNMENT_RE.search(line)
+        ) else line for line in redacted.splitlines())
+        if redacted == value:
+            return redacted
+        value = redacted
+    return "[redacted-secret-line]"
 
 
 def clipped(value, limit: int) -> str:
