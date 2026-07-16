@@ -135,6 +135,10 @@ class SourceScopedReadContractTest(unittest.TestCase):
 
 
 class HttpBoundaryContractTest(unittest.TestCase):
+    def test_search_rejects_oversized_query_before_database_or_model_io(self) -> None:
+        with self.assertRaisesRegex(ValueError, "too large"):
+            BrainStore("postgresql://unused").search("x" * 8193)
+
     def test_malformed_content_length_is_a_closed_client_error(self) -> None:
         handler = object.__new__(Handler)
         handler.headers = {"Content-Length": "not-an-integer"}
@@ -350,6 +354,12 @@ class EnvelopeContractTest(unittest.TestCase):
         self.assertEqual(retrieval_leg_order(["api-prod-6fcdc84dd4-mmjpj"]), ("entity", "identifier"))
         self.assertEqual(retrieval_leg_order([]), ("phrase", "entity", "partial", "all"))
 
+    def test_sentence_punctuation_is_not_part_of_an_identifier(self) -> None:
+        engine = __import__("recall_server.projectors", fromlist=["legacy_engine"]).legacy_engine()
+        terms = engine.informative_terms("Gather synthesis-marker-01.")
+        self.assertIn("synthesis-marker-01", terms)
+        self.assertNotIn("synthesis-marker-01.", terms)
+
     def test_sparse_phrase_candidates_do_not_suppress_structural_fallback(self) -> None:
         self.assertTrue(should_run_partial(candidate_count=1, result_limit=10))
         self.assertFalse(should_run_partial(candidate_count=29, result_limit=10))
@@ -386,6 +396,13 @@ class EnvelopeContractTest(unittest.TestCase):
         self.assertGreater(tuple(identifier["rank_key"]), tuple(phrase_command["rank_key"]))
         self.assertGreater(tuple(phrase_command["rank_key"]), tuple(phrase_echo["rank_key"]))
         self.assertGreater(tuple(phrase_echo["rank_key"]), tuple(error_entity["rank_key"]))
+        semantic = evidence_rank_components(
+            legs={"semantic", "rewrite"}, surface="assistant", lexical_rank=0.5,
+            matched_count=0, informative_count=6, has_identifier=False,
+            recency_factor=0.5, fusion_score=2 / 61,
+        )
+        self.assertEqual(semantic["evidence_class"], "semantic")
+        self.assertGreater(semantic["fusion_score"], 0)
 
 
 if __name__ == "__main__":

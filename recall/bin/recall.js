@@ -69,12 +69,18 @@ function doctor(args) {
   process.exit(ok ? 0 : 1);
 }
 
-const args = parseArgs(process.argv.slice(2));
-if (args._[0] === "install") install(args);
-else if (args._[0] === "doctor") doctor(args);
-else {
-  log("usage: npx @parcha/recall <install|doctor> [--project] [--target DIR]");
-  log("  install            copy the skill to ~/.claude/skills (or ./.claude/skills with --project)");
-  log("  doctor             check python, sqlite FTS5, and the installed engine");
-  process.exit(args._[0] ? 1 : 0);
+function main(argv = process.argv.slice(2)) {
+  const args = parseArgs(argv);
+  if (args._[0] === "install") install(args);
+  else if (args._[0] === "doctor") doctor(args);
+  else {
+    log("usage: npx @parcha/recall <install|doctor> [--project] [--target DIR]");
+    log("  install            copy the skill to ~/.claude/skills (or ./.claude/skills with --project)");
+    log("  doctor             check python, sqlite FTS5, and the installed engine");
+    process.exit(args._[0] ? 1 : 0);
+  }
 }
+
+if (require.main === module) main();
+
+module.exports = { engineAt, main, parseArgs, target };
