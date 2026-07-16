@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -51,6 +53,29 @@ class FakeSemanticRuntime:
     def embed_queries(self, queries: list[str]) -> list[list[float]]:
         self.query_calls += 1
         return [self.vector(query) for query in queries]
+
+
+class CoordinatedSemanticRuntime(FakeSemanticRuntime):
+    def __init__(self, barrier: threading.Barrier) -> None:
+        super().__init__()
+        self.barrier = barrier
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        self.barrier.wait(timeout=3)
+        return super().embed_documents(texts)
+
+
+class BlockingSemanticRuntime(FakeSemanticRuntime):
+    def __init__(self, started: threading.Event, release: threading.Event) -> None:
+        super().__init__()
+        self.started = started
+        self.release = release
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        self.started.set()
+        if not self.release.wait(timeout=3):
+            raise TimeoutError("test backfill was not released")
+        return super().embed_documents(texts)
 
 
 def envelope(source: str, native: str, text: str, parent: str) -> dict:
@@ -149,12 +174,77 @@ def main() -> None:
     assert any(
         leg["leg"] == "semantic-0" for leg in abstained["diagnostics"]["legs"]
     )
+    store.ingest("parallel-c", [
+        envelope("source-c", "parallel-c", "Parallel source C.", "session-c"),
+    ])
+    store.ingest("parallel-d", [
+        envelope("source-d", "parallel-d", "Parallel source D.", "session-d"),
+    ])
+    barrier = threading.Barrier(2)
+    parallel_stores = [
+        BrainStore(
+            os.environ["RECALL_DATABASE_URL"],
+            semantic_runtime=CoordinatedSemanticRuntime(barrier),
+        )
+        for _ in range(2)
+    ]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(
+                parallel_stores[index].embed_pending,
+                batch_size=1,
+                max_batches=1,
+                source_id=source_id,
+                surface="message",
+            )
+            for index, source_id in enumerate(("source-c", "source-d"))
+        ]
+        parallel_results = [future.result() for future in futures]
+    assert [result["processed"] for result in parallel_results] == [1, 1]
+    store.ingest("serialized-e", [
+        envelope("source-e", "serialized-e", "Serialized source E.", "session-e"),
+    ])
+    started = threading.Event()
+    release = threading.Event()
+    blocking_store = BrainStore(
+        os.environ["RECALL_DATABASE_URL"],
+        semantic_runtime=BlockingSemanticRuntime(started, release),
+    )
+    competing_store = BrainStore(
+        os.environ["RECALL_DATABASE_URL"], semantic_runtime=FakeSemanticRuntime(),
+    )
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        active = executor.submit(
+            blocking_store.embed_pending,
+            batch_size=1,
+            max_batches=1,
+            source_id="source-e",
+            surface="message",
+        )
+        assert started.wait(timeout=3)
+        same_source = competing_store.embed_pending(
+            batch_size=1,
+            max_batches=1,
+            source_id="source-e",
+            surface="message",
+        )
+        unscoped = competing_store.embed_pending(batch_size=1, max_batches=1)
+        release.set()
+        active_result = active.result()
+    assert active_result["processed"] == 1
+    assert same_source == {"status": "busy", "processed": 0, "batches": 0}
+    assert unscoped == {"status": "busy", "processed": 0, "batches": 0}
     print(json.dumps({
         "status": "pass", "semantic_hit": 1, "unauthorized_hits": 0,
         "first_backfill": first["processed"] + remaining["processed"],
         "idempotent_replay": second["processed"], "source_scoped_replay": 0,
         "stale_vectors_searched": 0, "stale_vectors_repaired": repaired["processed"],
         "sensitive_queries_sent_to_planner": 0,
+        "parallel_source_backfills": sum(
+            result["processed"] for result in parallel_results
+        ),
+        "same_source_competing_backfills": same_source["processed"],
+        "unscoped_competing_backfills": unscoped["processed"],
     }, sort_keys=True))
 
 
