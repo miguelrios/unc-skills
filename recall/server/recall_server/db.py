@@ -678,6 +678,39 @@ class BrainStore:
         rows = self._execute_bounded(conn, sql, values, deadline_at).fetchall()
         return [{**dict(row), "leg": leg, "tier": tier} for row in rows]
 
+    def _exact_question_leg(self, conn, query: str, filters: dict, *,
+                            authorized_source: str | None = None, limit: int = 20,
+                            routed_source_ids: list[str] | None = None,
+                            deadline_at: float | None = None) -> list[dict]:
+        """Find a repeated user question without ranking a broad lexical result set."""
+        where, params = self._read_filters(filters, authorized_source, routed_source_ids)
+        rows = self._execute_bounded(
+            conn,
+            f"""
+            SELECT i.id,i.source_id,i.session_native_id,i.event_native_id,i.occurred_at,i.surface,
+                   i.text_redacted,i.receipt,i.projector_version,s.started_at,s.ended_at,s.metadata,
+                   se.envelope #>> '{{provenance,original_path}}' AS path,se.observed_at,
+                   coalesce(sp.family,'unclassified') AS source_family,
+                   coalesce(sp.quality,'unrated') AS source_quality,
+                   coalesce(sp.freshness_half_life_days,180) AS freshness_half_life_days,
+                   (sp.source_id IS NOT NULL) AS source_profiled,
+                   1.0::real AS lexical_rank
+            FROM items i
+            JOIN sessions s ON s.source_id=i.source_id AND s.native_id=i.session_native_id
+            JOIN source_events se ON se.id=i.event_id
+            LEFT JOIN source_profiles sp ON sp.source_id=i.source_id
+            WHERE i.role='user'
+              AND i.text_redacted=%s
+              AND to_tsvector('simple',i.text_redacted) @@ plainto_tsquery('simple',%s)
+              AND {where}
+            ORDER BY i.occurred_at DESC NULLS LAST,i.id DESC
+            LIMIT %s
+            """,
+            [query, query, *params, limit],
+            deadline_at,
+        ).fetchall()
+        return [{**dict(row), "leg": "exact-question", "tier": 3} for row in rows]
+
     @staticmethod
     def _execute_bounded(conn, sql: str, values: list[Any] | tuple[Any, ...], deadline_at: float | None):
         if deadline_at is None:
@@ -981,8 +1014,12 @@ class BrainStore:
                             break
                 else:
                     phrase_spec = phrase_query_spec(preferred_phrase_probes(engine.phrase_queries(query)))
-                    # Dense retrieval is the primary natural-language leg. Run it
-                    # before broad phrase scans and optional planner rewrites.
+                    merge(run_leg("exact-question", lambda: self._exact_question_leg(
+                        conn, query, filters, authorized_source=authorized_source,
+                        routed_source_ids=routed_source_ids, deadline_at=deadline_at,
+                    )))
+                    # Dense retrieval is the primary non-exact natural-language
+                    # leg. Run it before broad phrase scans and optional rewrites.
                     # Those rescues run lazily only when dense evidence cannot
                     # fill the requested session anchors.
                     for vector_index, semantic_vector in enumerate(semantic_vectors):

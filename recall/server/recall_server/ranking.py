@@ -7,7 +7,10 @@ DEFAULT_SEARCH_DEADLINE_MS = 300
 
 def retrieval_leg_order(identifiers: list[str]) -> tuple[str, ...]:
     """Exact identifiers get the deadline before any potentially broad phrase."""
-    return ("entity", "identifier") if identifiers else ("semantic", "phrase", "entity", "partial", "all")
+    return (
+        ("entity", "identifier") if identifiers
+        else ("exact-question", "semantic", "phrase", "entity", "partial", "all")
+    )
 
 
 def should_run_partial(*, candidate_count: int, result_limit: int) -> bool:
@@ -26,7 +29,7 @@ def evidence_rank_components(*, legs: set[str], surface: str, lexical_rank: floa
         evidence_class, class_priority = "identifier", 4
     elif "answer" in legs:
         evidence_class, class_priority = "answer", 3
-    elif "phrase" in legs:
+    elif legs & {"exact-question", "phrase"}:
         evidence_class, class_priority = "phrase", 3
     elif "entity" in legs:
         evidence_class, class_priority = "error-entity", 2

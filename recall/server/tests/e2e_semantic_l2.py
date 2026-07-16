@@ -214,6 +214,32 @@ def main() -> None:
         authorized_source="source-h",
     )
     assert bounded_answer["results"][0]["native_id"] == "progress", bounded_answer
+    exact_question = "What exact orchard premise decision did we make?"
+    store.ingest("exact-question-i", [
+        envelope(
+            "source-i", "exact-question", exact_question, "session-exact",
+            occurred_at="2026-07-15T23:00:00Z",
+        ),
+        envelope(
+            "source-i", "exact-answer", "The exact answer is the blue bridge.",
+            "session-exact", role="assistant", occurred_at="2026-07-15T23:01:00Z",
+        ),
+        *[
+            envelope(
+                "source-i", f"decoy-{index}",
+                f"Unrelated orchard premise review {index}.", f"session-decoy-{index}",
+                occurred_at=f"2026-07-16T01:{index:02d}:00Z",
+            )
+            for index in range(25)
+        ],
+    ])
+    assert store.embed_pending(batch_size=50, source_id="source-i")["processed"] == 27
+    exact = store.search(exact_question, {}, 5, authorized_source="source-i")
+    assert exact["results"][0]["native_id"] == "exact-answer", exact
+    assert "answer" in exact["results"][0]["legs"]
+    assert any(
+        leg["leg"] == "exact-question" for leg in exact["diagnostics"]["legs"]
+    )
     store.ingest("parallel-c", [
         envelope("source-c", "parallel-c", "Parallel source C.", "session-c"),
     ])
