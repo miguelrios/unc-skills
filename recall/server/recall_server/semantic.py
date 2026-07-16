@@ -106,6 +106,10 @@ class SemanticRuntime:
         self.cache_size = max(0, cache_size)
         self.cache_ttl_seconds = max(0.0, cache_ttl_seconds)
         self._cache_lock = threading.RLock()
+        # The pinned CPU sidecar deliberately accepts one request at a time.
+        # Queue callers here so the threaded HTTP server does not turn ordinary
+        # query concurrency into immediate sidecar 429s and lexical fallbacks.
+        self._embedding_lock = threading.Lock()
         self._plan_cache: OrderedDict[str, tuple[float, SearchPlan]] = OrderedDict()
         self._query_embedding_cache: OrderedDict[str, tuple[float, tuple[float, ...]]] = OrderedDict()
         self._embedding_identity_checked = False
@@ -218,18 +222,19 @@ class SemanticRuntime:
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        self._ensure_embedding_identity()
-        result = []
-        for start in range(0, len(texts), self.embedding_batch_size):
-            batch = [self._document_text(value) for value in texts[
-                start:start + self.embedding_batch_size
-            ]]
-            values = self._post(
-                self.embedding_url + "/embed",
-                {"inputs": batch, "truncate": True, "dimensions": self.dimensions},
-            )
-            result.extend(self._validate_vectors(values, len(batch)))
-        return result
+        with self._embedding_lock:
+            self._ensure_embedding_identity()
+            result = []
+            for start in range(0, len(texts), self.embedding_batch_size):
+                batch = [self._document_text(value) for value in texts[
+                    start:start + self.embedding_batch_size
+                ]]
+                values = self._post(
+                    self.embedding_url + "/embed",
+                    {"inputs": batch, "truncate": True, "dimensions": self.dimensions},
+                )
+                result.extend(self._validate_vectors(values, len(batch)))
+            return result
 
     @staticmethod
     def _document_text(value: str) -> str:
