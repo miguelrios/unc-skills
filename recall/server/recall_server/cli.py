@@ -21,6 +21,9 @@ def main() -> None:
     backfill_entities = sub.add_parser("backfill-entities")
     backfill_entities.add_argument("--batch-size", type=int, default=5000)
     backfill_entities.add_argument("--max-batches", type=int)
+    backfill_redaction = sub.add_parser("backfill-redaction")
+    backfill_redaction.add_argument("--batch-size", type=int, default=5000)
+    backfill_redaction.add_argument("--max-batches", type=int)
     sub.add_parser("export")
     create_token = sub.add_parser("token-create"); create_token.add_argument("name"); create_token.add_argument("--source"); create_token.add_argument("--scopes", default="read,write"); create_token.add_argument("--output", required=True, help="write the one-time plaintext credential to a new mode-0600 file")
     revoke_token = sub.add_parser("token-revoke"); revoke_token.add_argument("name")
@@ -41,6 +44,8 @@ def main() -> None:
         print(json.dumps(store.rebuild(), sort_keys=True))
     elif args.command == "backfill-entities":
         print(json.dumps(store.backfill_entities(args.batch_size, args.max_batches), sort_keys=True))
+    elif args.command == "backfill-redaction":
+        print(json.dumps(store.backfill_redaction(args.batch_size, args.max_batches), sort_keys=True))
     elif args.command == "export":
         for envelope in store.export_raw(): print(json.dumps(envelope, sort_keys=True))
     elif args.command == "token-create":
