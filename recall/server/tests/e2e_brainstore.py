@@ -514,7 +514,7 @@ def main() -> None:
             partial_redaction = store.backfill_redaction(batch_size=3, max_batches=1)
             assert partial_redaction["items_scanned"] == 3
             assert not partial_redaction["completed"]
-            final_redaction = store.backfill_redaction(batch_size=3)
+            final_redaction = store.backfill_redaction(batch_size=3, workers=2)
             assert final_redaction["completed"]
             assert store.backfill_redaction(batch_size=3)["items_scanned"] == 0
             assert partial_redaction["items_rewritten"] + final_redaction["items_rewritten"] == 1

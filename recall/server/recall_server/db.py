@@ -7,6 +7,7 @@ import re
 import secrets
 import time
 import uuid
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -1122,14 +1123,28 @@ class BrainStore:
             "completed": state["completed_at"] is not None,
         }
 
-    def backfill_redaction(self, batch_size: int = 5000, max_batches: int | None = None) -> dict:
+    def backfill_redaction(
+        self,
+        batch_size: int = 5000,
+        max_batches: int | None = None,
+        workers: int = 1,
+    ) -> dict:
         """Converge derived text on the current privacy projector without rewriting evidence."""
         if not 1 <= batch_size <= 20000:
             raise ValueError("batch size must be between 1 and 20000")
         if max_batches is not None and max_batches < 1:
             raise ValueError("max batches must be positive")
+        if not 1 <= workers <= 32:
+            raise ValueError("workers must be between 1 and 32")
         engine = legacy_engine()
         batches = scanned = rewritten = rewritten_chunks = rebuilt_entity_items = 0
+        executor = ProcessPoolExecutor(max_workers=workers) if workers > 1 else None
+
+        def redact_batch(values: list[str]) -> list[str]:
+            if executor is None:
+                return [redact_text(value) for value in values]
+            return list(executor.map(redact_text, values, chunksize=64))
+
         with self.connect() as conn:
             conn.autocommit = True
             conn.execute("SELECT pg_advisory_lock(hashtextextended('recall:redaction-backfill-v3',0))")
@@ -1179,10 +1194,11 @@ class BrainStore:
 
                         row_ids = [row["id"] for row in rows]
                         rows_by_id = {row["id"]: row for row in rows}
-                        safe_items = {
-                            row["id"]: redact_text(row["text_redacted"])
-                            for row in rows
-                        }
+                        safe_items = dict(zip(
+                            row_ids,
+                            redact_batch([row["text_redacted"] for row in rows]),
+                            strict=True,
+                        ))
                         changed_items = {
                             row_id for row_id, safe in safe_items.items()
                             if safe != rows_by_id[row_id]["text_redacted"]
@@ -1192,10 +1208,11 @@ class BrainStore:
                                WHERE item_id=ANY(%s)""",
                             (row_ids,),
                         ).fetchall()
-                        safe_chunks = {
-                            chunk["id"]: redact_text(chunk["text_redacted"])
-                            for chunk in chunks
-                        }
+                        safe_chunks = dict(zip(
+                            [chunk["id"] for chunk in chunks],
+                            redact_batch([chunk["text_redacted"] for chunk in chunks]),
+                            strict=True,
+                        ))
                         changed_chunks = [
                             chunk for chunk in chunks
                             if safe_chunks[chunk["id"]] != chunk["text_redacted"]
@@ -1204,9 +1221,13 @@ class BrainStore:
                             "SELECT item_id,value FROM entities WHERE item_id=ANY(%s)",
                             (row_ids,),
                         ).fetchall()
+                        safe_entity_values = redact_batch([
+                            entity["value"] for entity in entity_rows
+                        ])
                         unsafe_entity_items = {
-                            entity["item_id"] for entity in entity_rows
-                            if redact_text(entity["value"]) != entity["value"]
+                            entity["item_id"]
+                            for entity, safe in zip(entity_rows, safe_entity_values, strict=True)
+                            if safe != entity["value"]
                         }
                         repair_entity_items = (
                             changed_items
@@ -1276,6 +1297,8 @@ class BrainStore:
                 conn.execute(
                     "SELECT pg_advisory_unlock(hashtextextended('recall:redaction-backfill-v3',0))"
                 )
+                if executor is not None:
+                    executor.shutdown()
         return {
             "batches": batches,
             "items_scanned": scanned,

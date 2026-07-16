@@ -73,6 +73,10 @@ source events or receipts:
 RECALL_DATABASE_URL=... python -m recall_server.cli backfill-redaction --batch-size 5000
 ```
 
+The default is single-process. On a dedicated multi-core maintenance host, `--workers N` (maximum
+32) parallelizes only the pure redaction computation; database reads, writes, watermarks, and the
+advisory lock remain single-owner and ordered.
+
 Linux history collectors use `recall-collector@.service` with separate `claude` and `codex`
 environment/token files. Issue one source-scoped credential per unit, install the two example
 environment files with mode 0600 after replacing every value, then enable the instances:
