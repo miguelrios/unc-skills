@@ -31,6 +31,7 @@ HERMES_HOME = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")).expan
 DATA_HOME = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")).expanduser()
 CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")).expanduser()
 RUNTIME_HOME = DATA_HOME / "tether"
+INBOX_HOME = RUNTIME_HOME / "inbox"
 CONFIG_PATH = Path(os.environ.get("TETHER_CONFIG", CONFIG_HOME / "tether" / "config.toml")).expanduser()
 DB_PATH = HERMES_HOME / "bridges.db"
 SOCKET_PATH = HERMES_HOME / "bridge.sock"
@@ -54,6 +55,7 @@ MAX_TEXT = 35_000
 MAX_NATIVE_OUTPUT = 35_000
 MAX_SOURCE_VALUE = 4_096
 MAX_IDEMPOTENCY_KEY = 256
+MAX_VISIBLE_PANE_INPUT = 800
 SOURCE_FIELDS = {
     "zellij_pane": frozenset({
         "session_name", "pane_id", "zellij_session", "zellij_pane_id", "cwd",
@@ -1137,6 +1139,26 @@ def deliver_zellij(bridge: Bridge, text: str) -> None:
         f"[Hermes Slack reply; {marker}] " + text + "\n\nAfter handling this, reply in the same Slack thread with: "
         f"python3 {notifier} reply --bridge-id {bridge.bridge_id} --text '<your response>'"
     )
+    if "\n" in text or len(instruction) > MAX_VISIBLE_PANE_INPUT:
+        INBOX_HOME.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(INBOX_HOME, 0o700)
+        payload = INBOX_HOME / f"{marker}.txt"
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(payload, flags, 0o600)
+        try:
+            with os.fdopen(fd, "w") as stream:
+                stream.write(instruction)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except BaseException:
+            payload.unlink(missing_ok=True)
+            raise
+        instruction = (
+            f"[Hermes Slack reply; {marker}] Read and follow the complete request in {payload}. "
+            "Delete that file after reading it, then reply to the same Slack thread as instructed there."
+        )
     target = pane if pane.startswith(("terminal_", "plugin_")) else "terminal_" + pane
     zellij = _resolve_executable("zellij")
     # Absolute executable; session and pane are argv, never shell text.

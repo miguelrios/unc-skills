@@ -546,6 +546,46 @@ class CredentialBoundaryTest(unittest.TestCase):
         self.assertEqual(sum("dump-screen" in command for command in commands), 2)
         self.assertGreaterEqual(identity.call_count, 2)
 
+    def test_multiline_zellij_delivery_uses_private_file_and_visible_carrier(self):
+        bridge = self.runtime.Bridge(
+            "brg_test", "claude_session",
+            {
+                "session_id": "session-1", "zellij_session": "work",
+                "zellij_pane_id": "7", "cwd": "/tmp/project",
+                "pane_agent": "claude", "pane_command_hash": "expected",
+            },
+            "*", "T12345678", "C12345678", "123.456", "key", "active",
+        )
+        text = "investigate this bug\nfirst reproduction step\nsecond reproduction step"
+        marker = "tether-" + self.runtime.hashlib.sha256(
+            f"{bridge.bridge_id}\0{text}".encode()
+        ).hexdigest()[:12]
+
+        def run(command, **_kwargs):
+            if "dump-screen" in command:
+                return types.SimpleNamespace(stdout=f"prompt contains {marker}", stderr="", returncode=0)
+            return types.SimpleNamespace(stdout="", stderr="", returncode=0)
+
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            self.runtime, "INBOX_HOME", pathlib.Path(temporary) / "inbox"
+        ), mock.patch.object(
+            self.runtime, "zellij_pane_identity", return_value={"pane_command_hash": "expected"}
+        ), mock.patch.object(
+            self.runtime.subprocess, "run", side_effect=run
+        ) as invoked, mock.patch.object(self.runtime.time, "sleep"), mock.patch.object(
+            self.runtime, "_resolve_executable", return_value="/usr/bin/zellij"
+        ):
+            self.runtime.deliver_zellij(bridge, text)
+            payload = self.runtime.INBOX_HOME / f"{marker}.txt"
+            self.assertEqual(payload.stat().st_mode & 0o777, 0o600)
+            self.assertIn(text, payload.read_text())
+
+        write = next(call.args[0] for call in invoked.call_args_list if "write-chars" in call.args[0])
+        carrier = write[-1]
+        self.assertIn(marker, carrier)
+        self.assertIn("Read and follow the complete request", carrier)
+        self.assertNotIn("first reproduction step", carrier)
+
 
 class NotifierTest(unittest.TestCase):
     def setUp(self):
