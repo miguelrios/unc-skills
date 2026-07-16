@@ -1,7 +1,7 @@
 # Recall Universal Ingestion — Five-Loop Cascade
 
-**Status:** proposed for review
-**Mode:** PLAN; BUILD begins only after owner approval
+**Status:** approved for autonomous execution
+**Mode:** BUILD
 **Pacing:** autonomous between declared human gates
 **RDD:** `docs/rdd/RECALL_UNIVERSAL_INGESTION_2026-07-16.md`
 
@@ -29,9 +29,9 @@ uses red -> green -> refactor; every loop uses the full Cascade ribbon and has a
   unsupported deletion claim, arbitrary connector loading, and public exposure.
 - Every model or judge call uses the approved staging LiteLLM router with a short-lived scoped virtual
   key. Direct provider calls and master-key use are prohibited.
-- Each exit writes `docs/evidence/recall-universal-ingestion/<loop>/EXIT.md`, maps every acceptance
-  criterion to reproducible safe evidence at merged HEAD, carries the cumulative L0 -> Ln delta table,
-  runs recap against the objective, and records the ZEN check.
+- Each exit writes a mode-0600 private criterion map outside the repository, tied to merged HEAD, and
+  publishes only content-free aggregate checks through CI or the PR. No Cascade diary or live evidence
+  is committed. Each exit runs recap against the objective and records the ZEN result privately.
 - Human gates wait without timing out. Hitting any other bound produces `status: AT_BOUND` and stops;
   it never weakens an exit.
 
@@ -39,7 +39,7 @@ uses red -> green -> refactor; every loop uses the full Cascade ribbon and has a
 
 ```mermaid
 flowchart LR
-    L0[L0 Choose the rail and pin the substrate]
+    L0[L0 Pin the substrate and closed Google rail]
     L1[L1 Google Workspace life plane]
     L2[L2 Private communications and Mac utility]
     L3[L3 Social and work expansion]
@@ -49,38 +49,36 @@ flowchart LR
 
 | Task | `blockedBy` | Human gate |
 |---|---|---|
-| L0 | — | approve this RDD/chain; approve only the Google scopes selected by the bakeoff |
+| L0 | — | approve only the declared Google read-only scopes |
 | L1 | L0 | complete Google OAuth consent |
-| L2 | L1 | grant macOS permissions; choose WhatsApp export, experimental linked device, or disabled |
+| L2 | L1 | grant macOS permissions; WhatsApp is export-only in this chain |
 | L3 | L2 | approve X streams/retention/cost and each additional external account scope |
 | L4 | L3 | accept release or approve the successor chain |
 
-## L0 — Choose the rail and pin the substrate
+## L0 — Pin the substrate and closed Google rail
 
-- **goal:** Produce a closed, benchmarked ingestion substrate and select the smallest safe Google
-  Workspace acquisition rail before connecting personal data.
+- **goal:** Produce a closed, benchmarked ingestion substrate around pinned Google Workspace CLI
+  `gws` v0.22.5 before connecting personal data.
 - **prompt:** Read the RDD and current Recall connector/runtime code; freeze the unchanged retrieval,
   privacy, deletion, replay, and packaging baselines; red-test connector-v2 typed records, exact
   authority slots, ACK-gated checkpoints, revisions, tombstones, static registry preview, and rejection
-  of arbitrary factories; build a synthetic bakeoff of pinned OpenClaw `gog`, Google Workspace `gws`,
-  and direct official clients against Gmail history, Calendar sync, Contacts sync, Drive changes,
-  non-interactive JSON stability, empty-success failure, revoke, read-only enforcement, untrusted
-  content, crash replay, OS packaging, upgrade pinning, and credential isolation; select one rail per
-  source in an ADR, then implement only the closed rail boundary and shared contract in serial
-  one-concern PRs. Prefer `gog` where its exact command ceilings and delivery semantics pass; use `gws`
-  or a direct client only for a measured missing capability.
-- **accept:** The pre-change scorecard reproduces twice; the bakeoff contains non-null results for every
-  candidate/capability cell and the ADR maps every selected rail to evidence; all legacy connectors and
-  selected rails pass the v2 conformance suite; duplicate pages and every injected crash converge to
+  of arbitrary factories; pin `gws` v0.22.5 at tag commit `705fb0ec` with per-platform release
+  checksums; expose only Gmail message/history reads, Calendar event reads, People connections reads,
+  Drive change/file reads, and Docs exports through exact argv/method and response-schema allowlists;
+  test non-interactive JSON stability, empty-success failure, revoke, read-only enforcement, untrusted
+  content, crash replay, OS packaging, upgrade pinning, and credential isolation; then implement the
+  closed rail boundary and shared contract in serial one-concern PRs.
+- **accept:** The pre-change scorecard reproduces twice; all legacy connectors and the pinned `gws`
+  rail pass the v2 conformance suite; duplicate pages and every injected crash converge to
   one acknowledged version; cursor-before-ACK, executable config, shell invocation, unknown command,
   write method, ambient environment, empty success, schema drift, and secret-bearing error tests fail
   closed; encrypted storage, backup/restore, filesystem mode, source-writer, and Tailnet-only
   attestations are green; repository tests and the public-safety scan pass at merged HEAD.
 - **bound:** At most three serial PRs, two failed PROVE runs and three review rounds per PR, and ten
-  working days total; unresolved rail ambiguity or a failed storage/safety control exits AT_BOUND
+  working days total; checksum ambiguity or a failed storage/safety control exits AT_BOUND
   instead of authorizing Google data.
-- **exit →:** Write `docs/evidence/recall-universal-ingestion/L0/EXIT.md`, recap and pass ZEN, pause for
-  owner approval of the evidence-selected Google scopes, then trigger L1.
+- **exit →:** Write the private criterion map, recap and pass ZEN, pause for owner approval of the
+  declared Google scopes, then trigger L1.
 
 ## L1 — Google Workspace life plane
 
@@ -106,7 +104,7 @@ flowchart LR
 - **bound:** At most five source PRs, two failed PROVE runs and three review rounds per PR, and fourteen
   working days total; one failing source may be explicitly disabled only by owner decision, otherwise
   the loop exits AT_BOUND without calling the Google plane complete.
-- **exit →:** Write `docs/evidence/recall-universal-ingestion/L1/EXIT.md`, recap and pass ZEN, then
+- **exit →:** Write the private criterion map, recap and pass ZEN, then
   trigger L2; any loss, duplicate, receipt, revoke, scope, or privacy failure blocks private-message
   expansion.
 
@@ -117,9 +115,8 @@ flowchart LR
 - **prompt:** Red-test a signed Recall Bridge clean install, upgrade, rollback, launch-on-login,
   sleep/wake, network partition, bounded spool, per-source pause/revoke/forget, Keychain references,
   content-free status, and uninstall; add the iMessage source as a pinned read-only snapshot/WAL reader
-  with schema fixtures, edits, reactions, authoritative deletes, and attachment descriptors; at an
-  unbounded human gate choose WhatsApp export, experimental linked-device, or disabled, document the
-  risk decision without identity/content, and implement only the chosen read-only mode; route existing
+  with schema fixtures, edits, reactions, authoritative deletes, and attachment descriptors; add only
+  a watched WhatsApp export inbox with stable archive/chat/message identities; route existing
   ChatGPT/Cowork consented exports and coding collectors through the same lifecycle UI without changing
   their evidence semantics; run a private clean-Mac E2E and frozen source questions, using one concern
   per serial PR.
@@ -127,14 +124,14 @@ flowchart LR
   uninstall E2Es pass; the utility never opens iMessage writable, changes SIP, exposes a send surface,
   or displays content in diagnostics; repeated sync/import and every crash point yield zero duplicate
   versions for every enabled source; edits/deletes match frozen fixtures without claims based on list
-  absence; lost permissions and revoke fail closed; the WhatsApp decision is explicit and the disabled
-  choice counts only as an owner-approved omission; at least 80% of private frozen questions per
+  absence; lost permissions and revoke fail closed; WhatsApp never opens a linked-device session; at
+  least 80% of private frozen questions per
   enabled source retrieve the expected conversation evidence with valid receipts; signed artifacts
   verify and public proof remains aggregate/content-free.
 - **bound:** At most four serial PRs, two failed PROVE runs and three review rounds per PR, and fourteen
-  working days total; two failed clean-device E2Es or unresolved WhatsApp/account risk exits AT_BOUND
-  or leaves WhatsApp explicitly disabled rather than adding unsafe fallbacks.
-- **exit →:** Write `docs/evidence/recall-universal-ingestion/L2/EXIT.md`, recap and pass ZEN, pause for
+  working days total; two failed clean-device E2Es or unresolved WhatsApp export risk exits AT_BOUND
+  rather than adding unsafe fallbacks.
+- **exit →:** Write the private criterion map, recap and pass ZEN, pause for
   X and external-account scope decisions, then trigger L3.
 
 ## L3 — Social and work expansion
@@ -160,7 +157,7 @@ flowchart LR
 - **bound:** No more than six serial source PRs, two failed PROVE runs and three review rounds per PR,
   and fifteen working days total; a failing or policy-blocked source is disabled and named in an
   AT_BOUND/replan verdict rather than weakening the factory or expanding credentials.
-- **exit →:** Write `docs/evidence/recall-universal-ingestion/L3/EXIT.md`, recap and pass ZEN, freeze the
+- **exit →:** Write the private criterion map, recap and pass ZEN, freeze the
   final cross-source eval set before inspecting results, then trigger L4.
 
 ## L4 — Cross-source retrieval, operations acceptance, and replan
@@ -189,7 +186,7 @@ flowchart LR
 - **bound:** At most three ranking PRs, two failed PROVE runs and three review rounds per PR, one
   seven-day soak plus one remediation restart, and two successor drafts; owner sign-off waits unbounded
   by design, while a second soak failure exits AT_BOUND and stops release.
-- **exit →:** Write `docs/evidence/recall-universal-ingestion/L4/EXIT.md`, recap and pass ZEN, verify the
+- **exit →:** Write the private criterion map, recap and pass ZEN, verify the
   deployed release commit and content-free verdict at HEAD, then stop at the final human gate; release
   only on explicit owner acceptance, otherwise start the approved remediation/successor chain.
 
@@ -197,5 +194,5 @@ flowchart LR
 
 Approving this document authorizes only these five bounded outcomes and their serial one-concern PRs.
 It does not authorize broad OAuth presets, write/send tools, public Brain ingress, attachment content,
-experimental WhatsApp, durable home-timeline retention, or additional accounts without their named
-human gates.
+WhatsApp linked-device access, durable home-timeline retention, or additional accounts without their
+named human gates.

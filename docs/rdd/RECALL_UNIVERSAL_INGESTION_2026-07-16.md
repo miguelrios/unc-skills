@@ -1,6 +1,6 @@
 # Recall Universal Ingestion — RDD
 
-**Status:** proposed for review
+**Status:** approved for autonomous execution
 **Date:** 2026-07-16
 **Decision owner:** Recall owner
 **Execution plan:** `docs/LOOP_CHAIN_RECALL_UNIVERSAL_INGESTION_2026-07-16.md`
@@ -273,16 +273,14 @@ pinned CLI or direct API client
   -> canonical Recall record + checkpoint
 ```
 
-The first BUILD loop runs a pinned bakeoff rather than selecting by popularity:
+The first BUILD loop pins one transport rather than exposing a choice to runtime agents:
 
-| Candidate | What it gives Recall | Main risk | Intended role |
+| Transport | What it gives Recall | Main risk | Intended role |
 |---|---|---|---|
-| OpenClaw `gog` | task-first Gmail/Calendar/Drive/Docs/Contacts commands; stable JSON; non-interactive and read-only flags; exact command allowlists; untrusted-content wrapping; typed read-only MCP; Gmail history/watch with Pub/Sub pull and delivery-before-cursor-advance | third-party CLI and release cadence; task abstractions may omit raw sync fields for some services | leading production candidate, especially Gmail |
-| Google Workspace `gws` | Discovery-generated access to the full Workspace API surface; JSON/NDJSON; schema introspection; automatic pagination; 100+ agent skills; optional Model Armor response scanning | pre-v1 breaking changes, dynamic command surface, broad scopes and write methods unless Recall closes them | coverage candidate and raw-method escape hatch |
-| direct official APIs | exact control over request fields, cursors, errors, and reconciliation | maximum custom code, auth duplication, and maintenance | only where neither pinned CLI proves the required semantics |
+| Google Workspace `gws` v0.22.5, tag commit `705fb0ec` | Discovery-generated access to Gmail History, Calendar sync tokens, People sync tokens, Drive changes, and Docs exports through JSON/NDJSON | dynamic command surface and write methods unless Recall closes them | sole v1 transport, installed from checksum-pinned official assets and hidden behind exact read-only method/schema allowlists |
 
-The result may be one CLI or a narrow hybrid, but each source has exactly one selected rail in a
-release. Swapping rails must replay the same synthetic conformance fixtures and prove canonical-record
+Every Google source uses this one pinned transport and has exactly one allowed command family in a
+release. Swapping transports must replay the same synthetic conformance fixtures and prove canonical-record
 parity before live use. A rail is transport, not the Brain's data model and not a generic shell tool.
 `gws` Model Armor is a useful comparison point but is not enabled: Recall's model/judge traffic must
 use the approved staging LiteLLM route, so imported-content classification stays behind that boundary.
@@ -573,19 +571,18 @@ an owner-confirmed forget operation. Rollback never requires rewriting another s
 
 Universal ingestion is five outcome-level Cascade loops, not a loop per connector. A loop may contain
 multiple small, serial PRs, but every PR still has one concern and the loop exits only after its
-system-level eval/E2E gate is green. Its `EXIT.md` maps every criterion to safe evidence verified at
-merged HEAD. The final loop runs cross-device, cross-source questions, produces an aggregate verdict,
+system-level eval/E2E gate is green. A mode-0600 private exit manifest maps every criterion to safe
+evidence verified at merged HEAD; no Cascade diary or live evidence enters git. The final loop runs
+cross-device, cross-source questions, produces an aggregate verdict,
 drafts the successor chain from losing cells, and pauses for owner sign-off.
 
 ## 15. Human decisions deliberately deferred to gates
 
-1. Approve this RDD and loop chain before BUILD.
-2. Approve the least-privilege Google services/scopes after the rail bakeoff; CLI selection itself is
-   an evidence decision, not a preference poll.
-3. Choose WhatsApp export-only or explicitly accept linked-device experimental risk.
-4. Choose X rolling home-feed retention or keep durable ingestion limited to owner/saved streams.
-5. Opt into any attachment content, contextual-PII judge, or source-specific durable fact extraction.
-6. Accept the final User #1 quality and privacy verdict before broadening distribution.
+1. Approve the least-privilege Google read-only services/scopes declared by the pinned `gws` rail.
+2. Grant access only to a WhatsApp export inbox; linked-device access is outside this chain.
+3. Choose X rolling home-feed retention or keep durable ingestion limited to owner/saved streams.
+4. Opt into any attachment content, contextual-PII judge, or source-specific durable fact extraction.
+5. Accept the final User #1 quality and privacy verdict before broadening distribution.
 
 ## 16. External design references
 
