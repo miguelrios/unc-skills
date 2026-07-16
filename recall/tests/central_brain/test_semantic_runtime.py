@@ -3,7 +3,10 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -98,6 +101,44 @@ class SemanticRuntimeContractTest(unittest.TestCase):
             self.assertEqual(len(runtime.embed_documents(["a", "b", "c", "d", "e"])), 5)
         self.assertEqual([len(call.args[1]["inputs"]) for call in post.call_args_list], [2, 2, 1])
         self.assertRegex(runtime.fingerprint, r"^[0-9a-f]{64}$")
+
+    def test_concurrent_embedding_calls_queue_through_the_single_local_sidecar(self) -> None:
+        runtime = self.runtime()
+        runtime._embedding_identity_checked = True
+        vector = [0.0] * 512
+        first_entered = threading.Event()
+        release_first = threading.Event()
+        state_lock = threading.Lock()
+        active = 0
+        maximum_active = 0
+
+        def local_post(_url, payload, _headers=None):
+            nonlocal active, maximum_active
+            with state_lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+                first = active == 1 and not first_entered.is_set()
+                if first:
+                    first_entered.set()
+            if first:
+                release_first.wait(timeout=1)
+            time.sleep(0.02)
+            with state_lock:
+                active -= 1
+            return [vector for _value in payload["inputs"]]
+
+        with mock.patch.object(runtime, "_post", side_effect=local_post):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [
+                    executor.submit(runtime.embed_documents, [text])
+                    for text in ("first", "second")
+                ]
+                self.assertTrue(first_entered.wait(timeout=1))
+                time.sleep(0.05)
+                release_first.set()
+                self.assertEqual([future.result(timeout=1) for future in futures], [[vector], [vector]])
+
+        self.assertEqual(maximum_active, 1)
 
     def test_oversized_documents_keep_a_bounded_head_and_tail(self) -> None:
         runtime = self.runtime()
