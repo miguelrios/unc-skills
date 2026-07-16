@@ -81,7 +81,9 @@ def main() -> None:
         envelope("source-a", "target", "Architecture decision: circuit breaker.", "session-a"),
         envelope("source-b", "decoy", "Architecture decision: unrelated queue.", "session-b"),
     ])
-    first = store.embed_pending(batch_size=10)
+    first = store.embed_pending(batch_size=10, source_id="source-a")
+    scoped_replay = store.embed_pending(batch_size=10, source_id="source-a")
+    remaining = store.embed_pending(batch_size=10)
     second = store.embed_pending(batch_size=10)
     with store.connect() as connection:
         connection.execute(
@@ -103,7 +105,9 @@ def main() -> None:
         "find rollout password=syntheticvalue123", {}, 5,
         authorized_source="source-a",
     )
-    assert first["processed"] == 2 and second["processed"] == 0
+    assert first["processed"] == 1 and first["source_scoped"] is True
+    assert scoped_replay["processed"] == 0 and remaining["processed"] == 1
+    assert second["processed"] == 0
     assert stale["results"] == [] and stale_metrics["embedding_lag"] == 1
     assert repaired["processed"] == 1
     assert runtime.plan_calls == planner_calls and runtime.query_calls > 0
@@ -113,7 +117,8 @@ def main() -> None:
     assert store.search("nonexistent orchard premise", {}, 5)["results"] == []
     print(json.dumps({
         "status": "pass", "semantic_hit": 1, "unauthorized_hits": 0,
-        "first_backfill": first["processed"], "idempotent_replay": second["processed"],
+        "first_backfill": first["processed"] + remaining["processed"],
+        "idempotent_replay": second["processed"], "source_scoped_replay": 0,
         "stale_vectors_searched": 0, "stale_vectors_repaired": repaired["processed"],
         "sensitive_queries_sent_to_planner": 0,
     }, sort_keys=True))
