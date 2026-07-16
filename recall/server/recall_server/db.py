@@ -249,11 +249,33 @@ class BrainStore:
             raise ValueError("invalid embedding surface")
         processed = batches = 0
         with self.connect() as conn:
-            locked = conn.execute(
-                "SELECT pg_try_advisory_lock(hashtextextended('recall:item-embeddings',0)) AS value"
-            ).fetchone()["value"]
-            if not locked:
+            global_lock = "recall:item-embeddings"
+            source_scoped = source_id is not None
+            if source_scoped:
+                global_locked = conn.execute(
+                    "SELECT pg_try_advisory_lock_shared(hashtextextended(%s,0)) AS value",
+                    (global_lock,),
+                ).fetchone()["value"]
+            else:
+                global_locked = conn.execute(
+                    "SELECT pg_try_advisory_lock(hashtextextended(%s,0)) AS value",
+                    (global_lock,),
+                ).fetchone()["value"]
+            if not global_locked:
                 return {"status": "busy", "processed": 0, "batches": 0}
+            source_lock = f"{global_lock}:{source_id}" if source_scoped else None
+            source_locked = False
+            if source_lock is not None:
+                source_locked = conn.execute(
+                    "SELECT pg_try_advisory_lock(hashtextextended(%s,0)) AS value",
+                    (source_lock,),
+                ).fetchone()["value"]
+                if not source_locked:
+                    conn.execute(
+                        "SELECT pg_advisory_unlock_shared(hashtextextended(%s,0))",
+                        (global_lock,),
+                    )
+                    return {"status": "busy", "processed": 0, "batches": 0}
             try:
                 while max_batches is None or batches < max_batches:
                     rows = conn.execute(
@@ -316,9 +338,21 @@ class BrainStore:
                     processed += len(rows)
                     batches += 1
             finally:
-                conn.execute(
-                    "SELECT pg_advisory_unlock(hashtextextended('recall:item-embeddings',0))"
-                )
+                if source_lock is not None and source_locked:
+                    conn.execute(
+                        "SELECT pg_advisory_unlock(hashtextextended(%s,0))",
+                        (source_lock,),
+                    )
+                if source_scoped:
+                    conn.execute(
+                        "SELECT pg_advisory_unlock_shared(hashtextextended(%s,0))",
+                        (global_lock,),
+                    )
+                else:
+                    conn.execute(
+                        "SELECT pg_advisory_unlock(hashtextextended(%s,0))",
+                        (global_lock,),
+                    )
         return {
             "status": "complete", "processed": processed, "batches": batches,
             "source_scoped": source_id is not None,
