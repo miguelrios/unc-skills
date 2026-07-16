@@ -11,16 +11,6 @@ from typing import Any
 
 from . import PROJECTOR_VERSION
 
-SECRET_RE = re.compile(
-    r"(?i)[\"']?(?:api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|token|secret|password|bearer|authorization|\bkey)"
-    r"[\"']?\s*[=:]\s*[\"']?(?:Bearer\s+)?\S{12,}|sk-[A-Za-z0-9_-]{20,}|"
-    r"xox[baprs]-[A-Za-z0-9-]{10,}|(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}|"
-    r"AKIA[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{30,}"
-)
-PRIVATE_KEY_RE = re.compile(
-    r"-----BEGIN (?P<label>[A-Z0-9 ]*PRIVATE KEY)-----.*?-----END (?P=label)-----",
-    re.DOTALL,
-)
 SOURCE_ID_RE = re.compile(r"[A-Za-z0-9_.:@-]{3,160}\Z")
 NATIVE_ID_RE = re.compile(r"[A-Za-z0-9_.:@/=-]{1,512}\Z")
 KIND_RE = re.compile(r"[A-Za-z0-9_.:-]{1,64}\Z")
@@ -33,8 +23,10 @@ ENVELOPE_FIELDS = {
 
 
 def redact_text(value: str) -> str:
-    value = PRIVATE_KEY_RE.sub("[REDACTED-PRIVATE-KEY]", value)
-    return "\n".join("[REDACTED]" if SECRET_RE.search(line) else line for line in value.splitlines())
+    safe = legacy_engine().clean_text(value)
+    return safe.replace("[redacted-private-key-block]", "[REDACTED-PRIVATE-KEY]").replace(
+        "[redacted-secret-line]", "[REDACTED]",
+    )
 
 
 @lru_cache(maxsize=1)

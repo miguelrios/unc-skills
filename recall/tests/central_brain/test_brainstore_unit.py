@@ -226,6 +226,20 @@ class EnvelopeContractTest(unittest.TestCase):
         self.assertIn("safe", redacted)
         self.assertIn("end", redacted)
 
+    def test_redaction_is_idempotent_after_nested_secret_markers(self) -> None:
+        secret = "SyntheticSecret" + "9" * 40
+        value = (
+            "safe prefix\n"
+            "access_token:\n"
+            f", Authorization={secret}\n"
+            "safe suffix"
+        )
+
+        once = redact_text(value)
+
+        self.assertNotIn(secret, once)
+        self.assertEqual(redact_text(once), once)
+
     def test_partial_probes_prefer_structural_anchors_and_are_bounded(self) -> None:
         probes = partial_lexical_probes(
             ["foreign-key", "violation", "check_result", "agent_instance_id"],

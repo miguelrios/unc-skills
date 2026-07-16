@@ -270,6 +270,20 @@ class RecallEngineTest(unittest.TestCase):
         self.assertNotIn(proximity, engine.clean_text("_sentry token " + proximity))
         self.assertNotIn(proximity, engine.clean_text("other_access_token " + proximity))
 
+    def test_session_redaction_is_idempotent_after_nested_secret_markers(self):
+        secret = "SyntheticSecret" + "9" * 40
+        value = (
+            "safe prefix\n"
+            "access_token:\n"
+            f", Authorization={secret}\n"
+            "safe suffix"
+        )
+
+        once = engine.clean_text(value)
+
+        self.assertNotIn(secret, once)
+        self.assertEqual(engine.clean_text(once), once)
+
     def test_ambiguous_current_error_uses_content_free_ranked_receipts(self):
         session = self.claude / "candidate-secret-token-value.jsonl"
         session.write_text(json.dumps({"type": "user", "message": {"content": "private"}}) + "\n")
