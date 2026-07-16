@@ -17,7 +17,7 @@ from psycopg.rows import dict_row
 
 from . import PROJECTOR_VERSION
 from .federation import SourceProfile, freshness_score, normalized_evidence
-from .projectors import SOURCE_ID_RE, advisory_lock_key, canonical_json, effective_session_id, event_receipt, legacy_engine, partial_lexical_probes, phrase_query_spec, preferred_phrase_probes, project, redact_text, validate_envelope
+from .projectors import KIND_RE, SOURCE_ID_RE, advisory_lock_key, canonical_json, effective_session_id, event_receipt, legacy_engine, partial_lexical_probes, phrase_query_spec, preferred_phrase_probes, project, redact_text, validate_envelope
 from .ranking import DEFAULT_SEARCH_DEADLINE_MS, evidence_rank_components, should_run_partial
 from .semantic import SemanticRuntime
 
@@ -237,6 +237,7 @@ class BrainStore:
     def embed_pending(
         self, batch_size: int = 128, max_batches: int | None = None,
         source_id: str | None = None,
+        surface: str | None = None,
     ) -> dict[str, Any]:
         if self.semantic_runtime is None:
             raise ValueError("semantic runtime is not configured")
@@ -244,6 +245,8 @@ class BrainStore:
             raise ValueError("invalid embedding backfill bounds")
         if source_id is not None and not SOURCE_ID_RE.fullmatch(source_id):
             raise ValueError("invalid embedding source")
+        if surface is not None and not KIND_RE.fullmatch(surface):
+            raise ValueError("invalid embedding surface")
         processed = batches = 0
         with self.connect() as conn:
             locked = conn.execute(
@@ -259,6 +262,7 @@ class BrainStore:
                            LEFT JOIN item_embeddings embedding ON embedding.item_id=item.id
                            WHERE item.deleted_at IS NULL
                              AND (%s::text IS NULL OR item.source_id=%s)
+                             AND (%s::text IS NULL OR item.surface=%s)
                              AND (
                              embedding.item_id IS NULL OR embedding.model<>%s
                              OR embedding.runtime_fingerprint<>%s
@@ -271,6 +275,8 @@ class BrainStore:
                         (
                             source_id,
                             source_id,
+                            surface,
+                            surface,
                             self.semantic_runtime.model,
                             self.semantic_runtime.fingerprint,
                             self.semantic_runtime.dimensions,
@@ -316,6 +322,7 @@ class BrainStore:
         return {
             "status": "complete", "processed": processed, "batches": batches,
             "source_scoped": source_id is not None,
+            "surface_scoped": surface is not None,
         }
 
     def record_dead_letter(self, error_code: str, summary: str) -> None:

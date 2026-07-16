@@ -79,15 +79,20 @@ def main() -> None:
         )
     store.ingest("semantic-a", [
         envelope("source-a", "target", "Architecture decision: circuit breaker.", "session-a"),
+        envelope("source-a", "other-surface", "Verbose tool transcript.", "session-a")
+        | {"kind": "tool_output"},
         envelope("source-b", "decoy", "Architecture decision: unrelated queue.", "session-b"),
     ])
-    first = store.embed_pending(batch_size=10, source_id="source-a")
-    scoped_replay = store.embed_pending(batch_size=10, source_id="source-a")
+    first = store.embed_pending(batch_size=10, source_id="source-a", surface="message")
+    scoped_replay = store.embed_pending(batch_size=10, source_id="source-a", surface="message")
     remaining = store.embed_pending(batch_size=10)
     second = store.embed_pending(batch_size=10)
     with store.connect() as connection:
         connection.execute(
-            "UPDATE item_embeddings SET runtime_fingerprint=%s WHERE source_id='source-a'",
+            """UPDATE item_embeddings SET runtime_fingerprint=%s
+               WHERE source_id='source-a' AND item_id=(
+                   SELECT id FROM items WHERE event_native_id='target'
+               )""",
             ("0" * 64,),
         )
     stale = store.search(
@@ -106,9 +111,11 @@ def main() -> None:
         authorized_source="source-a",
     )
     assert first["processed"] == 1 and first["source_scoped"] is True
-    assert scoped_replay["processed"] == 0 and remaining["processed"] == 1
+    assert first["surface_scoped"] is True
+    assert scoped_replay["processed"] == 0 and remaining["processed"] == 2
     assert second["processed"] == 0
-    assert stale["results"] == [] and stale_metrics["embedding_lag"] == 1
+    assert all(row["native_id"] != "target" for row in stale["results"])
+    assert stale_metrics["embedding_lag"] == 1
     assert repaired["processed"] == 1
     assert runtime.plan_calls == planner_calls and runtime.query_calls > 0
     assert [row["source_id"] for row in result["results"]] == ["source-a"]
