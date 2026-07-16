@@ -26,6 +26,7 @@ class EmbeddingUnitContractTest(unittest.TestCase):
         self.assertIn(
             "ExecStart=/usr/bin/env RECALL_EMBEDDING_URL=http://127.0.0.1:8090 ", worker,
         )
+        self.assertIn("RECALL_SEMANTIC_TIMEOUT_SECONDS=120", worker)
         self.assertNotIn("\nEnvironment=RECALL_EMBEDDING_URL=", worker)
         self.assertIn("-p 127.0.0.1:8090:80", sidecar)
         self.assertIn("--max-client-batch-size 1", sidecar)
