@@ -28,7 +28,9 @@ class FakeSemanticRuntime:
 
     def plan(self, query: str):
         self.plan_calls += 1
-        return SearchPlan(False, ()) if "orchard premise" in query else SearchPlan(True, ())
+        return SearchPlan(False, ()) if "orchard premise" in query else SearchPlan(
+            True, ("architecture decision",),
+        )
 
     @staticmethod
     def vector(text: str) -> list[float]:
@@ -105,6 +107,10 @@ def main() -> None:
         "stopped repeated upstream failures with a trip and cooldown guard", {}, 5,
         authorized_source="source-a",
     )
+    bounded = store.search(
+        "stopped repeated upstream failures with a trip and cooldown guard", {}, 1,
+        authorized_source="source-a",
+    )
     planner_calls = runtime.plan_calls
     store.search(
         "find rollout password=syntheticvalue123", {}, 5,
@@ -119,6 +125,9 @@ def main() -> None:
     assert repaired["processed"] == 1
     assert runtime.plan_calls == planner_calls and runtime.query_calls > 0
     assert [row["source_id"] for row in result["results"]] == ["source-a"]
+    assert len(bounded["results"]) <= 1
+    legs = [leg["leg"] for leg in result["diagnostics"]["legs"]]
+    assert legs.index("semantic-0") < legs.index("rewrite-0")
     assert result["results"][0]["native_id"] == "target"
     assert "semantic" in result["results"][0]["legs"]
     assert store.search("nonexistent orchard premise", {}, 5)["results"] == []
