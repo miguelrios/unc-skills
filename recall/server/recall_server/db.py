@@ -263,19 +263,6 @@ class BrainStore:
                 ).fetchone()["value"]
             if not global_locked:
                 return {"status": "busy", "processed": 0, "batches": 0}
-            source_lock = f"{global_lock}:{source_id}" if source_scoped else None
-            source_locked = False
-            if source_lock is not None:
-                source_locked = conn.execute(
-                    "SELECT pg_try_advisory_lock(hashtextextended(%s,0)) AS value",
-                    (source_lock,),
-                ).fetchone()["value"]
-                if not source_locked:
-                    conn.execute(
-                        "SELECT pg_advisory_unlock_shared(hashtextextended(%s,0))",
-                        (global_lock,),
-                    )
-                    return {"status": "busy", "processed": 0, "batches": 0}
             try:
                 while max_batches is None or batches < max_batches:
                     rows = conn.execute(
@@ -293,7 +280,8 @@ class BrainStore:
                              OR embedding.content_sha256<>
                                 encode(sha256(convert_to(item.text_redacted,'UTF8')),'hex')
                            )
-                           ORDER BY item.id LIMIT %s""",
+                           ORDER BY item.id LIMIT %s
+                           FOR UPDATE OF item SKIP LOCKED""",
                         (
                             source_id,
                             source_id,
@@ -338,11 +326,6 @@ class BrainStore:
                     processed += len(rows)
                     batches += 1
             finally:
-                if source_lock is not None and source_locked:
-                    conn.execute(
-                        "SELECT pg_advisory_unlock(hashtextextended(%s,0))",
-                        (source_lock,),
-                    )
                 if source_scoped:
                     conn.execute(
                         "SELECT pg_advisory_unlock_shared(hashtextextended(%s,0))",

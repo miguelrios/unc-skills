@@ -78,6 +78,11 @@ class BlockingSemanticRuntime(FakeSemanticRuntime):
         return super().embed_documents(texts)
 
 
+class FailingSemanticRuntime(FakeSemanticRuntime):
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        raise RuntimeError("synthetic embedding failure")
+
+
 def envelope(source: str, native: str, text: str, parent: str) -> dict:
     content = {"role": "user", "text": text}
     return {
@@ -201,8 +206,40 @@ def main() -> None:
         ]
         parallel_results = [future.result() for future in futures]
     assert [result["processed"] for result in parallel_results] == [1, 1]
-    store.ingest("serialized-e", [
-        envelope("source-e", "serialized-e", "Serialized source E.", "session-e"),
+    store.ingest("parallel-e", [
+        envelope("source-e", "parallel-e-1", "Parallel source E one.", "session-e"),
+        envelope("source-e", "parallel-e-2", "Parallel source E two.", "session-e"),
+    ])
+    same_source_barrier = threading.Barrier(2)
+    same_source_stores = [
+        BrainStore(
+            os.environ["RECALL_DATABASE_URL"],
+            semantic_runtime=CoordinatedSemanticRuntime(same_source_barrier),
+        )
+        for _ in range(2)
+    ]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(
+                candidate.embed_pending,
+                batch_size=1,
+                max_batches=1,
+                source_id="source-e",
+                surface="message",
+            )
+            for candidate in same_source_stores
+        ]
+        same_source_results = [future.result() for future in futures]
+    assert [result["processed"] for result in same_source_results] == [1, 1]
+    with store.connect() as connection:
+        same_source_persisted = connection.execute(
+            """SELECT count(*) AS n FROM item_embeddings embedding
+               JOIN items item ON item.id=embedding.item_id
+               WHERE item.source_id='source-e'"""
+        ).fetchone()["n"]
+    assert same_source_persisted == 2
+    store.ingest("blocked-f", [
+        envelope("source-f", "blocked-f", "Blocked source F.", "session-f"),
     ])
     started = threading.Event()
     release = threading.Event()
@@ -218,22 +255,40 @@ def main() -> None:
             blocking_store.embed_pending,
             batch_size=1,
             max_batches=1,
-            source_id="source-e",
+            source_id="source-f",
             surface="message",
         )
         assert started.wait(timeout=3)
-        same_source = competing_store.embed_pending(
-            batch_size=1,
-            max_batches=1,
-            source_id="source-e",
-            surface="message",
-        )
         unscoped = competing_store.embed_pending(batch_size=1, max_batches=1)
         release.set()
         active_result = active.result()
     assert active_result["processed"] == 1
-    assert same_source == {"status": "busy", "processed": 0, "batches": 0}
     assert unscoped == {"status": "busy", "processed": 0, "batches": 0}
+    store.ingest("recoverable-g", [
+        envelope("source-g", "recoverable-g", "Recoverable source G.", "session-g"),
+    ])
+    failing_store = BrainStore(
+        os.environ["RECALL_DATABASE_URL"],
+        semantic_runtime=FailingSemanticRuntime(),
+    )
+    try:
+        failing_store.embed_pending(
+            batch_size=1,
+            max_batches=1,
+            source_id="source-g",
+            surface="message",
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "synthetic embedding failure"
+    else:
+        raise AssertionError("synthetic embedding failure did not propagate")
+    recovered_claim = competing_store.embed_pending(
+        batch_size=1,
+        max_batches=1,
+        source_id="source-g",
+        surface="message",
+    )
+    assert recovered_claim["processed"] == 1
     print(json.dumps({
         "status": "pass", "semantic_hit": 1, "unauthorized_hits": 0,
         "first_backfill": first["processed"] + remaining["processed"],
@@ -243,7 +298,11 @@ def main() -> None:
         "parallel_source_backfills": sum(
             result["processed"] for result in parallel_results
         ),
-        "same_source_competing_backfills": same_source["processed"],
+        "parallel_same_source_backfills": sum(
+            result["processed"] for result in same_source_results
+        ),
+        "parallel_same_source_persisted": same_source_persisted,
+        "released_claims_recovered": recovered_claim["processed"],
         "unscoped_competing_backfills": unscoped["processed"],
     }, sort_keys=True))
 
