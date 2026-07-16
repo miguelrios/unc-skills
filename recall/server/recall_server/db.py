@@ -895,6 +895,23 @@ class BrainStore:
                             limit=100, authorized_source=authorized_source, deadline_at=deadline_at,
                             routed_source_ids=routed_source_ids,
                         )))
+                    # Dense retrieval is the primary natural-language leg. Run it
+                    # before optional planner rewrites so a slow lexical rescue
+                    # cannot consume the complete database deadline.
+                    for vector_index, semantic_vector in enumerate(semantic_vectors):
+                        semantic_rows = run_leg(f"semantic-{vector_index}", lambda semantic_vector=semantic_vector: self._semantic_leg(
+                            conn, semantic_vector, filters, authorized_source=authorized_source,
+                            routed_source_ids=routed_source_ids, deadline_at=deadline_at,
+                            limit=max(100, limit * 10),
+                        ))
+                        if vector_index == 0:
+                            for semantic_row in semantic_rows:
+                                anchor = (semantic_row["source_id"], semantic_row["session_native_id"])
+                                if anchor not in dense_anchor_keys:
+                                    dense_anchor_keys.append(anchor)
+                                if len(dense_anchor_keys) >= max(1, limit - 1):
+                                    break
+                        merge(semantic_rows)
                     if plan is not None and plan.searchable and plan.phrases:
                         # Rewrites may only add high-precision evidence. Broad OR
                         # rewrites let one generic model phrase reshuffle an
@@ -918,20 +935,6 @@ class BrainStore:
                                 )
                                 exact_rescue_scores[key] = max(score, exact_rescue_scores.get(key, score))
                             merge(rewrite_rows)
-                    for vector_index, semantic_vector in enumerate(semantic_vectors):
-                        semantic_rows = run_leg(f"semantic-{vector_index}", lambda semantic_vector=semantic_vector: self._semantic_leg(
-                            conn, semantic_vector, filters, authorized_source=authorized_source,
-                            routed_source_ids=routed_source_ids, deadline_at=deadline_at,
-                            limit=max(100, limit * 10),
-                        ))
-                        if vector_index == 0:
-                            for semantic_row in semantic_rows:
-                                anchor = (semantic_row["source_id"], semantic_row["session_native_id"])
-                                if anchor not in dense_anchor_keys:
-                                    dense_anchor_keys.append(anchor)
-                                if len(dense_anchor_keys) >= max(1, limit - 1):
-                                    break
-                        merge(semantic_rows)
                     if phrase_spec and len(informative) == 1 and len(candidates) < limit:
                         phrase_query, phrase_function = phrase_spec
                         merge(run_leg("phrase", lambda: self._lexical_leg(
@@ -1015,10 +1018,10 @@ class BrainStore:
                     selected_keys.append(key)
                     break
             for key, _value in ranked_all:
-                if key not in selected_keys:
-                    selected_keys.append(key)
                 if len(selected_keys) >= limit:
                     break
+                if key not in selected_keys:
+                    selected_keys.append(key)
             ranked = sorted(
                 (grouped[key] for key in selected_keys),
                 key=lambda value: value[0],
