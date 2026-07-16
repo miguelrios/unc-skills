@@ -1,9 +1,10 @@
 # Recall Universal Ingestion — RDD
 
-**Status:** approved for autonomous execution
+**Status:** replanned after L0 storage AT_BOUND; approved for autonomous remediation through human gates
 **Date:** 2026-07-16
 **Decision owner:** Recall owner
 **Execution plan:** `docs/LOOP_CHAIN_RECALL_UNIVERSAL_INGESTION_2026-07-16.md`
+**Migration issue:** [#54](https://github.com/miguelrios/unc-skills/issues/54)
 
 ## 1. Outcome
 
@@ -29,7 +30,9 @@ source-local reader          always-on API reader
                        |
               source-scoped write
                        |
-                Tailnet-only Brain
+        managed Recall Core API/workers
+                       |
+       managed Postgres + encrypted durability
                        |
        canonical immutable source evidence
                        |
@@ -87,9 +90,11 @@ copied into Recall.
 4. **Collect broadly, admit narrowly.** Search may discover many sources, but only context relevant
    and safe for the current task can enter an answer or tool prompt.
 5. **Local when local is authoritative.** Mac application data is read on the Mac and crosses the
-   privacy boundary before network writes. Official API readers may run on an always-on Tailnet host.
-6. **No public ingress by default.** Prefer incremental polling. A source that truly requires a
-   webhook gets a separate reviewed ingress design rather than exposing the Brain.
+   privacy boundary before network writes. Official API readers may run in the managed central plane.
+6. **Private ingress first, portable ingress later.** User #1 keeps Tailnet-only Brain ingress.
+   Ordinary laptop users may later use authenticated public HTTPS with device-scoped credentials only
+   after its separate cross-tenant, revocation, abuse, and exposure gates pass. Source polling remains
+   preferred; a webhook requires its own reviewed ingress design.
 7. **Explicit scope and deletion.** Every source declares include/exclude rules, backfill horizon,
    retention, edit semantics, deletion semantics, and attachment policy.
 8. **Closed runtime.** Recall constructs only bundled, reviewed connector factories. It never loads
@@ -132,7 +137,39 @@ They require successor RDDs with stronger classification, retention, and admissi
 
 ## 5. Runtime topology
 
-### 5.1 Source placement
+### 5.1 Central Brain placement
+
+The first managed profile is one immutable `recall-core` container on a Render private service,
+PlanetScale Postgres as the canonical database, and a Tailscale gateway for private User #1 ingress.
+The container packages the existing Recall HTTP API, projection/retrieval runtime, and background
+workers; it is a deployment boundary, not a rewrite or a second memory product.
+
+Application behavior remains standard PostgreSQL:
+
+- one `DATABASE_URL` contract with full TLS certificate verification;
+- startup capability probes for PostgreSQL version, required extensions, migration state, and role
+  privileges;
+- provider-neutral schema, queries, receipts, revisions, and tombstones;
+- separate migration, application, source-writer, and read-only operational roles; and
+- no PlanetScale, Render, Supabase, or Neon SDK inside canonical ingestion or retrieval code.
+
+PlanetScale is the first live profile because it supplies managed encrypted Postgres, pgvector,
+backups/PITR, roles, and agent-accessible provisioning. Supabase, Neon, and conforming pgvector
+Postgres remain deployment adapters tested against the same capability contract. Provider branches
+are deployment and restore units, never Recall source identity or authorization boundaries.
+
+Collectors communicate only with Recall Core. A laptop or source connector never receives a database
+credential. Source-local collectors keep mode-0600 device spools; always-on cloud connectors place
+their outbox/checkpoint state in Postgres or a separately provider-attested encrypted durable volume.
+The end state is a stateless Core process, but the first cutover may retain a narrow encrypted state
+volume when required for safe incremental migration.
+
+Provisioning is agent-runnable but not agent-authorized: automation may validate and preview a plan,
+then must pause for billing, region, provider-account grants, Tailnet route approval, and final writer
+cutover. Secret values live only in approved provider secret stores and never in manifests, argv,
+logs, CI, support bundles, or repository evidence.
+
+### 5.2 Source placement
 
 Each connector declares one of three placements:
 
@@ -143,7 +180,7 @@ Each connector declares one of three placements:
 The first implementation keeps placement static in private configuration. Dynamic workload movement
 is unnecessary and risks copying credentials between hosts.
 
-### 5.2 Credential boundary
+### 5.3 Credential boundary
 
 - External-source and Brain credentials are distinct.
 - Each connector has one exact source-scoped Brain writer.
@@ -155,17 +192,26 @@ is unnecessary and risks copying credentials between hosts.
 - Logs, exceptions, status, cursors, provenance, receipts, tests, and evidence never render secret
   values or authority references.
 - Revoking source authority stops reads; revoking Brain authority leaves an ACK-recoverable spool.
+- Database administration credentials exist only for bounded migrations. Runtime uses a rotatable,
+  least-privilege application role; collectors use source-scoped Brain credentials, never SQL roles.
 
-### 5.3 Storage boundary
+### 5.4 Storage boundary
 
-Tailnet encryption does not protect database disks or backups. Before bulk personal communications
-ingestion, the deployment must produce a content-free attestation for encrypted database storage,
-encrypted backups, tested restore, restricted filesystem modes, and source-scoped access.
+Tailnet encryption does not protect database disks, connector state, or backups. Before bulk personal
+communications ingestion, the deployment must produce content-free provider attestations for
+encrypted database storage, encrypted backups, encrypted durable connector state, tested restore,
+restricted filesystem modes, TLS server-identity verification, and source-scoped access.
 
 Canonical source envelopes and searchable projections may contain personal content. Searchable
 plaintext therefore relies on encrypted volumes and strict host access. A later optional encrypted
 raw-payload sidecar may reduce the searchable projection footprint; it is not allowed to compromise
 receipt parity or deletion lineage.
+
+Migration freezes a canonical manifest before copying, restores into an isolated target, recreates
+extensions explicitly, and verifies canonical events, revisions, tombstones, receipts, grants, source
+profiles, projections, and embeddings. The final delta is ACK-gated. Old and new writers never run
+unfenced against the same source, and the old deployment remains rollback-only until parity, backup
+restore, both-device retrieval, and the owner cutover gate pass.
 
 ## 6. Connector contract v2
 
@@ -542,6 +588,15 @@ hit text, receipt, participant, source selector, or path is committed.
 
 ## 12. Operational requirements
 
+- `recall-core` builds reproducibly as an immutable, vulnerability-scanned container with a
+  content-free health contract; no source data, credential, private selector, or deployment identity
+  enters the image or build provenance.
+- The deployment manifest is closed and provider-neutral at runtime. Provider adapters may provision
+  infrastructure but cannot change canonical schema, authorization, deletion, or retrieval semantics.
+- Provisioning preview performs no billable mutation and renders no secret. Apply pauses at explicit
+  billing, region, account-grant, network-route, and writer-cutover gates.
+- Database startup fails closed on missing extensions, migration drift, excessive role privilege,
+  disabled TLS verification, unavailable encrypted durability, or an untested backup policy.
 - Supervisor leases, bounded cadence, jitter, backoff, rate-limit caps, and repair generations remain
   deterministic and content-free.
 - Every connector publishes enabled/configured/health/checkpoint/pending/lag/error-class state.
@@ -554,6 +609,12 @@ hit text, receipt, participant, source selector, or path is committed.
   evidence ingestion.
 
 ## 13. Rollout and rollback
+
+The managed deployment rolls out before new source activation. First restore an isolated copy and run
+parity reads. Next run synthetic collectors against the new writer. At the human cutover gate, pause
+old writers, drain acknowledged work, apply one bounded final delta, rotate collector endpoints, and
+keep the previous deployment read-only and rollback-ready. Rollback reverses endpoints and replays
+only ACK-safe staged work; it never runs unfenced dual writers or infers deletion from copy absence.
 
 Each source starts in four states:
 
@@ -576,13 +637,18 @@ evidence verified at merged HEAD; no Cascade diary or live evidence enters git. 
 cross-device, cross-source questions, produces an aggregate verdict,
 drafts the successor chain from losing cells, and pauses for owner sign-off.
 
+The L0 storage failure does not add a sixth loop. Issue #54 is the remediation phase of L0 and must
+close at both merged and deployed HEAD before L1 may request Google consent or read personal data.
+
 ## 15. Human decisions deliberately deferred to gates
 
-1. Approve the least-privilege Google read-only services/scopes declared by the pinned `gws` rail.
-2. Grant access only to a WhatsApp export inbox; linked-device access is outside this chain.
-3. Choose X rolling home-feed retention or keep durable ingestion limited to owner/saved streams.
-4. Opt into any attachment content, contextual-PII judge, or source-specific durable fact extraction.
-5. Accept the final User #1 quality and privacy verdict before broadening distribution.
+1. Approve the managed provider, billing plan, region, provider-account grants, Tailnet route, and
+   final writer cutover after reviewing a content-free deployment preview.
+2. Approve the least-privilege Google read-only services/scopes declared by the pinned `gws` rail.
+3. Grant access only to a WhatsApp export inbox; linked-device access is outside this chain.
+4. Choose X rolling home-feed retention or keep durable ingestion limited to owner/saved streams.
+5. Opt into any attachment content, contextual-PII judge, or source-specific durable fact extraction.
+6. Accept the final User #1 quality and privacy verdict before broadening distribution.
 
 ## 16. External design references
 
@@ -608,6 +674,19 @@ choices, but do not override the hard safety and evidence contracts in this RDD.
 - [Google Workspace CLI](https://github.com/googleworkspace/cli) for Discovery-generated command
   coverage, schema introspection, structured output, agent skills, and response sanitization. The
   repository explicitly labels the CLI pre-v1 and not an officially supported Google product.
+- [PlanetScale Postgres](https://planetscale.com/docs/postgres),
+  [extensions](https://planetscale.com/docs/postgres/extensions),
+  [security](https://planetscale.com/docs/security), and
+  [backups/PITR](https://planetscale.com/docs/postgres/backups) for the first managed database profile.
+- [Render Blueprints](https://render.com/docs/infrastructure-as-code),
+  [private services](https://render.com/docs/private-services), and
+  [Tailscale template](https://render.com/templates/tailscale) for the first agent-managed compute and
+  private-ingress profile.
+- [Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve) for private Tailnet ingress;
+  Funnel is not enabled by the User #1 profile.
+- [Supabase Postgres](https://supabase.com/docs/guides/database/overview) and
+  [Neon pgvector](https://neon.com/docs/ai/ai-scale-with-neon) as portability profiles that must obey
+  the same standard-Postgres capability and Recall safety contracts.
 - [Apple Full Disk Access guidance](https://support.apple.com/guide/mac-help/change-privacy-security-settings-mchl211c911f/mac)
   for explicit access to other applications' local data, including Messages.
 - [X timeline API](https://docs.x.com/x-api/posts/timelines/introduction) and

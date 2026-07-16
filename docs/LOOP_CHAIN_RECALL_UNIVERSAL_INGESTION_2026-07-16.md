@@ -1,9 +1,10 @@
 # Recall Universal Ingestion — Five-Loop Cascade
 
-**Status:** approved for autonomous execution
+**Status:** replanned after L0 AT_BOUND; approved for autonomous remediation through human gates
 **Mode:** BUILD
 **Pacing:** autonomous between declared human gates
 **RDD:** `docs/rdd/RECALL_UNIVERSAL_INGESTION_2026-07-16.md`
+**Replan issue:** [#54 — managed Postgres deployment](https://github.com/miguelrios/unc-skills/issues/54)
 
 ## Objective
 
@@ -17,7 +18,8 @@ uses red -> green -> refactor; every loop uses the full Cascade ribbon and has a
 
 ## Operating contract
 
-- Measure before changing behavior. L0 freezes the retrieval and safety baseline.
+- Measure before changing behavior. L0 preserves the frozen retrieval/safety baseline while moving
+  the central plane onto an encrypted, restore-tested managed deployment.
 - Each loop follows RE-PLAN -> BUILD -> PIN -> PROVE -> MEASURE -> REVIEW -> MERGE -> EXIT.
 - Maximum per PR: two failed PROVE runs and three review/fix rounds. Instrument failures are diagnosed
   separately and do not become fake evidence.
@@ -39,7 +41,7 @@ uses red -> green -> refactor; every loop uses the full Cascade ribbon and has a
 
 ```mermaid
 flowchart LR
-    L0[L0 Pin the substrate and closed Google rail]
+    L0[L0 Pin and migrate the ingestion substrate]
     L1[L1 Google Workspace life plane]
     L2[L2 Private communications and Mac utility]
     L3[L3 Social and work expansion]
@@ -49,36 +51,61 @@ flowchart LR
 
 | Task | `blockedBy` | Human gate |
 |---|---|---|
-| L0 | — | approve only the declared Google read-only scopes |
+| L0 | — | approve provider billing/region, provider credential grants, Tailnet route, final cutover, then only the declared Google read-only scopes |
 | L1 | L0 | complete Google OAuth consent |
 | L2 | L1 | grant macOS permissions; WhatsApp is export-only in this chain |
 | L3 | L2 | approve X streams/retention/cost and each additional external account scope |
 | L4 | L3 | accept release or approve the successor chain |
 
-## L0 — Pin the substrate and closed Google rail
+## L0 — Pin and migrate the ingestion substrate
 
-- **goal:** Produce a closed, benchmarked ingestion substrate around pinned Google Workspace CLI
-  `gws` v0.22.5 before connecting personal data.
-- **prompt:** Read the RDD and current Recall connector/runtime code; freeze the unchanged retrieval,
-  privacy, deletion, replay, and packaging baselines; red-test connector-v2 typed records, exact
-  authority slots, ACK-gated checkpoints, revisions, tombstones, static registry preview, and rejection
-  of arbitrary factories; pin `gws` v0.22.5 at tag commit `705fb0ec` with per-platform release
-  checksums; expose only Gmail message/history reads, Calendar event reads, People connections reads,
-  Drive change/file reads, and Docs exports through exact argv/method and response-schema allowlists;
-  test non-interactive JSON stability, empty-success failure, revoke, read-only enforcement, untrusted
-  content, crash replay, OS packaging, upgrade pinning, and credential isolation; then implement the
-  closed rail boundary and shared contract in serial one-concern PRs.
-- **accept:** The pre-change scorecard reproduces twice; all legacy connectors and the pinned `gws`
-  rail pass the v2 conformance suite; duplicate pages and every injected crash converge to
-  one acknowledged version; cursor-before-ACK, executable config, shell invocation, unknown command,
-  write method, ambient environment, empty success, schema drift, and secret-bearing error tests fail
-  closed; encrypted storage, backup/restore, filesystem mode, source-writer, and Tailnet-only
-  attestations are green; repository tests and the public-safety scan pass at merged HEAD.
-- **bound:** At most three serial PRs, two failed PROVE runs and three review rounds per PR, and ten
-  working days total; checksum ambiguity or a failed storage/safety control exits AT_BOUND
-  instead of authorizing Google data.
-- **exit →:** Write the private criterion map, recap and pass ZEN, pause for owner approval of the
-  declared Google scopes, then trigger L1.
+- **goal:** Finish the already-merged closed connector substrate by moving the central Brain onto an
+  agent-deployable, encrypted, restore-tested managed Postgres deployment before connecting any new
+  personal source.
+- **prompt:** Start from Issue #54, the RDD, merged PR #53, the frozen pre-change scorecard, and current
+  Recall deployment contract. Preserve the connector-v2 typed records, static registry, ACK-gated
+  revisions/tombstones, pinned `gws` v0.22.5 rail, retrieval behavior, privacy boundary, and package
+  surfaces. Red-test an immutable `recall-core` container, standard-Postgres capability probe,
+  restartable migrations, least-privilege application/migration roles, encrypted connector durability,
+  and a closed deployment manifest that contains references rather than credential values. Implement
+  the first agent-managed profile as PlanetScale Postgres plus a Render private service and Tailscale
+  gateway; the application must consume standard `DATABASE_URL` semantics and provider-neutral SQL so
+  Supabase, Neon, and conforming pgvector Postgres remain substitutable profiles. Move always-on
+  connector outbox/checkpoint durability into Postgres or another provider-attested encrypted boundary;
+  local collectors retain private device spools and never receive database credentials. Provisioning
+  may preview automatically but must pause for billing, region, provider authorization, Tailnet route,
+  and cutover approval. Prove backup/restore into an isolated target, extension recreation, canonical
+  event/revision/tombstone/receipt/projection parity, fault-injected final delta, endpoint rotation,
+  second-device retrieval, and rollback before decommissioning the old writer. No live Google OAuth,
+  reads, or backfill occur in L0.
+- **accept:**
+  1. The twice-reproduced baseline and every merged connector/rail conformance cell remain green.
+  2. The same immutable container passes a standard pgvector fixture and the PlanetScale pilot
+     capability probe with zero provider-specific SQL or canonical behavior differences.
+  3. A fresh-account deployment dry-run is content-free, idempotent, agent-runnable, makes zero
+     billable mutations, and pauses at every declared human grant; after approval, two applies converge
+     to the same manifest with zero duplicate resources or credential values rendered.
+  4. Provider APIs attest encryption at rest for the database, backups, and connector durability;
+     connection tests fail when TLS verification is disabled or server identity does not match.
+  5. Restore into an isolated target recreates required extensions and reaches exact canonical-event,
+     revision, tombstone, receipt, grant, source-profile, projection, and embedding parity.
+  6. Two synthetic cutover cycles plus crash-after-copy, crash-after-Brain-ACK, restart, network-loss,
+     revoke, and rollback faults produce zero missing live records, duplicate acknowledged versions,
+     resurrected deletions, cross-source authority changes, or cursor commits before ACK.
+  7. Existing Linux and Mac collectors ingest and retrieve cited synthetic evidence after cutover; a
+     second approved device retrieves the same evidence and resolves every receipt.
+  8. The User #1 Tailnet profile has zero public Recall listeners, and an external non-Tailnet probe
+     cannot reach the service.
+  9. Backup restore, credential rotation/revoke, process restart, rollback, repository tests,
+     deployment E2Es, container/supply-chain scan, and public-safety scan pass at merged and deployed
+     HEAD with content-free aggregate output.
+- **bound:** At most four total serial L0 PRs including merged PR #53, two failed PROVE runs and three
+  review rounds per PR, one cutover plus one remediation restart, and fourteen working days from this
+  replan. A failed encryption, parity, restore, rollback, authorization, or exposure control writes a
+  private `AT_BOUND` criterion map and stops without authorizing Google data.
+- **exit →:** Write the mode-0600 private criterion map tied to merged and deployed HEAD, run recap and
+  pass ZEN, obtain owner acceptance of the cutover and the four declared Google read-only scopes, then
+  trigger L1.
 
 ## L1 — Google Workspace life plane
 
@@ -196,3 +223,12 @@ Approving this document authorizes only these five bounded outcomes and their se
 It does not authorize broad OAuth presets, write/send tools, public Brain ingress, attachment content,
 WhatsApp linked-device access, durable home-timeline retention, or additional accounts without their
 named human gates.
+
+## Replan record — 2026-07-16
+
+L0's connector-v2 substrate and pinned Workspace rail merged in PR #53, but the operational storage
+attestation could not prove the encryption floor, so L0 stopped `AT_BOUND` before Google
+authorization. The owner chose migration before live source expansion. Issue #54 is therefore folded
+into L0 as its remediation phase rather than added as a sixth loop. L1 through L4 retain their order,
+scope, quality floors, and human gates; only L0's central deployment, migration, and cutover work is
+expanded. No new personal source may be enabled until the revised L0 exit is complete.
