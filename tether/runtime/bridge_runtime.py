@@ -34,6 +34,7 @@ CONFIG_PATH = Path(os.environ.get("TETHER_CONFIG", CONFIG_HOME / "tether" / "con
 DB_PATH = HERMES_HOME / "bridges.db"
 SOCKET_PATH = HERMES_HOME / "bridge.sock"
 ID_PATTERN = re.compile(r"^[A-Z][A-Z0-9]{7,}$")
+CHANNEL_ID_PATTERN = re.compile(r"^[CDG][A-Z0-9]{7,}$")
 SECRET_PATTERNS = (
     (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"), "[REDACTED_SLACK_TOKEN]"),
     (re.compile(r"\bxap[p]-[A-Za-z0-9-]{10,}\b"), "[REDACTED_SLACK_APP_TOKEN]"),
@@ -149,7 +150,7 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
     team_id = str(raw.get("team_id") or "")
     if not isinstance(allow_channel_owner_restrictions, bool):
         raise ValueError("allow_channel_owner_restrictions must be a boolean")
-    if default_channel and not ID_PATTERN.fullmatch(default_channel):
+    if default_channel and not CHANNEL_ID_PATTERN.fullmatch(default_channel):
         raise ValueError("default_channel is not a valid Slack channel ID")
     if default_owner and default_owner != "*" and not ID_PATTERN.fullmatch(default_owner):
         raise ValueError("default_owner is not a valid Slack member ID")
@@ -245,6 +246,12 @@ class Store:
                   message_ts TEXT,
                   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
+                CREATE TABLE IF NOT EXISTS thread_participation (
+                  team_id TEXT NOT NULL DEFAULT '', channel_id TEXT NOT NULL,
+                  thread_ts TEXT NOT NULL,
+                  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  PRIMARY KEY (team_id, channel_id, thread_ts)
+                );
                 """
             )
             columns = {row[1] for row in db.execute("PRAGMA table_info(bridge_events)")}
@@ -303,7 +310,7 @@ class Store:
         channel = str(request["channel_id"])
         owner = str(request["owner_user_id"])
         team = str(request.get("team_id") or "")
-        if not ID_PATTERN.fullmatch(channel) or (owner != "*" and not ID_PATTERN.fullmatch(owner)):
+        if not CHANNEL_ID_PATTERN.fullmatch(channel) or (owner != "*" and not ID_PATTERN.fullmatch(owner)):
             raise ValueError("invalid Slack channel or owner ID")
         if team and not ID_PATTERN.fullmatch(team):
             raise ValueError("invalid Slack workspace ID")
@@ -378,6 +385,35 @@ class Store:
         if bridge is None:
             raise ValueError("active bridge not found")
         return bridge
+
+    def mark_participation(self, team_id: str, channel_id: str, thread_ts: str) -> None:
+        if not channel_id or not thread_ts:
+            raise ValueError("channel and thread timestamp are required")
+        with self.connect() as db:
+            db.execute(
+                """
+                INSERT INTO thread_participation(team_id,channel_id,thread_ts)
+                VALUES(?,?,?)
+                ON CONFLICT(team_id,channel_id,thread_ts)
+                DO UPDATE SET updated_at=CURRENT_TIMESTAMP
+                """,
+                (team_id, channel_id, thread_ts),
+            )
+
+    def participates(self, team_id: str, channel_id: str, thread_ts: str) -> bool:
+        if not channel_id or not thread_ts:
+            return False
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT 1 FROM thread_participation WHERE team_id=? AND channel_id=? AND thread_ts=?",
+                (team_id, channel_id, thread_ts),
+            ).fetchone()
+            if row is None and team_id:
+                row = db.execute(
+                    "SELECT 1 FROM thread_participation WHERE team_id='' AND channel_id=? AND thread_ts=?",
+                    (channel_id, thread_ts),
+                ).fetchone()
+            return row is not None
 
     def recent_active_bridges(self, hours: int = 24, limit: int = 100) -> list[Bridge]:
         hours = max(1, min(hours, 168))
@@ -738,6 +774,8 @@ class Broker:
             )
         else:
             timestamp = slack_post(self.token, bridge.channel_id, root_text, requested_thread)
+        if requested_thread:
+            self.store.mark_participation(bridge.team_id, bridge.channel_id, str(requested_thread))
         bridge = self.store.bind(bridge.bridge_id, str(requested_thread or timestamp))
         return {
             "ok": True,
@@ -780,6 +818,7 @@ class Broker:
             raise
         if reply_key:
             self.store.complete_reply(reply_key, timestamp)
+        self.store.mark_participation(bridge.team_id, bridge.channel_id, bridge.thread_ts)
         return {
             "ok": True,
             "bridge_id": bridge.bridge_id,
@@ -843,7 +882,7 @@ class Broker:
         ]
         return {"ok": True, "messages": messages}
 
-    def _thread_reply(self, request: BridgeRequest) -> dict[str, Any]:
+    def _thread_reply(self, request: BridgeRequest, config: Config) -> dict[str, Any]:
         channel = str(request.get("channel_id") or "")
         thread_ts = str(request.get("thread_ts") or "")
         text = str(request.get("text") or "")
@@ -853,6 +892,9 @@ class Broker:
             raise ValueError("thread reply text is empty or too large")
         self._ensure_channel_membership(channel)
         message_ts = slack_post(self.token, channel, text, thread_ts)
+        self.store.mark_participation(
+            str(request.get("team_id") or config.team_id), channel, thread_ts,
+        )
         return {"ok": True, "thread_ts": thread_ts, "message_ts": message_ts}
 
     def handle(self, request: BridgeRequest) -> dict[str, Any]:
@@ -875,7 +917,7 @@ class Broker:
         if operation == "thread_history":
             return self._thread_history(request, config)
         if operation == "thread_reply":
-            return self._thread_reply(request)
+            return self._thread_reply(request, config)
         raise ValueError("unsupported operation")
 
 
