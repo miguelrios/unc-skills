@@ -77,6 +77,21 @@ The default is single-process. On a dedicated multi-core maintenance host, `--wo
 32) parallelizes only the pure redaction computation; database reads, writes, watermarks, and the
 advisory lock remain single-owner and ordered.
 
+After schema 009, repair legacy Cowork messages that were projected as one session per message.
+This migration only moves derived item/session relationships; canonical events, revisions, content
+digests, and item receipts remain unchanged. It is high-water bounded, resumable, and idempotent:
+
+```bash
+RECALL_DATABASE_URL=... python -m recall_server.cli backfill-cowork-sessions --batch-size 5000
+```
+
+Configure owner-controlled aliases only after their exact source exists. Search routing by source
+ID, source family, or alias always intersects with a source-scoped credential:
+
+```bash
+RECALL_DATABASE_URL=... python -m recall_server.cli source-alias-set cowork cowork:mac:owner
+```
+
 Linux history collectors use `recall-collector@.service` with separate `claude` and `codex`
 environment/token files. Issue one source-scoped credential per unit, install the two example
 environment files with mode 0600 after replacing every value, then enable the instances:

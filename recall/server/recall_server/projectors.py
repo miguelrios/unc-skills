@@ -52,6 +52,23 @@ def advisory_lock_key(source_id: str, native_id: str) -> str:
     return source_id + "\x1f" + native_id
 
 
+def effective_session_id(envelope: dict) -> str:
+    """Return explicit parent identity, with a narrow legacy Cowork repair seam."""
+    explicit = envelope.get("native_parent_id")
+    content = envelope.get("content")
+    provenance = envelope.get("provenance") or {}
+    legacy = content.get("session_id") if isinstance(content, dict) else None
+    if (
+        envelope.get("kind") == "connector_record"
+        and provenance.get("connector_id") == "anthropic.cowork-local"
+        and (explicit is None or explicit == envelope.get("native_id"))
+        and isinstance(legacy, str)
+        and NATIVE_ID_RE.fullmatch(legacy)
+    ):
+        return legacy
+    return explicit or envelope["native_id"]
+
+
 def content_sha256(envelope: dict) -> str:
     return hashlib.sha256(canonical_json(envelope["content"])).hexdigest()
 

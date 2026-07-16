@@ -29,7 +29,7 @@ from recall_server import SCHEMA_VERSION
 from recall_server import cli as server_cli
 from recall_server.app import Handler, serve, serve_unix
 from recall_server.db import BrainStore
-from recall_server.projectors import advisory_lock_key, canonical_json, partial_lexical_probes, phrase_query_spec, preferred_phrase_probe, preferred_phrase_probes, project, redact_text, validate_envelope
+from recall_server.projectors import advisory_lock_key, canonical_json, effective_session_id, partial_lexical_probes, phrase_query_spec, preferred_phrase_probe, preferred_phrase_probes, project, redact_text, validate_envelope
 from recall_server.ranking import DEFAULT_SEARCH_DEADLINE_MS, evidence_rank_components, retrieval_leg_order, should_run_partial
 
 
@@ -66,6 +66,16 @@ class SchemaMigrationContractTest(unittest.TestCase):
 
 
 class SourceScopedReadContractTest(unittest.TestCase):
+    def test_requested_source_filters_intersect_with_authorized_scope(self) -> None:
+        where, params = BrainStore._read_filters(
+            {"source_id": "source-b", "source_family": "coding_history", "source_alias": "cowork"},
+            authorized_source="source-a",
+        )
+        self.assertEqual(where.count("i.source_id = %s"), 2)
+        self.assertIn("sp.family = %s", where)
+        self.assertIn("SELECT source_id FROM source_aliases", where)
+        self.assertEqual(params, ["source-a", "source-b", "coding_history", "cowork"])
+
     def test_resolve_filters_by_the_authenticated_collector_source(self) -> None:
         connection = mock.MagicMock()
         connection.execute.return_value.fetchone.return_value = None
@@ -136,6 +146,20 @@ class AdminCliSafetyTest(unittest.TestCase):
 
 
 class EnvelopeContractTest(unittest.TestCase):
+    def test_cowork_session_fallback_repairs_legacy_parentless_envelopes(self) -> None:
+        legacy = envelope(
+            source_id="cowork:mac:synthetic",
+            native_id="session-alpha/message-one",
+            native_parent_id=None,
+            kind="connector_record",
+            content={"session_id": "session-alpha", "role": "user", "text": "safe"},
+            provenance={"connector_id": "anthropic.cowork-local"},
+        )
+        self.assertEqual(effective_session_id(legacy), "session-alpha")
+        legacy["native_parent_id"] = legacy["native_id"]
+        self.assertEqual(effective_session_id(legacy), "session-alpha")
+        self.assertEqual(effective_session_id(envelope(native_parent_id=None)), "session-1:turn-1")
+
     def test_default_deadline_fits_below_tailnet_slo_with_client_headroom(self) -> None:
         self.assertEqual(DEFAULT_SEARCH_DEADLINE_MS, 300)
         self.assertLess(DEFAULT_SEARCH_DEADLINE_MS, 500)

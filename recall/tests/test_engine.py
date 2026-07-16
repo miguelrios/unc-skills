@@ -871,6 +871,8 @@ class RemoteTransportTest(unittest.TestCase):
         code, out, err = self.call(
             "search", "deadbeef evidence", "--since", "2026-01-01", "--until", "2026-02-01",
             "--cwd", "grep123", "--branch", "feature", "--harness", "claude", "--limit", "7",
+            "--source-id", "cowork:mac:owner", "--source-family", "coding_history",
+            "--source-alias", "cowork",
         )
         self.assertEqual((code, err), (0, ""))
         self.assertIn(RemoteHandler.target_path, out)
@@ -880,6 +882,8 @@ class RemoteTransportTest(unittest.TestCase):
         self.assertEqual(request["body"]["filters"], {
             "since": "2026-01-01", "until": "2026-02-01", "cwd": "grep123",
             "branch": "feature", "harness": "claude",
+            "source_id": "cowork:mac:owner", "source_family": "coding_history",
+            "source_alias": "cowork",
         })
         self.assertEqual(request["body"]["limit"], 7)
 

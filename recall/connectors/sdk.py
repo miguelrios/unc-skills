@@ -265,6 +265,7 @@ class ConnectorRecord:
     occurred_at: str
     content: dict[str, Any]
     provenance: dict[str, Any]
+    native_parent_id: str | None = None
     deleted: bool = False
 
     def __post_init__(self) -> None:
@@ -272,6 +273,11 @@ class ConnectorRecord:
             raise ConnectorContractError("unsupported connector record schema_version")
         if not isinstance(self.native_id, str) or not IDENTITY.fullmatch(self.native_id):
             raise ConnectorContractError("native_id is invalid")
+        if self.native_parent_id is not None and (
+            not isinstance(self.native_parent_id, str)
+            or not IDENTITY.fullmatch(self.native_parent_id)
+        ):
+            raise ConnectorContractError("native_parent_id is invalid")
         _timestamp(self.occurred_at)
         if not isinstance(self.content, dict):
             raise ConnectorContractError("content must be an object")
@@ -296,11 +302,12 @@ class ConnectorRecord:
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any]) -> "ConnectorRecord":
-        expected = {"schema_version", "native_id", "occurred_at", "content", "provenance", "deleted"}
+        required = {"schema_version", "native_id", "occurred_at", "content", "provenance", "deleted"}
+        expected = required | {"native_parent_id"}
         if not isinstance(value, dict):
             raise ConnectorContractError("record must be an object")
         unknown = set(value) - expected
-        missing = expected - set(value)
+        missing = required - set(value)
         if unknown:
             raise ConnectorContractError("record has unknown fields")
         if missing:
@@ -423,12 +430,13 @@ class ConnectorRunner:
                 source_id=self.source_id, native_id=record.native_id, kind="tombstone",
                 content={"target_native_id": record.native_id}, principal_id="owner",
                 visibility="private", occurred_at=record.occurred_at,
-                provenance=provenance,
+                provenance=provenance, parent=record.native_parent_id,
             )
         return canonical_envelope(
             source_id=self.source_id, native_id=record.native_id, kind="connector_record",
             content=content, principal_id="owner", visibility="private",
             occurred_at=record.occurred_at, provenance=provenance,
+            parent=record.native_parent_id,
         )
 
     def _acknowledged(self, event: dict[str, Any]) -> bool:

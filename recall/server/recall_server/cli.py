@@ -25,6 +25,9 @@ def main() -> None:
     backfill_redaction.add_argument("--batch-size", type=int, default=5000)
     backfill_redaction.add_argument("--max-batches", type=int)
     backfill_redaction.add_argument("--workers", type=int, default=1)
+    backfill_cowork = sub.add_parser("backfill-cowork-sessions")
+    backfill_cowork.add_argument("--batch-size", type=int, default=5000)
+    backfill_cowork.add_argument("--max-batches", type=int)
     sub.add_parser("export")
     create_token = sub.add_parser("token-create"); create_token.add_argument("name"); create_token.add_argument("--source"); create_token.add_argument("--scopes", default="read,write"); create_token.add_argument("--output", required=True, help="write the one-time plaintext credential to a new mode-0600 file")
     revoke_token = sub.add_parser("token-revoke"); revoke_token.add_argument("name")
@@ -33,6 +36,9 @@ def main() -> None:
     source_profile.add_argument("--family", choices=sorted(SOURCE_FAMILIES), required=True)
     source_profile.add_argument("--quality", choices=sorted(QUALITY_SCORES), required=True)
     source_profile.add_argument("--freshness-half-life-days", type=int, required=True)
+    source_alias = sub.add_parser("source-alias-set")
+    source_alias.add_argument("alias")
+    source_alias.add_argument("source_id")
     sub.add_parser("federation-scoreboard")
     server = sub.add_parser("serve"); server.add_argument("--host", default="127.0.0.1"); server.add_argument("--port", type=int, default=8788); server.add_argument("--unix-socket")
     args = ap.parse_args()
@@ -48,6 +54,10 @@ def main() -> None:
     elif args.command == "backfill-redaction":
         print(json.dumps(store.backfill_redaction(
             args.batch_size, args.max_batches, args.workers,
+        ), sort_keys=True))
+    elif args.command == "backfill-cowork-sessions":
+        print(json.dumps(store.backfill_cowork_sessions(
+            args.batch_size, args.max_batches,
         ), sort_keys=True))
     elif args.command == "export":
         for envelope in store.export_raw(): print(json.dumps(envelope, sort_keys=True))
@@ -67,6 +77,8 @@ def main() -> None:
             "quality": args.quality,
             "freshness_half_life_days": args.freshness_half_life_days,
         }), sort_keys=True))
+    elif args.command == "source-alias-set":
+        print(json.dumps(store.set_source_alias(args.alias, args.source_id), sort_keys=True))
     elif args.command == "federation-scoreboard":
         print(json.dumps(store.federation_scoreboard(), sort_keys=True))
     else:

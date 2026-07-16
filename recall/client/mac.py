@@ -382,8 +382,12 @@ class BrainClient:
             acknowledgement["privacy"] = privacy
         return acknowledgement
 
-    def search(self, query: str, *, limit: int = 10) -> dict:
-        return self._request("/v1/search", body={"query": query, "limit": limit, "filters": {}})
+    def search(self, query: str, *, limit: int = 10,
+               filters: dict[str, Any] | None = None) -> dict:
+        return self._request(
+            "/v1/search",
+            body={"query": query, "limit": limit, "filters": filters or {}},
+        )
 
     def resolve(self, receipt: str) -> dict:
         return self._request("/v1/receipts/resolve?" + urllib.parse.urlencode({"receipt": receipt}))

@@ -273,6 +273,11 @@ def parser() -> argparse.ArgumentParser:
     _connection(search)
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=10)
+    search.add_argument("--route-source-id")
+    search.add_argument("--source-family", choices=(
+        "coding_history", "deliberate_capture", "user_export", "third_party_research",
+    ))
+    search.add_argument("--source-alias")
 
     show = commands.add_parser("show")
     _connection(show)
@@ -595,7 +600,14 @@ def main() -> None:
     elif args.command == "delete":
         result = MemoryClient(**common).delete(args.receipt)
     elif args.command == "search":
-        result = BrainClient(**common).search(args.query, limit=args.limit)
+        filters = {
+            key: value for key, value in {
+                "source_id": args.route_source_id,
+                "source_family": args.source_family,
+                "source_alias": args.source_alias,
+            }.items() if value is not None
+        }
+        result = BrainClient(**common).search(args.query, limit=args.limit, filters=filters)
     elif args.command == "show":
         result = BrainClient(**common).resolve(args.receipt)
     else:

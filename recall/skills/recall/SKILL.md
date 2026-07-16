@@ -28,6 +28,19 @@ must also be a non-symlink mode-0600 regular file. Environment variables overrid
 the profile field by field; `RECALL_MODE=local` remains the instant rollback.
 Neither config validation nor transport errors render either private path.
 
+Remote search can route explicitly without weakening credential scope:
+
+```bash
+python3 scripts/recall.py search "budget decision" --source-id cowork:mac:owner
+python3 scripts/recall.py search "budget decision" --source-family coding_history
+python3 scripts/recall.py search "budget decision" --source-alias cowork
+```
+
+Aliases are configured by the Brain owner and resolve to one exact source. Requested source ID,
+family, and alias filters are intersected with any source-scoped bearer; they can narrow results but
+never broaden authorization. The remote response includes content-free routing diagnostics. Source
+routing fails closed in local mode because the local index has no central source authority.
+
 Use `RECALL_MODE=local|remote|shadow` when the mode must be explicit:
 
 - `local` is the config-only rollback switch and never calls the central service.
