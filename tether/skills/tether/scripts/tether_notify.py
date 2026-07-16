@@ -68,6 +68,41 @@ def detected_source(args: argparse.Namespace) -> tuple[str, dict[str, str]]:
     raise SystemExit("No resumable context found; pass --run-id for a headless run")
 
 
+def attached_source(args: argparse.Namespace) -> tuple[str, dict[str, str]]:
+    cwd = str(Path(args.cwd or Path.cwd()).resolve())
+    zellij_session = str(args.zellij_session or "")
+    zellij_pane = str(args.zellij_pane_id or "")
+    if bool(zellij_session) != bool(zellij_pane):
+        raise SystemExit("--zellij-session and --zellij-pane-id must be provided together")
+    terminal = {}
+    terminal_identity = None
+    if zellij_session:
+        terminal_identity = zellij_pane_identity(zellij_session, zellij_pane, cwd)
+        terminal = {
+            "zellij_session": zellij_session,
+            "zellij_pane_id": zellij_pane,
+            "pane_agent": terminal_identity["pane_agent"],
+            "pane_command_hash": terminal_identity["pane_command_hash"],
+        }
+    if args.claude_session_id and args.codex_session_id:
+        raise SystemExit("choose one native session ID")
+    if args.claude_session_id:
+        return "claude_session", {
+            "session_id": args.claude_session_id,
+            "cwd": cwd,
+            **terminal,
+        }
+    if args.codex_session_id:
+        return "codex_session", {
+            "session_id": args.codex_session_id,
+            "cwd": cwd,
+            **terminal,
+        }
+    if terminal_identity:
+        return "zellij_pane", terminal_identity
+    return detected_source(args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Send or answer a resumable Hermes Slack thread")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -87,6 +122,20 @@ def build_parser() -> argparse.ArgumentParser:
     rebind = sub.add_parser("rebind")
     rebind.add_argument("--channel", required=True)
     rebind.add_argument("--thread-ts", required=True)
+    attach = sub.add_parser("attach")
+    attach.add_argument("--channel", required=True)
+    attach.add_argument("--thread-ts", required=True)
+    attach.add_argument("--owner")
+    attach.add_argument("--team")
+    attach.add_argument("--idempotency-key", required=True)
+    attach.add_argument("--claude-session-id")
+    attach.add_argument("--codex-session-id")
+    attach.add_argument("--zellij-session")
+    attach.add_argument("--zellij-pane-id")
+    attach.add_argument("--run-id")
+    attach.add_argument("--hermes-session-id")
+    attach.add_argument("--cwd")
+    attach.add_argument("--json", action="store_true")
     post = sub.add_parser("post")
     post.add_argument("--channel", required=True)
     post.add_argument("--thread-ts", required=True)
@@ -229,6 +278,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             "op": "rebind", "channel_id": args.channel,
             "thread_ts": args.thread_ts, "source_kind": kind, "source": source,
         })
+    elif args.command == "attach":
+        kind, source = attached_source(args)
+        result = broker_call({
+            "op": "attach", "source_kind": kind, "source": source,
+            "owner_user_id": args.owner or "", "channel_id": args.channel,
+            "team_id": args.team or "", "thread_ts": args.thread_ts,
+            "idempotency_key": args.idempotency_key,
+        })
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False))
+            return 0
     elif args.command == "post":
         result = broker_call({
             "op": "thread_reply", "channel_id": args.channel,

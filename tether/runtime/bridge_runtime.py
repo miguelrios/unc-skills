@@ -770,7 +770,7 @@ class Broker:
         status = {
             "ok": True,
             "implementation": "tether",
-            "protocol_version": 2,
+            "protocol_version": 3,
             "channel_configured": bool(effective_channel(config)),
             "owner_configured": bool(config.default_owner or allowed_users),
             "allowed_user_count": len(allowed_users),
@@ -907,6 +907,41 @@ class Broker:
             "source_kind": rebound.source_kind,
         }
 
+    def _attach(
+        self,
+        incoming: BridgeRequest,
+        config: Config,
+        allowed_users: tuple[str, ...],
+    ) -> dict[str, Any]:
+        request = BridgeRequest(incoming)
+        request["channel_id"] = str(request.get("channel_id") or effective_channel(config))
+        request["owner_user_id"] = str(
+            request.get("owner_user_id") or config.default_owner or ("*" if allowed_users else "")
+        )
+        request["team_id"] = str(request.get("team_id") or config.team_id)
+        thread_ts = str(request.get("thread_ts") or "")
+        if not request["channel_id"] or not thread_ts:
+            raise ValueError("Slack channel and existing thread timestamp are required")
+        existing = self.store.find(request["team_id"], request["channel_id"], thread_ts)
+        if existing is not None:
+            if existing.idempotency_key == str(request.get("idempotency_key") or ""):
+                return {
+                    "ok": True,
+                    "bridge_id": existing.bridge_id,
+                    "thread_ts": existing.thread_ts,
+                    "deduplicated": True,
+                }
+            raise ValueError("Slack thread already has an active Tether binding")
+        bridge = self.store.create(request)
+        bridge = self.store.bind(bridge.bridge_id, thread_ts)
+        self.store.mark_participation(bridge.team_id, bridge.channel_id, thread_ts)
+        return {
+            "ok": True,
+            "bridge_id": bridge.bridge_id,
+            "thread_ts": bridge.thread_ts,
+            "deduplicated": False,
+        }
+
     def _history(self, request: BridgeRequest, config: Config) -> dict[str, Any]:
         limit = max(1, min(int(request.get("limit", 15)), 100))
         channel = str(request.get("channel_id") or effective_channel(config))
@@ -970,6 +1005,9 @@ class Broker:
         if operation == "notify":
             with self._notify_lock:
                 return self._notify(request, config, allowed_users)
+        if operation == "attach":
+            with self._notify_lock:
+                return self._attach(request, config, allowed_users)
         if operation == "reply":
             return self._reply(request)
         if operation == "rebind":
@@ -1204,6 +1242,67 @@ def _pane_number(pane: str) -> int:
     return int(normalized)
 
 
+def _zellij_agent_process(
+    session: str,
+    pane: str,
+    allowed: set[str],
+    proc_root: Path = Path("/proc"),
+) -> tuple[str, str]:
+    candidates: list[tuple[bool, int, str, str]] = []
+    for process_dir in proc_root.iterdir():
+        if not process_dir.name.isdigit():
+            continue
+        try:
+            environment = {
+                item.split(b"=", 1)[0]: item.split(b"=", 1)[1]
+                for item in (process_dir / "environ").read_bytes().split(b"\0")
+                if b"=" in item
+            }
+            if environment.get(b"ZELLIJ_SESSION_NAME", b"").decode(
+                "utf-8", "replace"
+            ) != session or environment.get(b"ZELLIJ_PANE_ID", b"").decode(
+                "utf-8", "replace"
+            ).removeprefix("terminal_") != pane.removeprefix("terminal_"):
+                continue
+            raw_command = (process_dir / "cmdline").read_bytes()
+            tokens = [
+                value.decode("utf-8", "replace")
+                for value in raw_command.split(b"\0")
+                if value
+            ]
+            agent = next(
+                (
+                    name
+                    for token in tokens
+                    for name in allowed
+                    if Path(token).name == name
+                ),
+                "",
+            )
+            if not agent:
+                continue
+            stat_text = (process_dir / "stat").read_text(encoding="utf-8")
+            fields = stat_text[stat_text.rfind(")") + 2 :].split()
+            pid = int(process_dir.name)
+            foreground = len(fields) > 19 and int(fields[5]) == pid
+            start_time = fields[19] if len(fields) > 19 else ""
+            descriptor = (
+                f"proc:{pid}:{start_time}:"
+                f"{hashlib.sha256(raw_command).hexdigest()}"
+            )
+            candidates.append((foreground, pid, agent, descriptor))
+        except (FileNotFoundError, PermissionError, ProcessLookupError, ValueError, IndexError):
+            continue
+    foreground = [candidate for candidate in candidates if candidate[0]]
+    selected = foreground or candidates
+    if len(selected) != 1:
+        raise NativeContinuationError(
+            "Zellij omitted pane command metadata and an exact live agent process could not be resolved"
+        )
+    _, _, agent, descriptor = selected[0]
+    return agent, descriptor
+
+
 def zellij_pane_identity(
     session: str,
     pane: str,
@@ -1239,14 +1338,20 @@ def zellij_pane_identity(
     )
     if record is None or record.get("exited"):
         raise NativeContinuationError("captured Zellij pane is no longer active")
-    terminal_command = str(record.get("terminal_command") or "")
-    tokens = shlex.split(terminal_command)
     configured = config or load_config()
     allowed = set(configured.zellij_agent_commands)
-    agent = next(
-        (name for token in tokens for name in allowed if Path(token).name == name),
-        "",
-    )
+    terminal_command = str(record.get("terminal_command") or "")
+    if terminal_command:
+        tokens = shlex.split(terminal_command)
+        agent = next(
+            (name for token in tokens for name in allowed if Path(token).name == name),
+            "",
+        )
+        fingerprint_source = terminal_command
+    else:
+        agent, fingerprint_source = _zellij_agent_process(
+            session, str(pane_number), allowed
+        )
     if not agent:
         raise NativeContinuationError(
             "captured Zellij pane is not running an allowlisted agent; use --run-id for a shell or cron"
@@ -1256,7 +1361,9 @@ def zellij_pane_identity(
         "pane_id": str(pane_number),
         "cwd": cwd,
         "pane_agent": agent,
-        "pane_command_hash": hashlib.sha256(terminal_command.encode()).hexdigest(),
+        "pane_command_hash": hashlib.sha256(
+            fingerprint_source.encode()
+        ).hexdigest(),
     }
 
 

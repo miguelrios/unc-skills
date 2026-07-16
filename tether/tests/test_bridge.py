@@ -193,7 +193,7 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(bridge.owner_user_id, "*", "Hermes's explicit allowlist is shared by default")
         self.assertEqual(status["allowed_user_count"], 2)
         self.assertEqual(status["implementation"], "tether")
-        self.assertEqual(status["protocol_version"], 2)
+        self.assertEqual(status["protocol_version"], 3)
         self.assertNotIn("allowed_users", status, "status reports readiness, never identities")
 
     def test_shared_channel_rejects_accidental_owner_restriction(self):
@@ -358,6 +358,40 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(result["thread_ts"], "123.456")
         self.assertEqual(self.store.recent_active_bridges(), [])
         self.assertTrue(self.store.participates("", "C12345678", "123.456"))
+
+    def test_attach_binds_existing_thread_without_posting(self):
+        broker = self.runtime.Broker("test-token", self.store)
+        with mock.patch.object(self.runtime, "slack_post") as post:
+            result = broker.handle({
+                "op": "attach",
+                "source_kind": "claude_session",
+                "source": {"session_id": "claude-1", "cwd": "/tmp/parcha"},
+                "owner_user_id": "U12345678",
+                "team_id": "T12345678",
+                "channel_id": "C12345678",
+                "thread_ts": "123.456",
+                "idempotency_key": "review-123.456",
+            })
+        post.assert_not_called()
+        self.assertEqual(result["thread_ts"], "123.456")
+        bridge = self.store.find("T12345678", "C12345678", "123.456")
+        self.assertEqual(bridge.source_kind, "claude_session")
+        self.assertEqual(bridge.source["session_id"], "claude-1")
+
+    def test_attach_refuses_to_replace_active_binding(self):
+        broker = self.runtime.Broker("test-token", self.store)
+        request = {
+            "op": "attach", "source_kind": "claude_session",
+            "source": {"session_id": "claude-1", "cwd": "/tmp/parcha"},
+            "owner_user_id": "U12345678", "team_id": "T12345678",
+            "channel_id": "C12345678", "thread_ts": "123.456",
+            "idempotency_key": "review-one",
+        }
+        broker.handle(request)
+        request["idempotency_key"] = "review-two"
+        request["source"] = {"session_id": "claude-2", "cwd": "/tmp/parcha"}
+        with self.assertRaisesRegex(ValueError, "already has an active"):
+            broker.handle(request)
 
     def test_thread_participation_survives_store_reopen_and_team_lookup(self):
         self.store.mark_participation("T12345678", "C12345678", "123.456")
@@ -541,6 +575,32 @@ class CredentialBoundaryTest(unittest.TestCase):
             with self.assertRaisesRegex(self.runtime.NativeContinuationError, "not running an allowlisted agent"):
                 self.runtime.zellij_pane_identity("work", "7")
 
+    def test_zellij_identity_resolves_old_pane_with_null_command(self):
+        panes = [{
+            "id": 31,
+            "is_plugin": False,
+            "exited": False,
+            "terminal_command": None,
+        }]
+        completed = types.SimpleNamespace(stdout=json.dumps(panes))
+        with mock.patch.object(
+            self.runtime, "_resolve_executable", return_value="/usr/bin/zellij"
+        ), mock.patch.object(
+            self.runtime.subprocess, "run", return_value=completed
+        ), mock.patch.object(
+            self.runtime,
+            "_zellij_agent_process",
+            return_value=("claude", "proc:3381024:39575982:command-hash"),
+        ) as process_identity:
+            identity = self.runtime.zellij_pane_identity(
+                "didactic-jellyfish", "31", "/tmp/project"
+            )
+        process_identity.assert_called_once_with(
+            "didactic-jellyfish", "31", {"claude", "codex", "gemini", "hermes", "pi"}
+        )
+        self.assertEqual(identity["pane_agent"], "claude")
+        self.assertEqual(len(identity["pane_command_hash"]), 64)
+
     def test_zellij_delivery_fails_closed_when_pane_process_changes(self):
         bridge = self.runtime.Bridge(
             "brg_test", "zellij_pane",
@@ -692,6 +752,59 @@ class NotifierTest(unittest.TestCase):
         request = broker.call_args.args[0]
         self.assertEqual(request["op"], "rebind")
         self.assertEqual(request["source"]["pane_command_hash"], "new-fingerprint")
+
+    def test_attach_captures_an_explicit_existing_native_pane(self):
+        identity = {
+            "session_name": "didactic-jellyfish",
+            "pane_id": "31",
+            "cwd": "/tmp/project",
+            "pane_agent": "claude",
+            "pane_command_hash": "exact-fingerprint",
+        }
+        with mock.patch.object(
+            self.notifier, "zellij_pane_identity", return_value=identity,
+        ) as capture, mock.patch.object(
+            self.notifier, "broker_call",
+            return_value={
+                "ok": True,
+                "bridge_id": "brg_test",
+                "thread_ts": "123.456",
+            },
+        ) as broker:
+            result = self.notifier.main([
+                "attach",
+                "--channel", "C12345678",
+                "--thread-ts", "123.456",
+                "--claude-session-id", "claude-session",
+                "--zellij-session", "didactic-jellyfish",
+                "--zellij-pane-id", "31",
+                "--cwd", "/tmp/project",
+                "--idempotency-key", "attach-existing-123",
+                "--json",
+            ])
+        self.assertEqual(result, 0)
+        capture.assert_called_once_with(
+            "didactic-jellyfish", "31", "/tmp/project"
+        )
+        request = broker.call_args.args[0]
+        self.assertEqual(request["source_kind"], "claude_session")
+        self.assertEqual(request["source"]["session_id"], "claude-session")
+        self.assertEqual(
+            request["source"]["pane_command_hash"], "exact-fingerprint"
+        )
+
+    def test_attach_requires_a_complete_explicit_pane(self):
+        with self.assertRaisesRegex(
+            SystemExit, "--zellij-session and --zellij-pane-id"
+        ):
+            self.notifier.main([
+                "attach",
+                "--channel", "C12345678",
+                "--thread-ts", "123.456",
+                "--claude-session-id", "claude-session",
+                "--zellij-session", "work",
+                "--idempotency-key", "attach-existing-123",
+            ])
 
     def test_noninteractive_setup_delegates_manifest_to_hermes(self):
         args = types.SimpleNamespace(non_interactive=True, no_restart=False)
