@@ -120,6 +120,16 @@ class StoreTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.create(request)
 
+    def test_user_id_cannot_be_stored_as_a_channel(self):
+        with self.assertRaisesRegex(ValueError, "invalid Slack channel"):
+            self.store.create({
+                "source_kind": "headless_run",
+                "source": {"run_id": "run-1"},
+                "owner_user_id": "U12345678",
+                "channel_id": "U12345678",
+                "idempotency_key": "bad-user-destination",
+            })
+
     def test_source_metadata_rejects_unknown_or_oversized_values(self):
         request = self.request()
         request["source"]["prompt"] = "should never be persisted"
@@ -233,6 +243,13 @@ class StoreTest(unittest.TestCase):
         post.assert_called_once_with("test-token", "C12345678", "progress", "123.456")
         self.assertEqual(result["thread_ts"], "123.456")
         self.assertEqual(self.store.recent_active_bridges(), [])
+        self.assertTrue(self.store.participates("", "C12345678", "123.456"))
+
+    def test_thread_participation_survives_store_reopen_and_team_lookup(self):
+        self.store.mark_participation("T12345678", "C12345678", "123.456")
+        reopened = self.runtime.Store(self.store.path)
+        self.assertTrue(reopened.participates("T12345678", "C12345678", "123.456"))
+        self.assertFalse(reopened.participates("T99999999", "C12345678", "123.456"))
 
     def test_concurrent_idempotent_notifications_post_one_root_message(self):
         broker = self.runtime.Broker("test-token", self.store)
@@ -635,6 +652,73 @@ class PluginRoutingTest(unittest.TestCase):
         self.assertFalse(self.plugin._mark_bridge_thread_before_slack_gate(adapter, {
             "thread_ts": "999.999", "channel": "C12345678",
         }))
+
+    def test_prefilter_marks_persisted_non_bridge_participation(self):
+        self.plugin.store.mark_participation("T12345678", "C12345678", "123.456")
+        adapter = types.SimpleNamespace(_bot_message_ts=set(), _channel_team={"C12345678": "T12345678"})
+        self.assertTrue(self.plugin._mark_bridge_thread_before_slack_gate(adapter, {
+            "thread_ts": "123.456", "channel": "C12345678",
+        }))
+        self.assertIn("123.456", adapter._bot_message_ts)
+
+    def test_native_send_persists_thread_participation(self):
+        class SlackAdapter:
+            _tether_prefilter = False
+
+            def __init__(self):
+                self._bot_message_ts = set()
+                self._channel_team = {"C12345678": "T12345678"}
+
+            async def connect(self):
+                return True
+
+            async def send(self, channel, content, reply_to=None, metadata=None):
+                return {"ok": True}
+
+            async def _handle_slack_message(self, event):
+                return event
+
+        modules = {
+            "plugins": types.ModuleType("plugins"),
+            "plugins.platforms": types.ModuleType("plugins.platforms"),
+            "plugins.platforms.slack": types.ModuleType("plugins.platforms.slack"),
+            "plugins.platforms.slack.adapter": types.ModuleType("plugins.platforms.slack.adapter"),
+        }
+        modules["plugins.platforms.slack.adapter"].SlackAdapter = SlackAdapter
+        with mock.patch.dict(sys.modules, modules), mock.patch.object(self.plugin, "_ensure_reply_poller"):
+            self.plugin._install_slack_bridge_prefilter()
+            adapter = SlackAdapter()
+            asyncio.run(adapter.send("C12345678", "done", "123.456", None))
+        self.assertTrue(self.plugin.store.participates(
+            "T12345678", "C12345678", "123.456",
+        ))
+
+    def test_existing_bot_thread_is_discovered_once_and_persisted(self):
+        class Client:
+            calls = 0
+
+            async def conversations_replies(self, **kwargs):
+                self.calls += 1
+                return {"messages": [
+                    {"ts": "123.456", "user": "UHUMAN001"},
+                    {"ts": "123.457", "user": "UBOT00001", "bot_id": "BBOT00001"},
+                ]}
+
+        client = Client()
+        adapter = types.SimpleNamespace(
+            _bot_message_ts=set(),
+            _channel_team={"C12345678": "T12345678"},
+            _team_bot_user_ids={"T12345678": "UBOT00001"},
+            _get_client=lambda _channel: client,
+        )
+        event = {"thread_ts": "123.456", "channel": "C12345678"}
+        self.assertTrue(asyncio.run(
+            self.plugin._discover_existing_thread_participation(adapter, event)
+        ))
+        self.assertTrue(self.plugin.store.participates(
+            "T12345678", "C12345678", "123.456",
+        ))
+        self.assertEqual(client.calls, 1)
 
     def test_prefilter_admits_unmentioned_reply_before_hermes_mention_gate(self):
         self.make_bridge()

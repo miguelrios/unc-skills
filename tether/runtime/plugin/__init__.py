@@ -108,10 +108,56 @@ def _bridge_for_slack_event(adapter, event):
 
 def _mark_bridge_thread_before_slack_gate(adapter, event) -> bool:
     bridge = _bridge_for_slack_event(adapter, event)
-    if bridge is None:
+    thread_ts = str(event.get("thread_ts") or "")
+    channel_id = str(event.get("channel") or event.get("channel_id") or "")
+    team_id = str(
+        event.get("team") or event.get("team_id")
+        or getattr(adapter, "_channel_team", {}).get(channel_id, "") or ""
+    )
+    if bridge is None and not store.participates(team_id, channel_id, thread_ts):
         return False
-    adapter._bot_message_ts.add(bridge.thread_ts)
+    adapter._bot_message_ts.add(thread_ts)
     return True
+
+
+async def _discover_existing_thread_participation(adapter, event) -> bool:
+    """Recover participation for threads created before persistence existed."""
+    thread_ts = str(event.get("thread_ts") or "")
+    channel_id = str(event.get("channel") or event.get("channel_id") or "")
+    if not thread_ts or not channel_id:
+        return False
+    team_id = str(
+        event.get("team") or event.get("team_id")
+        or getattr(adapter, "_channel_team", {}).get(channel_id, "") or ""
+    )
+    key = (team_id, channel_id, thread_ts)
+    misses = getattr(adapter, "_tether_participation_misses", None)
+    if misses is None:
+        misses = adapter._tether_participation_misses = set()
+    if key in misses:
+        return False
+    bot_user_id = (
+        getattr(adapter, "_team_bot_user_ids", {}).get(team_id)
+        or getattr(adapter, "_bot_user_id", None)
+    )
+    if not bot_user_id:
+        return False
+    try:
+        result = await adapter._get_client(channel_id).conversations_replies(
+            channel=channel_id, ts=thread_ts, limit=200,
+        )
+    except Exception:
+        return False
+    participated = any(
+        isinstance(message, dict) and str(message.get("user") or "") == str(bot_user_id)
+        for message in result.get("messages", [])
+    )
+    if participated:
+        store.mark_participation(team_id, channel_id, thread_ts)
+        adapter._bot_message_ts.add(thread_ts)
+        return True
+    misses.add(key)
+    return False
 
 
 def _is_bot_message(event: dict[str, Any]) -> bool:
@@ -201,10 +247,17 @@ def _install_slack_bridge_prefilter():
         _ensure_reply_poller(self)
         try:
             bridge = _bridge_for_slack_event(self, event)
+            channel_id = str(event.get("channel") or event.get("channel_id") or "")
+            team_id = str(
+                event.get("team") or event.get("team_id")
+                or getattr(self, "_channel_team", {}).get(channel_id, "") or ""
+            )
+            if _is_bot_message(event) and not _allows_bot_message(self, event, team_id):
+                return None
+            marked = _mark_bridge_thread_before_slack_gate(self, event)
+            if not marked and event.get("thread_ts"):
+                await _discover_existing_thread_participation(self, event)
             if bridge is not None:
-                if _is_bot_message(event) and not _allows_bot_message(self, event, bridge.team_id):
-                    return None
-                self._bot_message_ts.add(bridge.thread_ts)
                 event_id = str(event.get("ts") or "")
                 if (
                     not event.get("_tether_polled")
@@ -237,7 +290,24 @@ def _install_slack_bridge_prefilter():
             if _is_silence_control_output(content):
                 log.info("Tether suppressed an internal silence control token at Slack egress")
                 return {"ok": True, "suppressed": True}
-            return await original_send(self, *args, **kwargs)
+            result = await original_send(self, *args, **kwargs)
+            succeeded = (
+                bool(result.get("ok", result.get("success", True)))
+                if isinstance(result, dict)
+                else bool(getattr(result, "success", True))
+            )
+            if not succeeded:
+                return result
+            channel_id = str(kwargs.get("chat_id") or kwargs.get("channel") or (args[0] if args else ""))
+            metadata = kwargs.get("metadata") or (args[3] if len(args) >= 4 else {}) or {}
+            reply_to = kwargs.get("reply_to") or (args[2] if len(args) >= 3 else "")
+            thread_ts = str(
+                metadata.get("thread_id") or metadata.get("thread_ts") or reply_to or ""
+            )
+            if channel_id and thread_ts:
+                team_id = str(getattr(self, "_channel_team", {}).get(channel_id, "") or "")
+                store.mark_participation(team_id, channel_id, thread_ts)
+            return result
 
         SlackAdapter.send = bridged_send
     if original_restart is not None:
