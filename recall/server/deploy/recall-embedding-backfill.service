@@ -5,6 +5,7 @@ Requires=recall-embedding.service
 
 [Service]
 Type=oneshot
+TimeoutStartSec=infinity
 WorkingDirectory=%h/services/recall-brain/recall/server
 EnvironmentFile=%h/.config/recall-brain/service.env
 ExecStart=%h/.config/recall-brain/venv/bin/python -m recall_server.cli backfill-embeddings --batch-size 128 --max-batches 4
