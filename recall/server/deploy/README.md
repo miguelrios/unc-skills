@@ -64,6 +64,15 @@ RECALL_DATABASE_URL=... python -m recall_server.cli backfill-entities --batch-si
 Do not substitute the full `rebuild` command for this live migration; rebuild intentionally
 truncates all derived projections inside one transaction and is reserved for offline recovery.
 
+After upgrading to projector version 3, converge existing derived text on the current privacy
+contract with the resumable redaction backfill. It snapshots the current item high-water mark,
+rewrites only derived items/chunks/entities whose redacted form changes, and never mutates canonical
+source events or receipts:
+
+```bash
+RECALL_DATABASE_URL=... python -m recall_server.cli backfill-redaction --batch-size 5000
+```
+
 Linux history collectors use `recall-collector@.service` with separate `claude` and `codex`
 environment/token files. Issue one source-scoped credential per unit, install the two example
 environment files with mode 0600 after replacing every value, then enable the instances:

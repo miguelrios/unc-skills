@@ -468,6 +468,85 @@ def main() -> None:
                 ordered = [row["event_native_id"] for row in conn.execute("SELECT event_native_id FROM items WHERE session_native_id='session-order' ORDER BY occurred_at")]
                 assert ordered == ["session-order:turn-1", "session-order:turn-2"]
 
+                canonical_before = conn.execute(
+                    """SELECT count(*) AS n,COALESCE(sum(id),0) AS id_sum,
+                              COALESCE(sum(hashtextextended(content_sha256,0)),0) AS hash_sum
+                       FROM source_events"""
+                ).fetchone()
+                receipts_before = conn.execute(
+                    "SELECT array_agg(receipt ORDER BY receipt) AS values FROM items"
+                ).fetchone()["values"]
+                secret_item = conn.execute(
+                    """SELECT id,source_id FROM items
+                       WHERE event_native_id='session-secret:turn-1'"""
+                ).fetchone()
+                unsafe_projection = f"safe\nAuthorization={secret}\nend"
+                conn.execute(
+                    "UPDATE items SET text_redacted=%s,projector_version=2 WHERE id=%s",
+                    (unsafe_projection, secret_item["id"]),
+                )
+                conn.execute(
+                    "UPDATE chunks SET text_redacted=%s WHERE item_id=%s",
+                    (unsafe_projection, secret_item["id"]),
+                )
+                conn.execute(
+                    """INSERT INTO entities(item_id,source_id,kind,value,normalized)
+                       VALUES (%s,%s,'leak-canary',%s,%s)""",
+                    (
+                        secret_item["id"], secret_item["source_id"],
+                        "api_key=" + secret, ("api_key=" + secret).casefold(),
+                    ),
+                )
+                safe_item = conn.execute(
+                    "SELECT id,source_id FROM items WHERE id<>%s ORDER BY id LIMIT 1",
+                    (secret_item["id"],),
+                ).fetchone()
+                conn.execute(
+                    """INSERT INTO entities(item_id,source_id,kind,value,normalized)
+                       VALUES (%s,%s,'leak-canary',%s,%s)""",
+                    (
+                        safe_item["id"], safe_item["source_id"],
+                        "api_key=" + secret, ("api_key=" + secret).casefold(),
+                    ),
+                )
+                conn.execute("DELETE FROM projection_backfills WHERE name='redaction-v3'")
+
+            partial_redaction = store.backfill_redaction(batch_size=3, max_batches=1)
+            assert partial_redaction["items_scanned"] == 3
+            assert not partial_redaction["completed"]
+            final_redaction = store.backfill_redaction(batch_size=3)
+            assert final_redaction["completed"]
+            assert store.backfill_redaction(batch_size=3)["items_scanned"] == 0
+            assert partial_redaction["items_rewritten"] + final_redaction["items_rewritten"] == 1
+            assert (
+                partial_redaction["entity_items_rebuilt"]
+                + final_redaction["entity_items_rebuilt"]
+            ) >= 2, (partial_redaction, final_redaction)
+            with store.connect() as conn:
+                canonical_after = conn.execute(
+                    """SELECT count(*) AS n,COALESCE(sum(id),0) AS id_sum,
+                              COALESCE(sum(hashtextextended(content_sha256,0)),0) AS hash_sum
+                       FROM source_events"""
+                ).fetchone()
+                receipts_after = conn.execute(
+                    "SELECT array_agg(receipt ORDER BY receipt) AS values FROM items"
+                ).fetchone()["values"]
+                projected = conn.execute(
+                    """SELECT i.text_redacted,c.text_redacted AS chunk_text,i.projector_version
+                       FROM items i JOIN chunks c ON c.item_id=i.id
+                       WHERE i.id=%s""",
+                    (secret_item["id"],),
+                ).fetchone()
+                assert canonical_after == canonical_before
+                assert receipts_after == receipts_before
+                assert secret not in projected["text_redacted"]
+                assert secret not in projected["chunk_text"]
+                assert projected["projector_version"] == 3
+                assert conn.execute(
+                    "SELECT count(*) AS n FROM entities WHERE strpos(value,%s)>0",
+                    (secret,),
+                ).fetchone()["n"] == 0
+
             # Invalid hash is rejected into metadata-only dead letters.
             bad = {**first, "native_id": "bad-hash", "content_sha256": "0" * 64}
             assert request(base, "POST", "/v1/ingest/batches", {"events": [bad]}, "batch-bad")[0] == 400

@@ -1122,6 +1122,171 @@ class BrainStore:
             "completed": state["completed_at"] is not None,
         }
 
+    def backfill_redaction(self, batch_size: int = 5000, max_batches: int | None = None) -> dict:
+        """Converge derived text on the current privacy projector without rewriting evidence."""
+        if not 1 <= batch_size <= 20000:
+            raise ValueError("batch size must be between 1 and 20000")
+        if max_batches is not None and max_batches < 1:
+            raise ValueError("max batches must be positive")
+        engine = legacy_engine()
+        batches = scanned = rewritten = rewritten_chunks = rebuilt_entity_items = 0
+        with self.connect() as conn:
+            conn.autocommit = True
+            conn.execute("SELECT pg_advisory_lock(hashtextextended('recall:redaction-backfill-v3',0))")
+            try:
+                while max_batches is None or batches < max_batches:
+                    with conn.transaction():
+                        state = conn.execute(
+                            """SELECT target_item_id,last_item_id,completed_at
+                               FROM projection_backfills WHERE name='redaction-v3' FOR UPDATE"""
+                        ).fetchone()
+                        if state is None:
+                            target = conn.execute(
+                                "SELECT COALESCE(max(id),0) AS n FROM items"
+                            ).fetchone()["n"]
+                            conn.execute(
+                                """INSERT INTO projection_backfills(name,target_item_id,last_item_id)
+                                   VALUES ('redaction-v3',%s,0)""",
+                                (target,),
+                            )
+                            state = {
+                                "target_item_id": target,
+                                "last_item_id": 0,
+                                "completed_at": None,
+                            }
+                        if state["completed_at"] is not None:
+                            break
+                        rows = conn.execute(
+                            """SELECT id,source_id,text_redacted FROM items
+                               WHERE id>%s AND id<=%s ORDER BY id LIMIT %s""",
+                            (state["last_item_id"], state["target_item_id"], batch_size),
+                        ).fetchall()
+                        if not rows:
+                            conn.execute(
+                                """UPDATE projection_backfills SET completed_at=now(),updated_at=now()
+                                   WHERE name='redaction-v3'"""
+                            )
+                            conn.execute(
+                                "UPDATE sessions SET projector_version=%s WHERE projector_version<%s",
+                                (PROJECTOR_VERSION, PROJECTOR_VERSION),
+                            )
+                            conn.execute(
+                                """UPDATE projection_watermarks SET version=%s,updated_at=now()
+                                   WHERE projector='items' AND version<%s""",
+                                (PROJECTOR_VERSION, PROJECTOR_VERSION),
+                            )
+                            break
+
+                        row_ids = [row["id"] for row in rows]
+                        rows_by_id = {row["id"]: row for row in rows}
+                        safe_items = {
+                            row["id"]: redact_text(row["text_redacted"])
+                            for row in rows
+                        }
+                        changed_items = {
+                            row_id for row_id, safe in safe_items.items()
+                            if safe != rows_by_id[row_id]["text_redacted"]
+                        }
+                        chunks = conn.execute(
+                            """SELECT id,item_id,text_redacted FROM chunks
+                               WHERE item_id=ANY(%s)""",
+                            (row_ids,),
+                        ).fetchall()
+                        safe_chunks = {
+                            chunk["id"]: redact_text(chunk["text_redacted"])
+                            for chunk in chunks
+                        }
+                        changed_chunks = [
+                            chunk for chunk in chunks
+                            if safe_chunks[chunk["id"]] != chunk["text_redacted"]
+                        ]
+                        entity_rows = conn.execute(
+                            "SELECT item_id,value FROM entities WHERE item_id=ANY(%s)",
+                            (row_ids,),
+                        ).fetchall()
+                        unsafe_entity_items = {
+                            entity["item_id"] for entity in entity_rows
+                            if redact_text(entity["value"]) != entity["value"]
+                        }
+                        repair_entity_items = (
+                            changed_items
+                            | {chunk["item_id"] for chunk in changed_chunks}
+                            | unsafe_entity_items
+                        )
+
+                        for row_id in changed_items:
+                            conn.execute(
+                                "UPDATE items SET text_redacted=%s WHERE id=%s",
+                                (safe_items[row_id], row_id),
+                            )
+                        for chunk in changed_chunks:
+                            conn.execute(
+                                "UPDATE chunks SET text_redacted=%s WHERE id=%s",
+                                (safe_chunks[chunk["id"]], chunk["id"]),
+                            )
+                        for row_id in repair_entity_items:
+                            row = rows_by_id[row_id]
+                            conn.execute("DELETE FROM entities WHERE item_id=%s", (row_id,))
+                            projected = [
+                                (row_id, row["source_id"], kind, value, value.casefold())
+                                for kind, value in engine.extract_entities(safe_items[row_id])
+                            ]
+                            if projected:
+                                with conn.cursor() as cursor:
+                                    cursor.executemany(
+                                        """INSERT INTO entities(item_id,source_id,kind,value,normalized)
+                                           VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+                                        projected,
+                                    )
+
+                        conn.execute(
+                            "UPDATE items SET projector_version=%s WHERE id=ANY(%s)",
+                            (PROJECTOR_VERSION, row_ids),
+                        )
+                        last_item_id = rows[-1]["id"]
+                        completed = last_item_id >= state["target_item_id"]
+                        conn.execute(
+                            """UPDATE projection_backfills SET last_item_id=%s,
+                               completed_at=CASE WHEN %s THEN now() ELSE NULL END,updated_at=now()
+                               WHERE name='redaction-v3'""",
+                            (last_item_id, completed),
+                        )
+                        if completed:
+                            conn.execute(
+                                "UPDATE sessions SET projector_version=%s WHERE projector_version<%s",
+                                (PROJECTOR_VERSION, PROJECTOR_VERSION),
+                            )
+                            conn.execute(
+                                """UPDATE projection_watermarks SET version=%s,updated_at=now()
+                                   WHERE projector='items' AND version<%s""",
+                                (PROJECTOR_VERSION, PROJECTOR_VERSION),
+                            )
+                        batches += 1
+                        scanned += len(rows)
+                        rewritten += len(changed_items)
+                        rewritten_chunks += len(changed_chunks)
+                        rebuilt_entity_items += len(repair_entity_items)
+                        if completed:
+                            break
+                state = conn.execute(
+                    """SELECT target_item_id,last_item_id,completed_at
+                       FROM projection_backfills WHERE name='redaction-v3'"""
+                ).fetchone()
+            finally:
+                conn.execute(
+                    "SELECT pg_advisory_unlock(hashtextextended('recall:redaction-backfill-v3',0))"
+                )
+        return {
+            "batches": batches,
+            "items_scanned": scanned,
+            "items_rewritten": rewritten,
+            "chunks_rewritten": rewritten_chunks,
+            "entity_items_rebuilt": rebuilt_entity_items,
+            "target_item_id": state["target_item_id"],
+            "last_item_id": state["last_item_id"],
+            "completed": state["completed_at"] is not None,
+        }
+
     def export_raw(self) -> list[dict]:
         """Admin/offline API only; intentionally not routed by the HTTP app."""
         with self.connect() as conn:
