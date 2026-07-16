@@ -36,7 +36,10 @@ class FakeSemanticRuntime:
     def vector(text: str) -> list[float]:
         value = text.casefold()
         vector = [0.0] * 512
-        vector[0 if ("trip and cooldown" in value or "circuit breaker" in value) else 1] = 1.0
+        if "orchard premise" in value:
+            vector[2] = 1.0
+        else:
+            vector[0 if ("trip and cooldown" in value or "circuit breaker" in value) else 1] = 1.0
         return vector
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
@@ -120,7 +123,10 @@ def main() -> None:
     assert first["surface_scoped"] is True
     assert scoped_replay["processed"] == 0 and remaining["processed"] == 2
     assert second["processed"] == 0
-    assert all(row["native_id"] != "target" for row in stale["results"])
+    assert all(
+        "semantic" not in row["legs"]
+        for row in stale["results"] if row["native_id"] == "target"
+    )
     assert stale_metrics["embedding_lag"] == 1
     assert repaired["processed"] == 1
     assert runtime.plan_calls == planner_calls and runtime.query_calls > 0
@@ -130,7 +136,11 @@ def main() -> None:
     assert legs.index("semantic-0") < legs.index("rewrite-0")
     assert result["results"][0]["native_id"] == "target"
     assert "semantic" in result["results"][0]["legs"]
-    assert store.search("nonexistent orchard premise", {}, 5)["results"] == []
+    abstained = store.search("nonexistent orchard premise", {}, 5)
+    assert abstained["results"] == []
+    assert any(
+        leg["leg"] == "semantic-0" for leg in abstained["diagnostics"]["legs"]
+    )
     print(json.dumps({
         "status": "pass", "semantic_hit": 1, "unauthorized_hits": 0,
         "first_backfill": first["processed"] + remaining["processed"],

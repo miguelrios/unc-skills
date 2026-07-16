@@ -20,6 +20,7 @@ install -m 0644 ~/services/recall-brain/recall/server/deploy/recall-brain.servic
 install -m 0644 ~/services/recall-brain/recall/server/deploy/recall-brain-backup.service ~/.config/systemd/user/
 install -m 0644 ~/services/recall-brain/recall/server/deploy/recall-brain-backup.timer ~/.config/systemd/user/
 install -m 0644 ~/services/recall-brain/recall/server/deploy/recall-embedding.service ~/.config/systemd/user/
+install -m 0644 ~/services/recall-brain/recall/server/deploy/recall-embedding-backfill-sidecar.service ~/.config/systemd/user/
 install -m 0644 ~/services/recall-brain/recall/server/deploy/recall-embedding-backfill.service ~/.config/systemd/user/
 install -m 0644 ~/services/recall-brain/recall/server/deploy/recall-embedding-backfill.timer ~/.config/systemd/user/
 # Fill in service.env, then apply every schema before starting services or timers.
@@ -58,6 +59,10 @@ documents use a fingerprinted 4,096-character
 head-and-tail projection so a giant tool result cannot stall a complete backfill batch. The runtime
 verifies the exact model commit and float32 dtype against TEI `/info` before sending text. Search
 ignores stale fingerprints, dimensions, projector versions, and content hashes.
+
+Production backfill uses an identical second sidecar on `127.0.0.1:8090`. Keeping historical CPU
+inference separate prevents convergence work from rejecting live query embeddings. Neither port is
+served through Tailscale, and both runtimes enforce the same pinned single-input contract.
 
 Query planning is optional but, when enabled, must use the staging LiteLLM HTTPS router plus a
 short-lived model-scoped virtual key in a non-symlink owner-only file. A separate secret-manager

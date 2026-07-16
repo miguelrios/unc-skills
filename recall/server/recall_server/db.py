@@ -710,7 +710,8 @@ class BrainStore:
     def _semantic_leg(self, conn, vector: list[float], filters: dict,
                       *, authorized_source: str | None = None, limit: int = 100,
                       routed_source_ids: list[str] | None = None,
-                      deadline_at: float | None = None) -> list[dict]:
+                      deadline_at: float | None = None,
+                      minimum_similarity: float = 0.35) -> list[dict]:
         if self.semantic_runtime is None:
             return []
         where, params = self._read_filters(filters, authorized_source, routed_source_ids)
@@ -741,6 +742,7 @@ class BrainStore:
               AND embedding.projector_version=i.projector_version
               AND embedding.content_sha256=
                   encode(sha256(convert_to(i.text_redacted,'UTF8')),'hex')
+              AND 1-(embedding.embedding <=> %s::halfvec) >= %s
               AND {where}
             ORDER BY embedding.embedding <=> %s::halfvec,i.id DESC
             LIMIT %s
@@ -750,6 +752,8 @@ class BrainStore:
                 self.semantic_runtime.model,
                 self.semantic_runtime.fingerprint,
                 self.semantic_runtime.dimensions,
+                encoded,
+                minimum_similarity,
                 *params,
                 encoded,
                 limit,
@@ -797,24 +801,18 @@ class BrainStore:
         plan = None
         semantic_vectors: list[list[float]] = []
         semantic_error = None
+        planner_error = None
         planner_started = time.monotonic()
         if self.semantic_runtime is not None and not identifiers:
             try:
-                if len(informative) == 1:
-                    semantic_vectors = self.semantic_runtime.embed_queries([query])
-                elif redact_text(query) != query:
-                    # Sensitive-looking queries stay entirely local. They can
-                    # still use dense retrieval, but never leave through the
-                    # optional remote lexical planner.
-                    semantic_vectors = self.semantic_runtime.embed_queries([query])
-                else:
-                    plan = self.semantic_runtime.plan(query)
-                    if plan is not None and plan.searchable:
-                        semantic_vectors = self.semantic_runtime.embed_queries([query])
+                semantic_vectors = self.semantic_runtime.embed_queries([query])
             except Exception as exc:
                 semantic_error = type(exc).__name__
-                plan = None
-                semantic_vectors = []
+            if len(informative) > 1 and redact_text(query) == query:
+                try:
+                    plan = self.semantic_runtime.plan(query)
+                except Exception as exc:
+                    planner_error = type(exc).__name__
         planner_elapsed_ms = round((time.monotonic() - planner_started) * 1000, 3)
         candidates: dict[int, dict] = {}
         database_started = time.monotonic()
@@ -899,10 +897,13 @@ class BrainStore:
                     # before optional planner rewrites so a slow lexical rescue
                     # cannot consume the complete database deadline.
                     for vector_index, semantic_vector in enumerate(semantic_vectors):
+                        minimum_similarity = (
+                            0.4 if plan is not None and not plan.searchable else 0.35
+                        )
                         semantic_rows = run_leg(f"semantic-{vector_index}", lambda semantic_vector=semantic_vector: self._semantic_leg(
                             conn, semantic_vector, filters, authorized_source=authorized_source,
                             routed_source_ids=routed_source_ids, deadline_at=deadline_at,
-                            limit=max(100, limit * 10),
+                            limit=max(100, limit * 10), minimum_similarity=minimum_similarity,
                         ))
                         if vector_index == 0:
                             for semantic_row in semantic_rows:
@@ -1061,6 +1062,7 @@ class BrainStore:
             "semantic": {
                 "configured": self.semantic_runtime is not None,
                 "planner_used": plan is not None,
+                "planner_error_type": planner_error,
                 "searchable": None if plan is None else plan.searchable,
                 "phrase_count": 0 if plan is None else len(plan.phrases),
                 "planner_elapsed_ms": planner_elapsed_ms,
