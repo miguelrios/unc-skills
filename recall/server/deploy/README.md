@@ -64,7 +64,8 @@ Production backfill uses an identical second sidecar on `127.0.0.1:8090`. Keepin
 inference separate prevents convergence work from rejecting live query embeddings. Neither port is
 served through Tailscale, and both runtimes enforce the same pinned single-input contract. The worker
 sets its endpoint at `ExecStart`, after `EnvironmentFile` loading, so the live-query URL cannot override
-the dedicated backfill route through systemd environment precedence.
+the dedicated backfill route through systemd environment precedence. Its 120-second transport timeout
+allows long CPU inference to finish under contention without relaxing the live-query timeout.
 
 Query planning is optional but, when enabled, must use the staging LiteLLM HTTPS router plus a
 short-lived model-scoped virtual key in a non-symlink owner-only file. A separate secret-manager
