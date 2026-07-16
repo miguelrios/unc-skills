@@ -62,7 +62,9 @@ ignores stale fingerprints, dimensions, projector versions, and content hashes.
 
 Production backfill uses an identical second sidecar on `127.0.0.1:8090`. Keeping historical CPU
 inference separate prevents convergence work from rejecting live query embeddings. Neither port is
-served through Tailscale, and both runtimes enforce the same pinned single-input contract.
+served through Tailscale, and both runtimes enforce the same pinned single-input contract. The worker
+sets its endpoint at `ExecStart`, after `EnvironmentFile` loading, so the live-query URL cannot override
+the dedicated backfill route through systemd environment precedence.
 
 Query planning is optional but, when enabled, must use the staging LiteLLM HTTPS router plus a
 short-lived model-scoped virtual key in a non-symlink owner-only file. A separate secret-manager
