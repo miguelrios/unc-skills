@@ -22,6 +22,63 @@ ENVELOPE_FIELDS = {
 }
 
 
+def _load_typed_record_fields() -> dict[str, dict[str, Any]]:
+    path = Path(__file__).resolve().parents[2] / "contracts" / "connector_v2.json"
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError("connector v2 contract is unavailable") from error
+    if not isinstance(value, dict) or value.get("schema_version") != 2:
+        raise RuntimeError("connector v2 contract is invalid")
+    result = {}
+    for kind, schema in value.get("record_kinds", {}).items():
+        if (
+            not isinstance(kind, str) or not isinstance(schema, dict)
+            or set(schema) != {"required", "optional", "properties"}
+        ):
+            raise RuntimeError("connector v2 contract is invalid")
+        required = set(schema.get("required", ()))
+        optional = set(schema.get("optional", ()))
+        properties = schema.get("properties")
+        if (
+            "kind" not in required or required & optional
+            or not isinstance(properties, dict)
+            or required | optional != set(properties)
+        ):
+            raise RuntimeError("connector v2 contract is invalid")
+        result[kind] = {"required": required, "optional": optional, "properties": properties}
+    if not result:
+        raise RuntimeError("connector v2 contract is invalid")
+    return result
+
+
+TYPED_RECORD_FIELDS = _load_typed_record_fields()
+TYPED_CONNECTOR_KINDS = set(TYPED_RECORD_FIELDS)
+
+
+def _valid_typed_value(value: Any, specification: dict[str, Any]) -> bool:
+    value_type = specification.get("type")
+    valid = (
+        (value_type == "string" and isinstance(value, str))
+        or (value_type == "boolean" and type(value) is bool)
+        or (value_type == "number" and type(value) in {int, float})
+        or (value_type == "object" and isinstance(value, dict))
+        or (
+            value_type == "string_list" and isinstance(value, list)
+            and all(isinstance(item, str) for item in value)
+        )
+        or (
+            value_type == "object_list" and isinstance(value, list)
+            and all(isinstance(item, dict) for item in value)
+        )
+    )
+    return (
+        valid
+        and ("const" not in specification or value == specification["const"])
+        and ("enum" not in specification or value in specification["enum"])
+    )
+
+
 def redact_text(value: str) -> str:
     safe = legacy_engine().clean_text(value)
     return safe.replace("[redacted-private-key-block]", "[REDACTED-PRIVATE-KEY]").replace(
@@ -122,6 +179,25 @@ def validate_envelope(envelope: dict) -> dict:
     provenance = envelope.get("provenance", {})
     if not isinstance(provenance, dict):
         raise ValueError("provenance must be an object")
+    connector_schema_version = provenance.get("connector_schema_version")
+    if connector_schema_version is not None:
+        if type(connector_schema_version) is not int or connector_schema_version not in {1, 2}:
+            raise ValueError("unsupported connector schema_version")
+        if connector_schema_version == 2 and envelope["kind"] != "tombstone":
+            content = envelope["content"]
+            schema = TYPED_RECORD_FIELDS.get(content.get("kind")) if isinstance(content, dict) else None
+            fields = set(content) if isinstance(content, dict) else set()
+            if envelope["kind"] != "connector_record" or schema is None:
+                raise ValueError("invalid typed connector record")
+            if (
+                schema["required"] - fields
+                or fields - schema["required"] - schema["optional"]
+                or any(
+                    not _valid_typed_value(content[field], schema["properties"][field])
+                    for field in fields
+                )
+            ):
+                raise ValueError("invalid typed connector record")
     claimed = envelope["content_sha256"]
     if not isinstance(claimed, str) or not CONTENT_SHA256_RE.fullmatch(claimed):
         raise ValueError("invalid content_sha256")
@@ -229,6 +305,43 @@ def project(envelope: dict, revision: int) -> tuple[list[dict], dict]:
             metadata[key] = redact_text(str(provenance[key]))
 
     if kind == "tombstone":
+        return items, metadata
+
+    record_kind = content.get("kind") if isinstance(content, dict) else None
+    if (
+        kind == "connector_record"
+        and provenance.get("connector_schema_version") == 2
+        and record_kind in TYPED_CONNECTOR_KINDS
+    ):
+        metadata["record_kind"] = record_kind
+        if record_kind == "communication_message.v1":
+            parts = [content.get("subject"), content.get("text")]
+            role = content.get("direction")
+        elif record_kind == "calendar_event.v1":
+            parts = [content.get("title"), content.get("description"), content.get("location")]
+            role = "event"
+        elif record_kind == "contact_identity.v1":
+            parts = [
+                content.get("display_name"), content.get("identifier"),
+                content.get("organization"), content.get("title"),
+            ]
+            role = content.get("role") or "contact"
+        elif record_kind == "social_post.v1":
+            parts = [content.get("text")]
+            role = content.get("stream_type")
+        else:
+            parts = [content.get("name"), content.get("text")]
+            role = "document"
+        cleaned = redact_text("\n".join(str(value) for value in parts if value not in {None, ""}))
+        items.append({
+            "ordinal": 0,
+            "occurred_at": envelope["occurred_at"],
+            "role": role,
+            "surface": record_kind,
+            "text_redacted": cleaned,
+            "entities": projected_entities(legacy_engine(), cleaned),
+            "receipt": item_receipt(envelope["source_id"], envelope["native_id"], revision, 0),
+        })
         return items, metadata
 
     if kind == "transcript_record":

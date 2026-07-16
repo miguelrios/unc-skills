@@ -12,7 +12,8 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from types import MappingProxyType
+from typing import Any, Callable, Mapping
 from urllib.parse import urlparse
 
 from client.mac import BrainClient, load_file_token, load_keychain_token
@@ -158,6 +159,80 @@ class GrepOptions:
 
 
 @dataclass(frozen=True)
+class HostedConnectorFactory:
+    parse_options: Callable[[Mapping[str, Any]], ExportOptions | GrepOptions]
+    authority_slots: tuple[str, ...]
+    source_authority: Callable[[ExportOptions | GrepOptions], AuthorityReference | None]
+    durable_paths: Callable[[ExportOptions | GrepOptions], tuple[Path, ...]]
+    build: Callable[[ExportOptions | GrepOptions, str, str, Any], tuple[Any, Path]]
+
+
+def _no_source_authority(_options: ExportOptions | GrepOptions) -> None:
+    return None
+
+
+def _grep_source_authority(options: ExportOptions | GrepOptions) -> AuthorityReference:
+    if not isinstance(options, GrepOptions):
+        raise ConnectorHostError("invalid_factory_options")
+    return options.source_authority
+
+
+def _export_paths(options: ExportOptions | GrepOptions) -> tuple[Path, ...]:
+    if not isinstance(options, ExportOptions):
+        raise ConnectorHostError("invalid_factory_options")
+    return options.catalog, options.spool
+
+
+def _grep_paths(options: ExportOptions | GrepOptions) -> tuple[Path, ...]:
+    if not isinstance(options, GrepOptions):
+        raise ConnectorHostError("invalid_factory_options")
+    return (options.spool,)
+
+
+def _build_export(options: ExportOptions | GrepOptions, source_id: str,
+                  privacy_mode: str, _transport: Any) -> tuple[Any, Path]:
+    if not isinstance(options, ExportOptions):
+        raise ConnectorHostError("invalid_factory_options")
+    connector = ExportInboxConnector(
+        inbox=options.inbox, catalog_path=options.catalog,
+        source_id=source_id, page_size=options.page_size,
+        privacy_mode=privacy_mode,
+    )
+    return connector, options.spool
+
+
+def _build_grep(options: ExportOptions | GrepOptions, source_id: str,
+                _privacy_mode: str, transport: Any) -> tuple[Any, Path]:
+    if not isinstance(options, GrepOptions):
+        raise ConnectorHostError("invalid_factory_options")
+    connector = GrepAIConnector(
+        api_key=options.source_authority.load_source(),
+        source_id=source_id, max_pages=options.max_pages,
+        page_size=options.page_size, timeout=options.timeout_seconds,
+        transport=transport,
+    )
+    return connector, options.spool
+
+
+HOSTED_FACTORIES: Mapping[str, HostedConnectorFactory] = MappingProxyType({
+    "openai.export-inbox": HostedConnectorFactory(
+        parse_options=ExportOptions.from_mapping,
+        authority_slots=("brain",),
+        source_authority=_no_source_authority,
+        durable_paths=_export_paths,
+        build=_build_export,
+    ),
+    "grep.ai": HostedConnectorFactory(
+        parse_options=GrepOptions.from_mapping,
+        authority_slots=("brain", "source"),
+        source_authority=_grep_source_authority,
+        durable_paths=_grep_paths,
+        build=_build_grep,
+    ),
+})
+
+
+@dataclass(frozen=True)
 class HostedJobDefinition:
     schedule: ScheduleDefinition
     source_id: str
@@ -180,16 +255,14 @@ class HostedJobDefinition:
         endpoint = _endpoint(value["endpoint"])
         brain = AuthorityReference.from_mapping(value["brain_authority"])
         privacy_mode = value["privacy_mode"]
-        if schedule.connector_id == "openai.export-inbox":
-            connector = ExportOptions.from_mapping(value["connector"])
-            authorities = {"brain"}
-        elif schedule.connector_id == "grep.ai":
-            connector = GrepOptions.from_mapping(value["connector"])
-            authorities = {"brain", "source"}
-            if brain.fingerprint() == connector.source_authority.fingerprint():
-                raise ConnectorHostError("authority_alias")
-        else:
+        factory = HOSTED_FACTORIES.get(schedule.connector_id)
+        if factory is None:
             raise ConnectorHostError("connector_not_hosted")
+        connector = factory.parse_options(value["connector"])
+        authorities = set(factory.authority_slots)
+        source_authority = factory.source_authority(connector)
+        if source_authority is not None and brain.fingerprint() == source_authority.fingerprint():
+            raise ConnectorHostError("authority_alias")
         try:
             validate_policy(
                 schedule.connector_id, visibility="private",
@@ -201,13 +274,11 @@ class HostedJobDefinition:
 
     @property
     def source_authority(self) -> AuthorityReference | None:
-        return self.connector.source_authority if isinstance(self.connector, GrepOptions) else None
+        return HOSTED_FACTORIES[self.schedule.connector_id].source_authority(self.connector)
 
     @property
     def durable_paths(self) -> tuple[Path, ...]:
-        if isinstance(self.connector, ExportOptions):
-            return (self.connector.catalog, self.connector.spool)
-        return (self.connector.spool,)
+        return HOSTED_FACTORIES[self.schedule.connector_id].durable_paths(self.connector)
 
     def to_mapping(self) -> dict[str, Any]:
         return {
@@ -375,21 +446,10 @@ def build_host(config: ConnectorHostConfig, *, state_path: Path, grep_transport:
                 endpoint=item.endpoint, token=item.brain_authority.load_brain(),
                 source_id=item.source_id, principal_id="owner", visibility="private",
             )
-            if isinstance(item.connector, ExportOptions):
-                connector = ExportInboxConnector(
-                    inbox=item.connector.inbox, catalog_path=item.connector.catalog,
-                    source_id=item.source_id, page_size=item.connector.page_size,
-                    privacy_mode=item.privacy_mode,
-                )
-                spool = item.connector.spool
-            else:
-                connector = GrepAIConnector(
-                    api_key=item.connector.source_authority.load_source(),
-                    source_id=item.source_id, max_pages=item.connector.max_pages,
-                    page_size=item.connector.page_size, timeout=item.connector.timeout_seconds,
-                    transport=grep_transport,
-                )
-                spool = item.connector.spool
+            factory = HOSTED_FACTORIES[item.schedule.connector_id]
+            connector, spool = factory.build(
+                item.connector, item.source_id, item.privacy_mode, grep_transport,
+            )
             runner = ConnectorRunner(
                 connector=connector, brain=brain, spool_path=spool, privacy=privacy,
             )

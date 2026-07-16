@@ -10,7 +10,9 @@ from typing import Any, Mapping
 
 SOURCE_FAMILIES = frozenset({
     "coding_history", "deliberate_capture", "user_export",
-    "third_party_research",
+    "third_party_research", "communications", "schedule", "contacts",
+    "social", "documents", "work_activity", "local_activity",
+    "personal_media",
 })
 QUALITY_SCORES = {
     "unrated": 0.25,

@@ -16,7 +16,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from . import PROJECTOR_VERSION
-from .federation import SourceProfile, freshness_score, normalized_evidence
+from .federation import SOURCE_FAMILIES, SourceProfile, freshness_score, normalized_evidence
 from .projectors import KIND_RE, SOURCE_ID_RE, advisory_lock_key, canonical_json, effective_session_id, event_receipt, legacy_engine, partial_lexical_probes, phrase_query_spec, preferred_phrase_probes, project, redact_text, validate_envelope
 from .ranking import DEFAULT_SEARCH_DEADLINE_MS, evidence_rank_components, should_run_partial
 from .semantic import SemanticRuntime
@@ -590,7 +590,7 @@ class BrainStore:
             clauses.append("i.source_id = %s"); params.append(source_id)
         if filters.get("source_family"):
             family = filters["source_family"]
-            if family not in {"coding_history", "deliberate_capture", "user_export", "third_party_research"}:
+            if family not in SOURCE_FAMILIES:
                 raise ValueError("unsupported source_family filter")
         if filters.get("source_alias"):
             alias = filters["source_alias"]
@@ -618,7 +618,7 @@ class BrainStore:
         routed: set[str] | None = None
         family = filters.get("source_family")
         if family is not None:
-            if family not in {"coding_history", "deliberate_capture", "user_export", "third_party_research"}:
+            if family not in SOURCE_FAMILIES:
                 raise ValueError("unsupported source_family filter")
             family_sources = {
                 row["source_id"] for row in conn.execute(

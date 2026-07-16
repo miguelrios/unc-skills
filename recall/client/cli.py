@@ -276,6 +276,8 @@ def parser() -> argparse.ArgumentParser:
     search.add_argument("--route-source-id")
     search.add_argument("--source-family", choices=(
         "coding_history", "deliberate_capture", "user_export", "third_party_research",
+        "communications", "schedule", "contacts", "social", "documents",
+        "work_activity", "local_activity", "personal_media",
     ))
     search.add_argument("--source-alias")
 

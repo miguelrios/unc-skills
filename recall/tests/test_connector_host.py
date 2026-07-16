@@ -12,6 +12,7 @@ from unittest import mock
 
 from client import cli as client_cli
 from connectors.host import (
+    HOSTED_FACTORIES,
     ConnectorHostConfig,
     ConnectorHostError,
     build_host,
@@ -120,6 +121,12 @@ class FrozenHostConfigTest(unittest.TestCase):
 
 
 class ClosedFactoryTest(unittest.TestCase):
+    def test_factory_registry_is_closed_and_has_no_discovery_surface(self) -> None:
+        self.assertEqual(tuple(HOSTED_FACTORIES), ("openai.export-inbox", "grep.ai"))
+        with self.assertRaises(TypeError):
+            HOSTED_FACTORIES["runtime.plugin"] = object()
+        self.assertFalse(set(HOSTED_FACTORIES) & {"entrypoint", "module", "command"})
+
     def test_factory_uses_only_bundled_types_and_separate_authorities(self) -> None:
         value = ConnectorHostConfig.from_mapping(json.loads(CORPUS.read_text().splitlines()[2])["config"])
         with tempfile.TemporaryDirectory() as directory, \
