@@ -83,15 +83,16 @@ class FailingSemanticRuntime(FakeSemanticRuntime):
         raise RuntimeError("synthetic embedding failure")
 
 
-def envelope(source: str, native: str, text: str, parent: str) -> dict:
-    content = {"role": "user", "text": text}
+def envelope(source: str, native: str, text: str, parent: str, *,
+             role: str = "user", occurred_at: str = "2026-07-16T00:00:00Z") -> dict:
+    content = {"role": role, "text": text}
     return {
         "schema_version": 1,
         "source_id": source,
         "native_id": native,
         "native_parent_id": parent,
         "kind": "message",
-        "occurred_at": "2026-07-16T00:00:00Z",
+        "occurred_at": occurred_at,
         "observed_at": "2026-07-16T00:00:01Z",
         "principal_id": "owner",
         "visibility": "private",
@@ -179,6 +180,36 @@ def main() -> None:
     assert any(
         leg["leg"] == "semantic-0" for leg in abstained["diagnostics"]["legs"]
     )
+    store.ingest("answer-adjacency-h", [
+        envelope(
+            "source-h", "question", "What did we decide about the orchard premise?", "session-h",
+        ),
+        envelope(
+            "source-h", "next-question", "What should we review next?", "session-h",
+            occurred_at="2026-07-16T00:03:00Z",
+        ),
+        envelope(
+            "source-h", "progress", "I am checking the relevant constraints.", "session-h",
+            role="assistant", occurred_at="2026-07-16T00:01:00Z",
+        ),
+        envelope(
+            "source-h", "answer", "The final decision was to use river stones.", "session-h",
+            role="assistant", occurred_at="2026-07-16T00:02:00Z",
+        ),
+    ])
+    assert store.embed_pending(batch_size=10, source_id="source-h")["processed"] == 4
+    adjacent = store.search(
+        "remind me what we chose for the orchard premise", {}, 5,
+        authorized_source="source-h",
+    )
+    assert adjacent["results"][0]["native_id"] == "answer", adjacent
+    assert "answer" in adjacent["results"][0]["legs"]
+    bounded_answer = store.search(
+        "remind me what we chose for the orchard premise",
+        {"until": "2026-07-16T00:01:30Z"}, 5,
+        authorized_source="source-h",
+    )
+    assert bounded_answer["results"][0]["native_id"] == "progress", bounded_answer
     store.ingest("parallel-c", [
         envelope("source-c", "parallel-c", "Parallel source C.", "session-c"),
     ])
@@ -290,7 +321,8 @@ def main() -> None:
     )
     assert recovered_claim["processed"] == 1
     print(json.dumps({
-        "status": "pass", "semantic_hit": 1, "unauthorized_hits": 0,
+        "status": "pass", "semantic_hit": 1, "answer_adjacency_hit": 1,
+        "unauthorized_hits": 0,
         "first_backfill": first["processed"] + remaining["processed"],
         "idempotent_replay": second["processed"], "source_scoped_replay": 0,
         "stale_vectors_searched": 0, "stale_vectors_repaired": repaired["processed"],

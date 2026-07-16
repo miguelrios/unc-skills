@@ -392,8 +392,15 @@ class EnvelopeContractTest(unittest.TestCase):
             matched_count=1, informative_count=6, has_identifier=False,
             recency_factor=1.0,
         )
+        answer = evidence_rank_components(
+            legs={"answer"}, surface="message", lexical_rank=0.2,
+            matched_count=0, informative_count=6, has_identifier=False,
+            recency_factor=0.5,
+        )
         self.assertEqual(identifier["evidence_class"], "identifier")
-        self.assertGreater(tuple(identifier["rank_key"]), tuple(phrase_command["rank_key"]))
+        self.assertEqual(answer["evidence_class"], "answer")
+        self.assertGreater(tuple(identifier["rank_key"]), tuple(answer["rank_key"]))
+        self.assertGreater(tuple(answer["rank_key"]), tuple(phrase_command["rank_key"]))
         self.assertGreater(tuple(phrase_command["rank_key"]), tuple(phrase_echo["rank_key"]))
         self.assertGreater(tuple(phrase_echo["rank_key"]), tuple(error_entity["rank_key"]))
         semantic = evidence_rank_components(

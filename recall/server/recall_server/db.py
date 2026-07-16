@@ -779,6 +779,90 @@ class BrainStore:
         ).fetchall()
         return [{**dict(row), "leg": "semantic", "tier": 2} for row in rows]
 
+    def _answer_leg(self, conn, anchors: list[dict], filters: dict, *,
+                    deadline_at: float | None = None) -> list[dict]:
+        """Promote the final assistant item in a matched user's conversational turn."""
+        bounded = sorted(
+            anchors,
+            key=lambda row: (
+                float(row.get("fusion_score", 0.0)),
+                float(row.get("lexical_rank", 0.0)),
+                int(row["id"]),
+            ),
+            reverse=True,
+        )[:20]
+        if not bounded:
+            return []
+        rows = self._execute_bounded(
+            conn,
+            """
+            WITH anchors AS (
+              SELECT *
+              FROM unnest(%s::bigint[],%s::double precision[],%s::integer[])
+                   WITH ORDINALITY AS value(anchor_id,lexical_rank,anchor_tier,anchor_order)
+            ), answers AS (
+              SELECT value.lexical_rank,value.anchor_tier,value.anchor_order,response.id
+              FROM anchors value
+              JOIN items anchor ON anchor.id=value.anchor_id
+              JOIN LATERAL (
+                SELECT candidate.id
+                FROM items candidate
+                WHERE anchor.role='user'
+                  AND candidate.source_id=anchor.source_id
+                  AND candidate.session_native_id=anchor.session_native_id
+                  AND candidate.deleted_at IS NULL
+                  AND candidate.role='assistant'
+                  AND (candidate.occurred_at,candidate.id)>(anchor.occurred_at,anchor.id)
+                  AND (%s::timestamptz IS NULL OR candidate.occurred_at >= %s::timestamptz)
+                  AND (%s::timestamptz IS NULL OR candidate.occurred_at <= %s::timestamptz)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM items boundary
+                    WHERE boundary.source_id=anchor.source_id
+                      AND boundary.session_native_id=anchor.session_native_id
+                      AND boundary.deleted_at IS NULL
+                      AND boundary.role='user'
+                      AND (boundary.occurred_at,boundary.id)>(anchor.occurred_at,anchor.id)
+                      AND (boundary.occurred_at,boundary.id)<(candidate.occurred_at,candidate.id)
+                  )
+                ORDER BY candidate.occurred_at DESC,candidate.id DESC
+                LIMIT 1
+              ) response ON true
+              WHERE anchor.deleted_at IS NULL
+            )
+            SELECT i.id,i.source_id,i.session_native_id,i.event_native_id,i.occurred_at,i.surface,
+                   i.text_redacted,i.receipt,i.projector_version,s.started_at,s.ended_at,s.metadata,
+                   se.envelope #>> '{provenance,original_path}' AS path,se.observed_at,
+                   coalesce(sp.family,'unclassified') AS source_family,
+                   coalesce(sp.quality,'unrated') AS source_quality,
+                   coalesce(sp.freshness_half_life_days,180) AS freshness_half_life_days,
+                   (sp.source_id IS NOT NULL) AS source_profiled,
+                   answers.lexical_rank::real AS lexical_rank,
+                   answers.anchor_tier
+            FROM answers
+            JOIN items i ON i.id=answers.id
+            JOIN sessions s ON s.source_id=i.source_id AND s.native_id=i.session_native_id
+            JOIN source_events se ON se.id=i.event_id
+            LEFT JOIN source_profiles sp ON sp.source_id=i.source_id
+            ORDER BY answers.anchor_order
+            """,
+            [
+                [int(row["id"]) for row in bounded],
+                [float(row.get("lexical_rank", 0.0)) for row in bounded],
+                [int(row.get("tier", 1)) for row in bounded],
+                filters.get("since"), filters.get("since"),
+                filters.get("until"), filters.get("until"),
+            ],
+            deadline_at,
+        ).fetchall()
+        return [
+            {
+                **{key: value for key, value in dict(row).items() if key != "anchor_tier"},
+                "leg": "answer",
+                "tier": max(2, int(row["anchor_tier"])),
+            }
+            for row in rows
+        ]
+
     def search(self, query: str, filters: dict | None = None, limit: int = 10,
                authorized_source: str | None = None) -> dict:
         if not isinstance(query, str) or not query.strip():
@@ -1002,6 +1086,10 @@ class BrainStore:
                         conn, " ".join(informative), "plainto_tsquery", filters, "all", 1,
                         authorized_source=authorized_source, deadline_at=deadline_at,
                         routed_source_ids=routed_source_ids,
+                    )))
+                if not identifiers and candidates:
+                    merge(run_leg("answer", lambda: self._answer_leg(
+                        conn, list(candidates.values()), filters, deadline_at=deadline_at,
                     )))
         except SearchDeadlineExceeded:
             pass
