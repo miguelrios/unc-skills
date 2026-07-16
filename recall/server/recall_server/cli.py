@@ -33,6 +33,7 @@ def main() -> None:
     backfill_embeddings.add_argument("--batch-size", type=int, default=128)
     backfill_embeddings.add_argument("--max-batches", type=int)
     backfill_embeddings.add_argument("--source-id")
+    backfill_embeddings.add_argument("--surface")
     sub.add_parser("export")
     create_token = sub.add_parser("token-create"); create_token.add_argument("name"); create_token.add_argument("--source"); create_token.add_argument("--scopes", default="read,write"); create_token.add_argument("--output", required=True, help="write the one-time plaintext credential to a new mode-0600 file")
     revoke_token = sub.add_parser("token-revoke"); revoke_token.add_argument("name")
@@ -66,7 +67,7 @@ def main() -> None:
         ), sort_keys=True))
     elif args.command == "backfill-embeddings":
         print(json.dumps(store.embed_pending(
-            args.batch_size, args.max_batches, args.source_id,
+            args.batch_size, args.max_batches, args.source_id, args.surface,
         ), sort_keys=True))
     elif args.command == "export":
         for envelope in store.export_raw(): print(json.dumps(envelope, sort_keys=True))

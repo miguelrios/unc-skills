@@ -80,9 +80,10 @@ On a large existing brain, converge high-value sources first without changing gl
 
 ```bash
 python -m recall_server.cli backfill-embeddings --source-id SOURCE_ID --batch-size 128
+python -m recall_server.cli backfill-embeddings --source-id SOURCE_ID --surface user --batch-size 128
 ```
 
-The source selector changes scheduling only. Metrics and search compatibility remain global, and an
+The optional source and surface selectors change scheduling only. Metrics and search compatibility remain global, and an
 unscoped replay finishes every remaining source. The packaged oneshot has no start timeout because a
 bounded batch on CPU can legitimately exceed the systemd manager default; batch and timer bounds still
 provide resumable checkpoints.
