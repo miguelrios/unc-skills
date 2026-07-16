@@ -24,6 +24,8 @@ def evidence_rank_components(*, legs: set[str], surface: str, lexical_rank: floa
     """Return an observable, content-free evidence vector and its ordering key."""
     if "identifier" in legs or ("entity" in legs and has_identifier):
         evidence_class, class_priority = "identifier", 4
+    elif "answer" in legs:
+        evidence_class, class_priority = "answer", 3
     elif "phrase" in legs:
         evidence_class, class_priority = "phrase", 3
     elif "entity" in legs:
@@ -34,7 +36,11 @@ def evidence_rank_components(*, legs: set[str], surface: str, lexical_rank: floa
         evidence_class, class_priority = "structural", 1
     else:
         evidence_class, class_priority = "broad", 0
-    origin_priority = 1 if evidence_class == "phrase" and surface == "tool_input" else 0
+    origin_priority = (
+        2 if evidence_class == "answer"
+        else 1 if evidence_class == "phrase" and surface == "tool_input"
+        else 0
+    )
     surface_weight = (
         {"user": 4.0, "assistant": 2.0, "tool_input": 1.5, "tool_output": 1.0}.get(surface, 1.0)
         if evidence_class in {"structural", "broad"}
