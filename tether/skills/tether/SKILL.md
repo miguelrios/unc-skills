@@ -37,6 +37,22 @@ Peer agents may collaborate through normal Slack conversation when Hermes is con
 
 Completion criterion: the result is posted to the same thread, or the same thread receives a sanitized failure explaining that no alternate session was used.
 
+## Attach An Existing Thread
+
+When a trusted launcher creates a fresh native agent session in response to an existing Slack turn, bind that exact thread without posting a second root message:
+
+```bash
+tether attach \
+  --channel C12345678 \
+  --thread-ts 1234567890.123456 \
+  --claude-session-id "$CLAUDE_SESSION_ID" \
+  --cwd /absolute/repo/path \
+  --idempotency-key "stable-launch-id" \
+  --json
+```
+
+The local broker refuses to replace another active binding. After attaching, use `tether reply --bridge-id ...` for the native session's result; subsequent human replies resume that captured session. Do not use attach to guess or repair a stale session identity.
+
 ## Operate safely
 
 - Keep secrets, raw credentials, private prompts, and sensitive findings out of notification text and source metadata.

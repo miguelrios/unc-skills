@@ -602,7 +602,7 @@ class Broker:
         status = {
             "ok": True,
             "implementation": "tether",
-            "protocol_version": 2,
+            "protocol_version": 3,
             "channel_configured": bool(effective_channel(config)),
             "owner_configured": bool(config.default_owner or allowed_users),
             "allowed_user_count": len(allowed_users),
@@ -683,6 +683,41 @@ class Broker:
             "message_ts": timestamp,
         }
 
+    def _attach(
+        self,
+        incoming: BridgeRequest,
+        config: Config,
+        allowed_users: tuple[str, ...],
+    ) -> dict[str, Any]:
+        request = BridgeRequest(incoming)
+        request["channel_id"] = str(request.get("channel_id") or effective_channel(config))
+        request["owner_user_id"] = str(
+            request.get("owner_user_id") or config.default_owner or ("*" if allowed_users else "")
+        )
+        request["team_id"] = str(request.get("team_id") or config.team_id)
+        thread_ts = str(request.get("thread_ts") or "")
+        if not request["channel_id"] or not thread_ts:
+            raise ValueError("Slack channel and existing thread timestamp are required")
+        existing = self.store.find(request["team_id"], request["channel_id"], thread_ts)
+        if existing is not None:
+            if existing.idempotency_key == str(request.get("idempotency_key") or ""):
+                return {
+                    "ok": True,
+                    "bridge_id": existing.bridge_id,
+                    "thread_ts": existing.thread_ts,
+                    "deduplicated": True,
+                }
+            raise ValueError("Slack thread already has an active Tether binding")
+        bridge = self.store.create(request)
+        bridge = self.store.bind(bridge.bridge_id, thread_ts)
+        self.store.mark_participation(bridge.team_id, bridge.channel_id, thread_ts)
+        return {
+            "ok": True,
+            "bridge_id": bridge.bridge_id,
+            "thread_ts": bridge.thread_ts,
+            "deduplicated": False,
+        }
+
     def _history(self, request: BridgeRequest, config: Config) -> dict[str, Any]:
         limit = max(1, min(int(request.get("limit", 15)), 100))
         channel = str(request.get("channel_id") or effective_channel(config))
@@ -746,6 +781,9 @@ class Broker:
         if operation == "notify":
             with self._notify_lock:
                 return self._notify(request, config, allowed_users)
+        if operation == "attach":
+            with self._notify_lock:
+                return self._attach(request, config, allowed_users)
         if operation == "reply":
             return self._reply(request)
         if operation == "history":

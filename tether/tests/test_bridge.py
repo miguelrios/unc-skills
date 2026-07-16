@@ -181,7 +181,7 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(bridge.owner_user_id, "*", "Hermes's explicit allowlist is shared by default")
         self.assertEqual(status["allowed_user_count"], 2)
         self.assertEqual(status["implementation"], "tether")
-        self.assertEqual(status["protocol_version"], 2)
+        self.assertEqual(status["protocol_version"], 3)
         self.assertNotIn("allowed_users", status, "status reports readiness, never identities")
 
     def test_thread_history_stays_behind_broker_and_returns_sanitized_messages(self):
@@ -244,6 +244,40 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(result["thread_ts"], "123.456")
         self.assertEqual(self.store.recent_active_bridges(), [])
         self.assertTrue(self.store.participates("", "C12345678", "123.456"))
+
+    def test_attach_binds_existing_thread_without_posting(self):
+        broker = self.runtime.Broker("test-token", self.store)
+        with mock.patch.object(self.runtime, "slack_post") as post:
+            result = broker.handle({
+                "op": "attach",
+                "source_kind": "claude_session",
+                "source": {"session_id": "claude-1", "cwd": "/tmp/parcha"},
+                "owner_user_id": "U12345678",
+                "team_id": "T12345678",
+                "channel_id": "C12345678",
+                "thread_ts": "123.456",
+                "idempotency_key": "review-123.456",
+            })
+        post.assert_not_called()
+        self.assertEqual(result["thread_ts"], "123.456")
+        bridge = self.store.find("T12345678", "C12345678", "123.456")
+        self.assertEqual(bridge.source_kind, "claude_session")
+        self.assertEqual(bridge.source["session_id"], "claude-1")
+
+    def test_attach_refuses_to_replace_active_binding(self):
+        broker = self.runtime.Broker("test-token", self.store)
+        request = {
+            "op": "attach", "source_kind": "claude_session",
+            "source": {"session_id": "claude-1", "cwd": "/tmp/parcha"},
+            "owner_user_id": "U12345678", "team_id": "T12345678",
+            "channel_id": "C12345678", "thread_ts": "123.456",
+            "idempotency_key": "review-one",
+        }
+        broker.handle(request)
+        request["idempotency_key"] = "review-two"
+        request["source"] = {"session_id": "claude-2", "cwd": "/tmp/parcha"}
+        with self.assertRaisesRegex(ValueError, "already has an active"):
+            broker.handle(request)
 
     def test_thread_participation_survives_store_reopen_and_team_lookup(self):
         self.store.mark_participation("T12345678", "C12345678", "123.456")

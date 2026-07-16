@@ -11,6 +11,8 @@ One bridge binds:
 - one owner (`*` means any allowlisted operator and is the shared-channel default);
 - one idempotency key.
 
+A trusted local launcher may silently attach an existing Slack thread only after it has captured a concrete native session ID. Attach is idempotent and refuses to replace an active binding; it is not a semantic router or stale-session fallback.
+
 An explicit run ID always creates `headless_run`, even inside Codex or Claude Code. Native sessions remain the source when those agents run inside Zellij, but the captured and fingerprinted live pane is their delivery endpoint.
 
 ## Inbound routing
