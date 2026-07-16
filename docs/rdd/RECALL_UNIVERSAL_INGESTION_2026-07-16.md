@@ -258,6 +258,56 @@ kind.
 - List absence is not deletion.
 - Sources with provider compliance obligations declare a bounded deletion reconciliation job.
 
+### 6.4 Workspace acquisition rail
+
+Recall should not reimplement every Google REST client unless a required correctness property cannot
+be obtained from a maintained CLI. It introduces a closed `WorkspaceRail` boundary whose output is
+still normalized through the same connector-v2 contract:
+
+```text
+pinned CLI or direct API client
+  -> exact argv/method allowlist
+  -> structured JSON/NDJSON envelope
+  -> source-specific deterministic normalizer
+  -> privacy policy before spool/network
+  -> canonical Recall record + checkpoint
+```
+
+The first BUILD loop runs a pinned bakeoff rather than selecting by popularity:
+
+| Candidate | What it gives Recall | Main risk | Intended role |
+|---|---|---|---|
+| OpenClaw `gog` | task-first Gmail/Calendar/Drive/Docs/Contacts commands; stable JSON; non-interactive and read-only flags; exact command allowlists; untrusted-content wrapping; typed read-only MCP; Gmail history/watch with Pub/Sub pull and delivery-before-cursor-advance | third-party CLI and release cadence; task abstractions may omit raw sync fields for some services | leading production candidate, especially Gmail |
+| Google Workspace `gws` | Discovery-generated access to the full Workspace API surface; JSON/NDJSON; schema introspection; automatic pagination; 100+ agent skills; optional Model Armor response scanning | pre-v1 breaking changes, dynamic command surface, broad scopes and write methods unless Recall closes them | coverage candidate and raw-method escape hatch |
+| direct official APIs | exact control over request fields, cursors, errors, and reconciliation | maximum custom code, auth duplication, and maintenance | only where neither pinned CLI proves the required semantics |
+
+The result may be one CLI or a narrow hybrid, but each source has exactly one selected rail in a
+release. Swapping rails must replay the same synthetic conformance fixtures and prove canonical-record
+parity before live use. A rail is transport, not the Brain's data model and not a generic shell tool.
+`gws` Model Armor is a useful comparison point but is not enabled: Recall's model/judge traffic must
+use the approved staging LiteLLM route, so imported-content classification stays behind that boundary.
+
+Every CLI execution is closed and fail-safe:
+
+- pin version and release checksum; upgrades are explicit conformance-tested changes;
+- construct an argv vector without a shell, executable config, arbitrary subcommand, or user-supplied
+  flag passthrough;
+- allow only exact read methods required by the enabled source, plus capability-specific read-only and
+  no-send ceilings where the CLI supports them;
+- require non-interactive JSON/NDJSON, a frozen output schema, bounded pages/bytes/time, and explicit
+  exit-code handling; empty success output fails rather than advancing a cursor;
+- pass a minimal environment containing credential references, not the ambient agent environment;
+- disable verbose/body logging and sanitize stdout, stderr, and errors before any persistent log;
+- treat every returned field as untrusted source evidence, never as an instruction; and
+- keep CLI/MCP access internal to the collector. Recall never exposes a generic command bridge to an
+  answering agent.
+
+OpenClaw's useful pattern is the separation between a thin agent skill and a durable CLI. Recall reuses
+that boundary, the exact capability ceilings, and the Gmail delivery-before-checkpoint behavior. It
+does not copy OpenClaw's on-demand agent workflow wholesale: continuous ingestion remains a
+deterministic collector, and imported mail never becomes a hook prompt before Recall policy and
+admission checks.
+
 ## 7. Privacy and source policy
 
 Each source has an owner-private policy with closed fields:
@@ -350,18 +400,24 @@ and exclusion reason counts. It never exposes excluded content.
 
 ## 9. Source-specific acquisition decisions
 
-### 9.1 Gmail, Calendar, and Contacts
+### 9.1 Google Workspace
 
-- Use official Google OAuth with least-privilege read scopes and bring-your-own OAuth credentials
-  for the first owner deployment.
+- Use the L0-selected, pinned Workspace rail over official Google APIs with least-privilege read scopes
+  and bring-your-own OAuth credentials for the first owner deployment.
+- Prefer OpenClaw's operational shape where it proves the contract: non-interactive structured output,
+  exact command allowlists, read-only/no-send ceilings, untrusted-content wrapping, and Gmail Pub/Sub
+  pull so no public inbound endpoint is required.
 - Use Gmail `historyId` incremental sync; an expired history window triggers a bounded full
-  reconciliation.
+  reconciliation. CLI notifications are wakeups, never the canonical cursor or delivery receipt.
 - Use Calendar `syncToken`; HTTP 410 triggers a full reconciliation without logical duplicates.
-- Use message IDs as native IDs and thread IDs as parents.
-- Import Inbox and Sent so response state can be reconstructed.
-- Treat attachments as metadata until separately enabled.
-- Keep OAuth onboarding explicit about restricted scopes, personal-use status, refresh-token expiry,
-  revoke behavior, and any public-distribution verification requirement.
+- Use People API sync tokens for Contacts; ambiguous identity resolution remains a Recall projection,
+  not a CLI merge.
+- Add Drive and Docs through the same chosen rail when their stable IDs, revisions, exports, and change
+  checkpoints pass the connector contract; Sheets remains metadata unless explicitly selected.
+- Use message IDs as native IDs and thread IDs as parents. Import Inbox and Sent so response state can
+  be reconstructed. Treat attachments as metadata until separately enabled.
+- Keep OAuth onboarding explicit about restricted scopes, incremental consent, personal-use status,
+  refresh-token expiry, revoke behavior, and any public-distribution verification requirement.
 
 ### 9.2 iMessage
 
@@ -515,19 +571,21 @@ an owner-confirmed forget operation. Rollback never requires rewriting another s
 
 ## 14. Release decision
 
-Universal ingestion is not one giant release. Every connector and every shared substrate change is
-one bounded Cascade loop and one concern per PR. A loop exits only when its `EXIT.md` maps every
-criterion to safe evidence verified at merged HEAD. The final loop runs cross-device, cross-source
-questions, produces an aggregate verdict, drafts the successor chain from losing cells, and pauses
-for owner sign-off.
+Universal ingestion is five outcome-level Cascade loops, not a loop per connector. A loop may contain
+multiple small, serial PRs, but every PR still has one concern and the loop exits only after its
+system-level eval/E2E gate is green. Its `EXIT.md` maps every criterion to safe evidence verified at
+merged HEAD. The final loop runs cross-device, cross-source questions, produces an aggregate verdict,
+drafts the successor chain from losing cells, and pauses for owner sign-off.
 
 ## 15. Human decisions deliberately deferred to gates
 
 1. Approve this RDD and loop chain before BUILD.
-2. Choose WhatsApp export-only or explicitly accept linked-device experimental risk.
-3. Choose X rolling home-feed retention or keep durable ingestion limited to owner/saved streams.
-4. Opt into any attachment content, contextual-PII judge, or source-specific durable fact extraction.
-5. Accept the final User #1 quality and privacy verdict before broadening distribution.
+2. Approve the least-privilege Google services/scopes after the rail bakeoff; CLI selection itself is
+   an evidence decision, not a preference poll.
+3. Choose WhatsApp export-only or explicitly accept linked-device experimental risk.
+4. Choose X rolling home-feed retention or keep durable ingestion limited to owner/saved streams.
+5. Opt into any attachment content, contextual-PII judge, or source-specific durable fact extraction.
+6. Accept the final User #1 quality and privacy verdict before broadening distribution.
 
 ## 16. External design references
 
@@ -546,6 +604,13 @@ choices, but do not override the hard safety and evidence contracts in this RDD.
   pagination and sync-token behavior.
 - [Google OAuth guidance](https://developers.google.com/identity/protocols/oauth2) for incremental,
   least-privilege consent and separate API scopes.
+- [OpenClaw's `gog` skill](https://github.com/openclaw/openclaw/blob/main/skills/gog/SKILL.md),
+  [`gog` CLI](https://github.com/openclaw/gogcli), and
+  [Gmail watch design](https://github.com/openclaw/gogcli/blob/main/docs/watch.md) for the thin-skill,
+  constrained-CLI, Pub/Sub pull, retry, and delivery-before-checkpoint patterns.
+- [Google Workspace CLI](https://github.com/googleworkspace/cli) for Discovery-generated command
+  coverage, schema introspection, structured output, agent skills, and response sanitization. The
+  repository explicitly labels the CLI pre-v1 and not an officially supported Google product.
 - [Apple Full Disk Access guidance](https://support.apple.com/guide/mac-help/change-privacy-security-settings-mchl211c911f/mac)
   for explicit access to other applications' local data, including Messages.
 - [X timeline API](https://docs.x.com/x-api/posts/timelines/introduction) and
