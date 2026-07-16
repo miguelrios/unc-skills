@@ -13,6 +13,10 @@ class EmbeddingUnitContractTest(unittest.TestCase):
         self.assertIn("--max-batch-requests 1", unit)
         self.assertIn("-p 127.0.0.1:8089:80", unit)
 
+    def test_backfill_oneshot_does_not_time_out_a_valid_cpu_batch(self) -> None:
+        unit = (ROOT / "server" / "deploy" / "recall-embedding-backfill.service").read_text()
+        self.assertIn("TimeoutStartSec=infinity", unit)
+
 
 if __name__ == "__main__":
     unittest.main()
