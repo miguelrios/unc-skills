@@ -23,7 +23,10 @@ class EmbeddingUnitContractTest(unittest.TestCase):
             ROOT / "server" / "deploy" / "recall-embedding-backfill-sidecar.service"
         ).read_text()
         self.assertIn("Requires=recall-embedding-backfill-sidecar.service", worker)
-        self.assertIn("RECALL_EMBEDDING_URL=http://127.0.0.1:8090", worker)
+        self.assertIn(
+            "ExecStart=/usr/bin/env RECALL_EMBEDDING_URL=http://127.0.0.1:8090 ", worker,
+        )
+        self.assertNotIn("\nEnvironment=RECALL_EMBEDDING_URL=", worker)
         self.assertIn("-p 127.0.0.1:8090:80", sidecar)
         self.assertIn("--max-client-batch-size 1", sidecar)
         self.assertIn("--max-concurrent-requests 1", sidecar)
