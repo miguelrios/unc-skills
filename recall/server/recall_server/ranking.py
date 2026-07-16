@@ -7,7 +7,7 @@ DEFAULT_SEARCH_DEADLINE_MS = 300
 
 def retrieval_leg_order(identifiers: list[str]) -> tuple[str, ...]:
     """Exact identifiers get the deadline before any potentially broad phrase."""
-    return ("entity", "identifier") if identifiers else ("phrase", "entity", "partial", "all")
+    return ("entity", "identifier") if identifiers else ("semantic", "phrase", "entity", "partial", "all")
 
 
 def should_run_partial(*, candidate_count: int, result_limit: int) -> bool:

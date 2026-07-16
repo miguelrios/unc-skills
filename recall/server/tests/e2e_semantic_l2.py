@@ -169,6 +169,7 @@ def main() -> None:
         not leg["leg"].startswith("rewrite-")
         for leg in bounded["diagnostics"]["legs"]
     )
+    assert "phrase" not in [leg["leg"] for leg in bounded["diagnostics"]["legs"]]
     legs = [leg["leg"] for leg in result["diagnostics"]["legs"]]
     assert legs.index("semantic-0") < legs.index("rewrite-0")
     assert result["results"][0]["native_id"] == "target"
@@ -179,6 +180,9 @@ def main() -> None:
     assert abstained["results"] == []
     assert any(
         leg["leg"] == "semantic-0" for leg in abstained["diagnostics"]["legs"]
+    )
+    assert any(
+        leg["leg"] == "phrase" for leg in abstained["diagnostics"]["legs"]
     )
     store.ingest("answer-adjacency-h", [
         envelope(
