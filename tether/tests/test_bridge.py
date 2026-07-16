@@ -364,6 +364,22 @@ class StoreTest(unittest.TestCase):
         self.assertTrue(reopened.participates("T12345678", "C12345678", "123.456"))
         self.assertFalse(reopened.participates("T99999999", "C12345678", "123.456"))
 
+    def test_participating_thread_ingress_is_deduplicated_and_kept_recent(self):
+        self.store.mark_participation("T12345678", "C12345678", "123.456")
+        self.assertTrue(self.store.mark_thread_ingress(
+            "123.457", "T12345678", "C12345678", "123.456",
+        ))
+        self.assertFalse(self.store.mark_thread_ingress(
+            "123.457", "T12345678", "C12345678", "123.456",
+        ))
+        self.assertTrue(self.store.has_ingress("123.457"))
+        recent = self.store.recent_participating_threads()
+        self.assertIn(
+            ("T12345678", "C12345678", "123.456"),
+            [item[:3] for item in recent],
+        )
+        self.assertIsInstance(recent[0][3], float)
+
     def test_concurrent_idempotent_notifications_post_one_root_message(self):
         broker = self.runtime.Broker("test-token", self.store)
         request = {
@@ -1034,6 +1050,46 @@ class PluginRoutingTest(unittest.TestCase):
         recovered = asyncio.run(self.plugin._poll_recent_replies(Adapter()))
         self.assertEqual(recovered, 0)
         self.assertEqual(calls, ["history", "join"])
+
+    def test_reply_poller_recovers_unmentioned_participating_thread_reply(self):
+        self.plugin.store.mark_participation(
+            "T12345678", "C12345678", "123.456",
+        )
+        messages = [
+            {"ts": "123.456", "text": "root", "user": "U12345678"},
+            {
+                "ts": "123.457", "thread_ts": "123.456",
+                "text": "did you see this?", "user": "U12345678",
+            },
+        ]
+
+        class Client:
+            async def conversations_history(self, **_kwargs):
+                return {"ok": True, "messages": []}
+
+            async def conversations_join(self, **_kwargs):
+                raise AssertionError("already-accessible DM must not be joined")
+
+            async def conversations_replies(self, **_kwargs):
+                return {"messages": messages}
+
+        class Adapter:
+            def __init__(self):
+                self.events = []
+
+            def _get_client(self, _channel):
+                return Client()
+
+            async def _handle_slack_message(self, event):
+                self.events.append(event)
+
+        adapter = Adapter()
+        recovered = asyncio.run(self.plugin._poll_recent_replies(adapter))
+        recovered_again = asyncio.run(self.plugin._poll_recent_replies(adapter))
+        self.assertEqual(recovered, 1)
+        self.assertEqual(recovered_again, 0)
+        self.assertEqual(adapter.events[0]["text"], "did you see this?")
+        self.assertTrue(adapter.events[0]["_tether_polled"])
 
     def test_reply_poller_recovers_peer_bot_thread_turns_when_enabled(self):
         bridge = self.make_bridge()

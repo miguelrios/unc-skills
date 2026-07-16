@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import datetime
 import hashlib
 import json
 import http.client
@@ -252,6 +253,12 @@ class Store:
                   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                   PRIMARY KEY (team_id, channel_id, thread_ts)
                 );
+                CREATE TABLE IF NOT EXISTS thread_ingress (
+                  event_id TEXT PRIMARY KEY,
+                  team_id TEXT NOT NULL DEFAULT '', channel_id TEXT NOT NULL,
+                  thread_ts TEXT NOT NULL,
+                  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
                 """
             )
             columns = {row[1] for row in db.execute("PRAGMA table_info(bridge_events)")}
@@ -415,6 +422,52 @@ class Store:
                 ).fetchone()
             return row is not None
 
+    def recent_participating_threads(
+        self, hours: int = 168, limit: int = 500,
+    ) -> list[tuple[str, str, str, float]]:
+        hours = max(1, min(hours, 24 * 90))
+        limit = max(1, min(limit, 2_000))
+        with self.connect() as db:
+            rows = db.execute(
+                """
+                SELECT team_id,channel_id,thread_ts,updated_at FROM thread_participation
+                WHERE updated_at >= datetime('now', ?)
+                ORDER BY updated_at DESC LIMIT ?
+                """,
+                (f"-{hours} hours", limit),
+            ).fetchall()
+            return [
+                (
+                    row[0], row[1], row[2],
+                    datetime.datetime.fromisoformat(row[3]).replace(
+                        tzinfo=datetime.timezone.utc,
+                    ).timestamp(),
+                )
+                for row in rows
+            ]
+
+    def mark_thread_ingress(
+        self, event_id: str, team_id: str, channel_id: str, thread_ts: str,
+    ) -> bool:
+        if not event_id:
+            return False
+        with self.connect() as db:
+            try:
+                db.execute(
+                    "INSERT INTO thread_ingress(event_id,team_id,channel_id,thread_ts) VALUES(?,?,?,?)",
+                    (event_id, team_id, channel_id, thread_ts),
+                )
+                db.execute(
+                    """
+                    UPDATE thread_participation SET updated_at=CURRENT_TIMESTAMP
+                    WHERE team_id=? AND channel_id=? AND thread_ts=?
+                    """,
+                    (team_id, channel_id, thread_ts),
+                )
+                return True
+            except sqlite3.IntegrityError:
+                return False
+
     def recent_active_bridges(self, hours: int = 24, limit: int = 100) -> list[Bridge]:
         hours = max(1, min(hours, 168))
         limit = max(1, min(limit, 500))
@@ -450,6 +503,7 @@ class Store:
             return bool(
                 db.execute("SELECT 1 FROM bridge_ingress WHERE event_id=?", (event_id,)).fetchone()
                 or db.execute("SELECT 1 FROM bridge_events WHERE event_id=?", (event_id,)).fetchone()
+                or db.execute("SELECT 1 FROM thread_ingress WHERE event_id=?", (event_id,)).fetchone()
             )
 
     def claim_event(self, event_id: str, bridge_id: str) -> bool:
