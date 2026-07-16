@@ -913,7 +913,10 @@ class BrainStore:
                                 if len(dense_anchor_keys) >= max(1, limit - 1):
                                     break
                         merge(semantic_rows)
-                    if plan is not None and plan.searchable and plan.phrases:
+                    if (
+                        plan is not None and plan.searchable and plan.phrases
+                        and len(dense_anchor_keys) < max(1, limit - 1)
+                    ):
                         # Rewrites may only add high-precision evidence. Broad OR
                         # rewrites let one generic model phrase reshuffle an
                         # otherwise stable dense baseline. Exact multiword probes
