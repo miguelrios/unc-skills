@@ -352,7 +352,10 @@ class EnvelopeContractTest(unittest.TestCase):
 
     def test_identifier_plan_runs_exact_legs_before_any_phrase(self) -> None:
         self.assertEqual(retrieval_leg_order(["api-prod-6fcdc84dd4-mmjpj"]), ("entity", "identifier"))
-        self.assertEqual(retrieval_leg_order([]), ("phrase", "entity", "partial", "all"))
+        self.assertEqual(
+            retrieval_leg_order([]),
+            ("semantic", "phrase", "entity", "partial", "all"),
+        )
 
     def test_sentence_punctuation_is_not_part_of_an_identifier(self) -> None:
         engine = __import__("recall_server.projectors", fromlist=["legacy_engine"]).legacy_engine()

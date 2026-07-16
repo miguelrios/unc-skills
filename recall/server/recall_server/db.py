@@ -981,16 +981,10 @@ class BrainStore:
                             break
                 else:
                     phrase_spec = phrase_query_spec(preferred_phrase_probes(engine.phrase_queries(query)))
-                    if phrase_spec and len(informative) >= 2:
-                        phrase_query, phrase_function = phrase_spec
-                        merge(run_leg("phrase", lambda: self._lexical_leg(
-                            conn, phrase_query, phrase_function, filters, "phrase", 3,
-                            limit=100, authorized_source=authorized_source, deadline_at=deadline_at,
-                            routed_source_ids=routed_source_ids,
-                        )))
                     # Dense retrieval is the primary natural-language leg. Run it
-                    # before optional planner rewrites. The planner is invoked
-                    # lazily only when dense evidence cannot fill the result set.
+                    # before broad phrase scans and optional planner rewrites.
+                    # Those rescues run lazily only when dense evidence cannot
+                    # fill the requested session anchors.
                     for vector_index, semantic_vector in enumerate(semantic_vectors):
                         semantic_rows = run_leg(f"semantic-{vector_index}", lambda semantic_vector=semantic_vector: self._semantic_leg(
                             conn, semantic_vector, filters, authorized_source=authorized_source,
@@ -1005,6 +999,16 @@ class BrainStore:
                                 if len(dense_anchor_keys) >= max(1, limit - 1):
                                     break
                         merge(semantic_rows)
+                    if (
+                        phrase_spec and len(informative) >= 2
+                        and len(dense_anchor_keys) < max(1, limit - 1)
+                    ):
+                        phrase_query, phrase_function = phrase_spec
+                        merge(run_leg("phrase", lambda: self._lexical_leg(
+                            conn, phrase_query, phrase_function, filters, "phrase", 3,
+                            limit=100, authorized_source=authorized_source, deadline_at=deadline_at,
+                            routed_source_ids=routed_source_ids,
+                        )))
                     if (
                         self.semantic_runtime is not None
                         and len(dense_anchor_keys) < max(1, limit - 1)
