@@ -69,10 +69,12 @@ class FakeBrain:
         }
 
 
-def record(native_id: str, text: str, *, deleted: bool = False) -> ConnectorRecord:
+def record(native_id: str, text: str, *, deleted: bool = False,
+           native_parent_id: str | None = None) -> ConnectorRecord:
     return ConnectorRecord.from_mapping({
         "schema_version": 1,
         "native_id": native_id,
+        "native_parent_id": native_parent_id,
         "occurred_at": "2026-07-14T00:00:00Z",
         "content": {"text": text},
         "provenance": {"uri": f"https://example.invalid/items/{native_id}"},
@@ -84,9 +86,11 @@ class ConnectorContractTest(unittest.TestCase):
     def test_record_and_page_are_closed_versioned_contracts(self) -> None:
         value = record("stable-1", "safe")
         self.assertEqual(value.native_id, "stable-1")
+        self.assertIsNone(value.native_parent_id)
         with self.assertRaisesRegex(ConnectorContractError, "unknown"):
             ConnectorRecord.from_mapping({
                 "schema_version": 1, "native_id": "stable-1",
+                "native_parent_id": None,
                 "occurred_at": "2026-07-14T00:00:00Z", "content": {},
                 "provenance": {"uri": "https://example.invalid/1"},
                 "deleted": False, "surprise": True,
@@ -100,6 +104,7 @@ class ConnectorContractTest(unittest.TestCase):
         with self.assertRaises(ConnectorContractError):
             ConnectorRecord.from_mapping({
                 "schema_version": 1, "native_id": "query-uri",
+                "native_parent_id": None,
                 "occurred_at": "2026-07-14T00:00:00Z", "content": {},
                 "provenance": {"uri": "https://example.invalid/item?access_token=synthetic"},
                 "deleted": False,
@@ -135,6 +140,20 @@ class ConnectorRunnerTest(unittest.TestCase):
             path.read_bytes() for path in self.spool.parent.glob(self.spool.name + "*")
             if path.is_file()
         )
+
+    def test_parent_session_identity_survives_privacy_spool_and_envelope(self) -> None:
+        connector = SyntheticConnector({
+            None: ConnectorPage(
+                records=(record("session-a/turn-1", "safe", native_parent_id="session-a"),),
+                next_cursor="done", has_more=False,
+            ),
+        })
+        brain = FakeBrain()
+        runner = self.runner(connector, brain)
+        self.assertEqual(runner.run_once()["acked"], 1)
+        event = next(iter(brain.events.values()))
+        self.assertEqual(event["native_parent_id"], "session-a")
+        runner.close()
 
     def test_cursor_commits_only_after_brain_ack_and_replay_is_idempotent(self) -> None:
         connector = SyntheticConnector({

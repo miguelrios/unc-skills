@@ -17,7 +17,7 @@ from psycopg.rows import dict_row
 
 from . import PROJECTOR_VERSION
 from .federation import SourceProfile, freshness_score, normalized_evidence
-from .projectors import advisory_lock_key, canonical_json, event_receipt, legacy_engine, partial_lexical_probes, phrase_query_spec, preferred_phrase_probes, project, redact_text, validate_envelope
+from .projectors import advisory_lock_key, canonical_json, effective_session_id, event_receipt, legacy_engine, partial_lexical_probes, phrase_query_spec, preferred_phrase_probes, project, redact_text, validate_envelope
 from .ranking import DEFAULT_SEARCH_DEADLINE_MS, evidence_rank_components, should_run_partial
 
 
@@ -103,6 +103,24 @@ class BrainStore:
                 })),
             )
         return {"status": "configured", **profile.to_mapping()}
+
+    def set_source_alias(self, alias: str, source_id: str) -> dict[str, str]:
+        if not isinstance(alias, str) or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{1,63}", alias):
+            raise ValueError("source alias is invalid")
+        with self.connect() as conn:
+            if not conn.execute("SELECT 1 FROM sources WHERE id=%s", (source_id,)).fetchone():
+                raise ValueError("source alias source does not exist")
+            conn.execute(
+                """INSERT INTO source_aliases(alias,source_id) VALUES (%s,%s)
+                   ON CONFLICT(alias) DO UPDATE SET source_id=excluded.source_id,updated_at=now()""",
+                (alias, source_id),
+            )
+            conn.execute(
+                """INSERT INTO audit_events(operation,source_id,status,metadata)
+                   VALUES ('source.alias',%s,'success',%s)""",
+                (source_id, json.dumps({"alias": alias})),
+            )
+        return {"status": "configured", "alias": alias, "source_id": source_id}
 
     def federation_scoreboard(self) -> dict[str, Any]:
         with self.connect() as conn:
@@ -305,7 +323,7 @@ class BrainStore:
                 return acknowledgement, False
 
     def _project_one(self, conn, event_id: int, envelope: dict, revision: int) -> None:
-        session_id = envelope.get("native_parent_id") or envelope["native_id"]
+        session_id = effective_session_id(envelope)
         if envelope["kind"] == "tombstone":
             target = envelope.get("content", {}).get("target_native_id") or envelope["native_id"]
             conn.execute(
@@ -408,13 +426,32 @@ class BrainStore:
 
     @staticmethod
     def _read_filters(filters: dict, authorized_source: str | None = None) -> tuple[str, list[Any]]:
-        allowed = {"since", "until", "cwd", "branch", "harness"}
+        allowed = {"since", "until", "cwd", "branch", "harness", "source_id", "source_family", "source_alias"}
         if set(filters) - allowed:
             raise ValueError("unsupported search filter")
         clauses = ["i.deleted_at IS NULL"]
         params: list[Any] = []
         if authorized_source:
             clauses.append("i.source_id = %s"); params.append(authorized_source)
+        if filters.get("source_id"):
+            source_id = filters["source_id"]
+            if (
+                not isinstance(source_id, str)
+                or not re.fullmatch(r"[A-Za-z0-9_.:@-]{3,160}", source_id)
+            ):
+                raise ValueError("invalid source_id filter")
+            clauses.append("i.source_id = %s"); params.append(source_id)
+        if filters.get("source_family"):
+            family = filters["source_family"]
+            if family not in {"coding_history", "deliberate_capture", "user_export", "third_party_research"}:
+                raise ValueError("unsupported source_family filter")
+            clauses.append("sp.family = %s"); params.append(family)
+        if filters.get("source_alias"):
+            alias = filters["source_alias"]
+            if not isinstance(alias, str) or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{1,63}", alias):
+                raise ValueError("invalid source_alias filter")
+            clauses.append("i.source_id = (SELECT source_id FROM source_aliases WHERE alias = %s)")
+            params.append(alias)
         if filters.get("since"):
             clauses.append("i.occurred_at >= %s::timestamptz"); params.append(filters["since"])
         if filters.get("until"):
@@ -522,6 +559,12 @@ class BrainStore:
         filters = filters or {}
         if not isinstance(filters, dict):
             raise ValueError("filters must be an object")
+        routing = {
+            "requested_source_id": filters.get("source_id"),
+            "requested_source_family": filters.get("source_family"),
+            "requested_source_alias": filters.get("source_alias"),
+            "authorized_source_scope": authorized_source is not None,
+        }
         engine = legacy_engine()
         informative = engine.informative_terms(query)
         if not informative:
@@ -529,7 +572,7 @@ class BrainStore:
                 "results": [], "abstention_reason": "no informative lexical terms",
                 "diagnostics": {
                     "deadline_ms": self.search_deadline_ms, "elapsed_ms": 0.0,
-                    "deadline_exceeded": False, "legs": [],
+                    "deadline_exceeded": False, "legs": [], "routing": routing,
                 },
             }
         candidates: dict[int, dict] = {}
@@ -691,6 +734,7 @@ class BrainStore:
             "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
             "deadline_exceeded": deadline_exceeded,
             "legs": leg_timings,
+            "routing": routing,
         }
         return {
             "results": results,
@@ -714,15 +758,22 @@ class BrainStore:
                 except (ValueError, TypeError):
                     raise ValueError("invalid receipt") from None
                 identity = conn.execute(
-                    "SELECT source_id,COALESCE(native_parent_id,native_id) AS session_native_id FROM source_events WHERE source_id=%s AND native_id=%s AND revision=%s AND (%s::text IS NULL OR source_id=%s)",
+                    """SELECT event.source_id,
+                              COALESCE(item.session_native_id,event.native_parent_id,event.native_id) AS session_native_id
+                       FROM source_events event LEFT JOIN items item ON item.event_id=event.id
+                       WHERE event.source_id=%s AND event.native_id=%s AND event.revision=%s
+                         AND (%s::text IS NULL OR event.source_id=%s)
+                       ORDER BY item.id LIMIT 1""",
                     (source_id, native_id, int(revision), authorized_source, authorized_source),
                 ).fetchone()
             else:
                 identity = conn.execute(
-                    """SELECT source_id,COALESCE(native_parent_id,native_id) AS session_native_id
-                       FROM source_events WHERE envelope #>> '{provenance,original_path}'=%s
-                         AND (%s::text IS NULL OR source_id=%s)
-                       ORDER BY id DESC LIMIT 1""",
+                    """SELECT event.source_id,
+                              COALESCE(item.session_native_id,event.native_parent_id,event.native_id) AS session_native_id
+                       FROM source_events event LEFT JOIN items item ON item.event_id=event.id
+                       WHERE event.envelope #>> '{provenance,original_path}'=%s
+                         AND (%s::text IS NULL OR event.source_id=%s)
+                       ORDER BY event.id DESC,item.id LIMIT 1""",
                     (target, authorized_source, authorized_source),
                 ).fetchone()
             if not identity:
@@ -802,9 +853,11 @@ class BrainStore:
                     except (ValueError, TypeError):
                         raise ValueError("invalid receipt") from None
                     identity = conn.execute(
-                        """SELECT source_id,COALESCE(native_parent_id,native_id) AS session_native_id
-                           FROM source_events event WHERE source_id=%s AND native_id=%s AND revision=%s
-                             AND (%s::text IS NULL OR source_id=%s)
+                        """SELECT event.source_id,
+                                  COALESCE(item.session_native_id,event.native_parent_id,event.native_id) AS session_native_id
+                           FROM source_events event LEFT JOIN items item ON item.event_id=event.id
+                           WHERE event.source_id=%s AND event.native_id=%s AND event.revision=%s
+                             AND (%s::text IS NULL OR event.source_id=%s)
                              AND event.kind!='tombstone'
                              AND NOT EXISTS (
                                SELECT 1 FROM source_events later
@@ -816,9 +869,11 @@ class BrainStore:
                     ).fetchone()
                 else:
                     identity = conn.execute(
-                        """SELECT source_id,COALESCE(native_parent_id,native_id) AS session_native_id
-                           FROM source_events event WHERE envelope #>> '{provenance,original_path}'=%s
-                             AND (%s::text IS NULL OR source_id=%s)
+                        """SELECT event.source_id,
+                                  COALESCE(item.session_native_id,event.native_parent_id,event.native_id) AS session_native_id
+                           FROM source_events event LEFT JOIN items item ON item.event_id=event.id
+                           WHERE event.envelope #>> '{provenance,original_path}'=%s
+                             AND (%s::text IS NULL OR event.source_id=%s)
                              AND event.kind!='tombstone'
                              AND NOT EXISTS (
                                SELECT 1 FROM source_events later
@@ -826,7 +881,7 @@ class BrainStore:
                                  AND later.native_id=event.native_id
                                  AND later.revision>event.revision
                                  AND later.is_tombstone)
-                           ORDER BY id DESC LIMIT 1""",
+                           ORDER BY event.id DESC,item.id LIMIT 1""",
                         (target, authorized_source, authorized_source),
                     ).fetchone()
                 if not identity:
@@ -1035,6 +1090,126 @@ class BrainStore:
                     "events": len(rows), "items_before": before, "items_after": after,
                     "entities_before": entities_before, "entities_after": entities_after,
                 }
+
+    def backfill_cowork_sessions(
+        self, batch_size: int = 5000, max_batches: int | None = None,
+    ) -> dict:
+        """Repair legacy Cowork derived session identity without mutating source events."""
+        if not 1 <= batch_size <= 20000:
+            raise ValueError("batch size must be between 1 and 20000")
+        if max_batches is not None and max_batches < 1:
+            raise ValueError("max batches must be positive")
+        name = "cowork-session-v1"
+        batches = scanned = moved_events = moved_items = removed_sessions = 0
+        with self.connect() as conn:
+            conn.autocommit = True
+            conn.execute("SELECT pg_advisory_lock(hashtextextended('recall:cowork-session-backfill-v1',0))")
+            try:
+                while max_batches is None or batches < max_batches:
+                    with conn.transaction():
+                        state = conn.execute(
+                            """SELECT target_item_id,last_item_id,completed_at
+                               FROM projection_backfills WHERE name=%s FOR UPDATE""",
+                            (name,),
+                        ).fetchone()
+                        if state is None:
+                            target = conn.execute(
+                                "SELECT COALESCE(max(id),0) AS n FROM source_events"
+                            ).fetchone()["n"]
+                            conn.execute(
+                                """INSERT INTO projection_backfills(name,target_item_id,last_item_id)
+                                   VALUES (%s,%s,0)""",
+                                (name, target),
+                            )
+                            state = {"target_item_id": target, "last_item_id": 0, "completed_at": None}
+                        if state["completed_at"] is not None:
+                            break
+                        rows = conn.execute(
+                            """SELECT id,source_id,native_id,envelope
+                               FROM source_events
+                               WHERE id>%s AND id<=%s
+                                 AND envelope #>> '{provenance,connector_id}'='anthropic.cowork-local'
+                                 AND envelope #>> '{content,session_id}' IS NOT NULL
+                               ORDER BY id LIMIT %s""",
+                            (state["last_item_id"], state["target_item_id"], batch_size),
+                        ).fetchall()
+                        for row in rows:
+                            new_session = effective_session_id(row["envelope"])
+                            current = conn.execute(
+                                """SELECT session_native_id,count(*) AS n FROM items
+                                   WHERE event_id=%s GROUP BY session_native_id""",
+                                (row["id"],),
+                            ).fetchall()
+                            if not current or all(value["session_native_id"] == new_session for value in current):
+                                continue
+                            old_session = current[0]["session_native_id"]
+                            session = conn.execute(
+                                """SELECT principal_id,harness,started_at,ended_at,metadata,projector_version
+                                   FROM sessions WHERE source_id=%s AND native_id=%s""",
+                                (row["source_id"], old_session),
+                            ).fetchone()
+                            if session is None:
+                                raise RuntimeError("cowork session projection is missing")
+                            conn.execute(
+                                """INSERT INTO sessions(source_id,native_id,principal_id,harness,started_at,ended_at,metadata,projector_version)
+                                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                                   ON CONFLICT(source_id,native_id) DO UPDATE SET
+                                     started_at=LEAST(sessions.started_at,excluded.started_at),
+                                     ended_at=GREATEST(sessions.ended_at,excluded.ended_at),
+                                     metadata=sessions.metadata || excluded.metadata,
+                                     projector_version=GREATEST(sessions.projector_version,excluded.projector_version),
+                                     rebuilt_at=now()""",
+                                (
+                                    row["source_id"], new_session, session["principal_id"], session["harness"],
+                                    session["started_at"], session["ended_at"], json.dumps(session["metadata"]),
+                                    session["projector_version"],
+                                ),
+                            )
+                            changed = conn.execute(
+                                """UPDATE items SET session_native_id=%s
+                                   WHERE event_id=%s AND session_native_id<>%s""",
+                                (new_session, row["id"], new_session),
+                            ).rowcount
+                            deleted = conn.execute(
+                                """DELETE FROM sessions session WHERE source_id=%s AND native_id=%s
+                                   AND NOT EXISTS (
+                                     SELECT 1 FROM items item WHERE item.source_id=session.source_id
+                                       AND item.session_native_id=session.native_id
+                                   )""",
+                                (row["source_id"], old_session),
+                            ).rowcount
+                            moved_events += 1
+                            moved_items += changed
+                            removed_sessions += deleted
+                        batches += 1
+                        scanned += len(rows)
+                        completed = len(rows) < batch_size
+                        last_event_id = state["target_item_id"] if completed else rows[-1]["id"]
+                        conn.execute(
+                            """UPDATE projection_backfills SET last_item_id=%s,
+                               completed_at=CASE WHEN %s THEN now() ELSE NULL END,updated_at=now()
+                               WHERE name=%s""",
+                            (last_event_id, completed, name),
+                        )
+                        if completed:
+                            break
+                state = conn.execute(
+                    """SELECT target_item_id,last_item_id,completed_at
+                       FROM projection_backfills WHERE name=%s""",
+                    (name,),
+                ).fetchone()
+            finally:
+                conn.execute("SELECT pg_advisory_unlock(hashtextextended('recall:cowork-session-backfill-v1',0))")
+        return {
+            "batches": batches,
+            "events_scanned": scanned,
+            "events_moved": moved_events,
+            "items_moved": moved_items,
+            "sessions_removed": removed_sessions,
+            "target_event_id": state["target_item_id"],
+            "last_event_id": state["last_item_id"],
+            "completed": state["completed_at"] is not None,
+        }
 
     def backfill_entities(self, batch_size: int = 5000, max_batches: int | None = None) -> dict:
         """Resume an online canonical-event replay into the entity projection."""

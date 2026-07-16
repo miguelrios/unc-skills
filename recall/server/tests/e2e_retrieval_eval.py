@@ -97,14 +97,14 @@ def main() -> None:
                 else:
                     raise AssertionError("server did not become healthy")
 
-                first_http = evaluate_store(HttpStore(base), http_cases, source_routing_supported=False)
-                second_http = evaluate_store(HttpStore(base), http_cases, source_routing_supported=False)
+                first_http = evaluate_store(HttpStore(base), http_cases, source_routing_supported=True)
+                second_http = evaluate_store(HttpStore(base), http_cases, source_routing_supported=True)
             finally:
                 process.terminate()
                 process.wait(timeout=5)
 
-    first = evaluate_store(store, all_cases, source_routing_supported=False)
-    second = evaluate_store(store, all_cases, source_routing_supported=False)
+    first = evaluate_store(store, all_cases, source_routing_supported=True)
+    second = evaluate_store(store, all_cases, source_routing_supported=True)
     assert first_http["rankings"] == second_http["rankings"], "retrieval rankings changed between runs"
     assert first["rankings"] == second["rankings"], "direct retrieval rankings changed between runs"
     assert first["strata"]["exact-identifier"]["hit@1"] == 1.0
@@ -112,7 +112,8 @@ def main() -> None:
     assert first["behavior"]["deletion_resurrection_rate"] == 0.0
     assert ingest["deduplication_accuracy"] == 1.0
     assert first["aggregate"]["unauthorized_hit_rate"] == 0.0
-    assert first["strata"]["source-routed"]["backend_error_rate"] == 1.0
+    assert first["strata"]["source-routed"]["backend_error_rate"] == 0.0
+    assert first["strata"]["source-routed"]["recall@5"] == 1.0
     assert all(
         metrics["backend_error_rate"] == 0.0
         for stratum, metrics in first["strata"].items()

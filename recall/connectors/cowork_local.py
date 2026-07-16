@@ -97,6 +97,7 @@ def project_cowork_record(value: Mapping[str, Any]) -> ConnectorRecord | None:
         return ConnectorRecord(
             schema_version=1,
             native_id=native_id,
+            native_parent_id=session_id,
             occurred_at=timestamp,
             content=content,
             provenance={"uri": f"connector://{CONNECTOR_ID}/{native_id}"},

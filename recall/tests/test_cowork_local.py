@@ -88,6 +88,7 @@ class FrozenCoworkLocalContractTest(unittest.TestCase):
         self.assertIsNotNone(first)
         self.assertEqual(first, reordered)
         self.assertEqual(first.native_id, "session-alpha/msg-assistant-001")
+        self.assertEqual(first.native_parent_id, "session-alpha")
         self.assertEqual(first.content["parent_native_id"], "session-alpha/msg-user-001")
         self.assertNotIn("path", json.dumps(first.provenance).lower())
 

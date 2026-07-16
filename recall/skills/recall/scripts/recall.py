@@ -301,7 +301,10 @@ def remote_execute(args) -> tuple[str, dict]:
     if args.command == "search":
         filters = {
             key: getattr(args, key)
-            for key in ("since", "until", "cwd", "branch", "harness")
+            for key in (
+                "since", "until", "cwd", "branch", "harness",
+                "source_id", "source_family", "source_alias",
+            )
             if getattr(args, key) is not None
         }
         response = remote_request("POST", "/v1/search", {
@@ -1014,6 +1017,12 @@ def search_rows(conn, args):
 
 
 def search(args) -> int:
+    if recall_mode() == "local" and any(
+        getattr(args, key, None) is not None
+        for key in ("source_id", "source_family", "source_alias")
+    ):
+        print("source routing requires remote Recall mode", file=sys.stderr)
+        return 2
     _, _, db = paths()
     if not db.exists():
         if not args.paths: print("Recall index does not exist; run `recall index` first.", file=sys.stderr)
@@ -1663,7 +1672,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="recall")
     sub = ap.add_subparsers(dest="command", required=True)
     p = sub.add_parser("index"); p.add_argument("--rebuild", action="store_true"); p.set_defaults(func=ingest)
-    p = sub.add_parser("search"); p.add_argument("query"); p.add_argument("--since"); p.add_argument("--until"); p.add_argument("--cwd"); p.add_argument("--branch"); p.add_argument("--harness", choices=("claude","codex")); p.add_argument("--limit", type=int, default=10); p.add_argument("--paths", action="store_true"); p.set_defaults(func=search)
+    p = sub.add_parser("search"); p.add_argument("query"); p.add_argument("--since"); p.add_argument("--until"); p.add_argument("--cwd"); p.add_argument("--branch"); p.add_argument("--harness", choices=("claude","codex")); p.add_argument("--source-id"); p.add_argument("--source-family", choices=("coding_history","deliberate_capture","user_export","third_party_research")); p.add_argument("--source-alias"); p.add_argument("--limit", type=int, default=10); p.add_argument("--paths", action="store_true"); p.set_defaults(func=search)
     p = sub.add_parser("show"); p.add_argument("target"); p.add_argument("--around"); p.add_argument("--prompts", action="store_true"); p.add_argument("--tail", type=int, default=0, help="print only the last N chunks"); p.set_defaults(func=show)
     p = sub.add_parser("session-export", help="page one exact redacted session snapshot as JSON")
     target = p.add_mutually_exclusive_group(required=True)

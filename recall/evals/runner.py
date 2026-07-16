@@ -27,7 +27,7 @@ from .retrieval import (  # noqa: E402
 )
 
 
-ALLOWED_SEARCH_FILTERS = {"since", "until", "cwd", "branch", "harness"}
+ALLOWED_SEARCH_FILTERS = {"since", "until", "cwd", "branch", "harness", "source_id", "source_family", "source_alias"}
 
 
 def scorer_sha256() -> str:

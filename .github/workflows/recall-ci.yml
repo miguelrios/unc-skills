@@ -45,6 +45,7 @@ jobs:
         run: |
           for test in \
             e2e_brainstore.py \
+            e2e_session_source_l1.py \
             e2e_capture_mcp.py \
             e2e_codex_projection.py \
             e2e_connector_host.py \
