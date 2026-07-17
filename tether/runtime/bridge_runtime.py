@@ -278,14 +278,10 @@ class Store:
             row["idempotency_key"], row["status"],
         )
 
-    def create(self, request: BridgeRequest) -> Bridge:
-        required = ("source_kind", "source", "owner_user_id", "channel_id", "idempotency_key")
-        if any(not request.get(key) for key in required):
-            raise ValueError("source, owner, channel, and idempotency key are required")
-        kind = str(request["source_kind"])
+    @staticmethod
+    def validate_source(kind: str, raw_source: Any) -> dict[str, str]:
         if kind not in SOURCE_FIELDS:
             raise ValueError("unsupported bridge source kind")
-        raw_source = request["source"]
         if not isinstance(raw_source, dict) or set(raw_source) - SOURCE_FIELDS[kind]:
             raise ValueError("invalid bridge source")
         if not all(isinstance(key, str) and isinstance(value, str) for key, value in raw_source.items()):
@@ -293,6 +289,14 @@ class Store:
         source = {key: value for key, value in raw_source.items() if value}
         if any(len(value) > MAX_SOURCE_VALUE for value in source.values()):
             raise ValueError("bridge source value is too large")
+        return source
+
+    def create(self, request: BridgeRequest) -> Bridge:
+        required = ("source_kind", "source", "owner_user_id", "channel_id", "idempotency_key")
+        if any(not request.get(key) for key in required):
+            raise ValueError("source, owner, channel, and idempotency key are required")
+        kind = str(request["source_kind"])
+        source = self.validate_source(kind, request["source"])
         idempotency_key = str(request["idempotency_key"])
         if len(idempotency_key) > MAX_IDEMPOTENCY_KEY:
             raise ValueError("idempotency key is too large")
@@ -339,6 +343,41 @@ class Store:
                     (channel_id, thread_ts),
                 ).fetchone()
             return self.decode(row)
+
+    def find_thread(self, channel_id: str, thread_ts: str) -> Bridge | None:
+        with self.connect() as db:
+            rows = db.execute(
+                """
+                SELECT * FROM bridges
+                WHERE channel_id=? AND thread_ts=? AND status='active'
+                ORDER BY created_at DESC LIMIT 2
+                """,
+                (channel_id, thread_ts),
+            ).fetchall()
+            if len(rows) > 1:
+                raise ValueError("multiple active bridges match this Slack thread")
+            return self.decode(rows[0] if rows else None)
+
+    def rebind(self, bridge_id: str, source_kind: str, source: dict[str, str]) -> Bridge:
+        validated = self.validate_source(source_kind, source)
+        with self.connect() as db:
+            cursor = db.execute(
+                """
+                UPDATE bridges SET source_kind=?,source_json=?
+                WHERE bridge_id=? AND status='active'
+                """,
+                (
+                    source_kind,
+                    json.dumps(validated, ensure_ascii=False, separators=(",", ":")),
+                    bridge_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("active bridge not found")
+        bridge = self.get(bridge_id)
+        if bridge is None:
+            raise ValueError("active bridge not found")
+        return bridge
 
     def recent_active_bridges(self, hours: int = 24, limit: int = 100) -> list[Bridge]:
         hours = max(1, min(hours, 168))
@@ -742,6 +781,24 @@ class Broker:
             "deduplicated": False,
         }
 
+    def _rebind(self, request: BridgeRequest) -> dict[str, Any]:
+        channel = str(request.get("channel_id") or "")
+        thread_ts = str(request.get("thread_ts") or "")
+        if not channel or not thread_ts:
+            raise ValueError("Slack channel and thread timestamp are required")
+        bridge = self.store.find_thread(channel, thread_ts)
+        if bridge is None:
+            raise ValueError("active bridge not found")
+        source_kind = str(request.get("source_kind") or "")
+        source = request.get("source")
+        rebound = self.store.rebind(bridge.bridge_id, source_kind, source)
+        return {
+            "ok": True,
+            "bridge_id": rebound.bridge_id,
+            "thread_ts": rebound.thread_ts,
+            "source_kind": rebound.source_kind,
+        }
+
     def _history(self, request: BridgeRequest, config: Config) -> dict[str, Any]:
         limit = max(1, min(int(request.get("limit", 15)), 100))
         channel = str(request.get("channel_id") or effective_channel(config))
@@ -804,6 +861,8 @@ class Broker:
                 return self._notify(request, config, allowed_users)
         if operation == "reply":
             return self._reply(request)
+        if operation == "rebind":
+            return self._rebind(request)
         if operation == "history":
             return self._history(request, config)
         if operation == "thread_history":

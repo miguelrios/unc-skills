@@ -50,6 +50,7 @@ Completion criterion: the result is posted to the same thread, or the same threa
 - Use `cancel`, `stop`, `nvm`, or `never mind` in Slack to stop an active native continuation.
 - Run `tether doctor` after setup or a Hermes upgrade.
 - Diagnose one thread without loading a Slack token: `tether thread --channel C... --thread-ts 123.456`.
+- If an intentional agent restart changes the exact pane process fingerprint, run `tether rebind --channel C... --thread-ts 123.456` from the intended replacement pane, then resend or replay the failed request. Never guess another pane.
 - Append progress to an existing thread without creating a second bridge: `tether post --channel C... --thread-ts 123.456 --text '...'`.
 
 Read [references/setup.md](references/setup.md) for installation and configuration. Read [references/contract.md](references/contract.md) when changing an automation or diagnosing routing.

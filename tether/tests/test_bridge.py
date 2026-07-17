@@ -222,6 +222,32 @@ class StoreTest(unittest.TestCase):
                 "reply_key": "tether-abcdef123456", "text": too_long,
             })
 
+    def test_explicit_rebind_updates_only_the_matching_active_thread(self):
+        bridge = self.store.bind(self.store.create(self.request()).bridge_id, "123.456")
+        broker = self.runtime.Broker("test-token", self.store)
+        result = broker.handle({
+            "op": "rebind",
+            "channel_id": bridge.channel_id,
+            "thread_ts": bridge.thread_ts,
+            "source_kind": "zellij_pane",
+            "source": {
+                "session_name": "work", "pane_id": "7", "cwd": "/tmp/project",
+                "pane_agent": "claude", "pane_command_hash": "new-fingerprint",
+            },
+        })
+        rebound = self.store.get(bridge.bridge_id)
+        self.assertEqual(result["bridge_id"], bridge.bridge_id)
+        self.assertEqual(rebound.source_kind, "zellij_pane")
+        self.assertEqual(rebound.source["pane_command_hash"], "new-fingerprint")
+        with self.assertRaisesRegex(ValueError, "active bridge not found"):
+            broker.handle({
+                "op": "rebind",
+                "channel_id": "C99999999",
+                "thread_ts": bridge.thread_ts,
+                "source_kind": "zellij_pane",
+                "source": rebound.source,
+            })
+
     def test_no_reply_control_token_is_suppressed(self):
         bridge = self.store.bind(self.store.create(self.request()).bridge_id, "123.456")
         broker = self.runtime.Broker("test-token", self.store)
@@ -579,6 +605,28 @@ class NotifierTest(unittest.TestCase):
         self.assertEqual(kind, "zellij_pane")
         self.assertEqual(source["pane_command_hash"], "abc123")
         capture.assert_called_once_with("work", "7", str(pathlib.Path.cwd()))
+
+    def test_rebind_captures_the_current_exact_pane(self):
+        identity = {
+            "session_name": "work", "pane_id": "7", "cwd": "/tmp/project",
+            "pane_agent": "claude", "pane_command_hash": "new-fingerprint",
+        }
+        with mock.patch.dict(os.environ, {
+            "ZELLIJ_SESSION_NAME": "work",
+            "ZELLIJ_PANE_ID": "7",
+        }, clear=True), mock.patch.object(
+            self.notifier, "zellij_pane_identity", return_value=identity,
+        ), mock.patch.object(
+            self.notifier, "broker_call",
+            return_value={"ok": True, "thread_ts": "123.456"},
+        ) as broker:
+            result = self.notifier.main([
+                "rebind", "--channel", "C12345678", "--thread-ts", "123.456",
+            ])
+        self.assertEqual(result, 0)
+        request = broker.call_args.args[0]
+        self.assertEqual(request["op"], "rebind")
+        self.assertEqual(request["source"]["pane_command_hash"], "new-fingerprint")
 
     def test_noninteractive_setup_delegates_manifest_to_hermes(self):
         args = types.SimpleNamespace(non_interactive=True, no_restart=False)

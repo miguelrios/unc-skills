@@ -41,9 +41,9 @@ zellij_pane_identity = _runtime.zellij_pane_identity
 
 def detected_source(args: argparse.Namespace) -> tuple[str, dict[str, str]]:
     cwd = str(Path.cwd())
-    if args.run_id:
+    if getattr(args, "run_id", None):
         return "headless_run", {"run_id": args.run_id, "queue_id": args.run_id, "cwd": cwd}
-    if args.hermes_session_id:
+    if getattr(args, "hermes_session_id", None):
         return "hermes_session", {"session_id": args.hermes_session_id, "cwd": cwd}
     terminal = {}
     terminal_identity = None
@@ -84,6 +84,9 @@ def build_parser() -> argparse.ArgumentParser:
     reply.add_argument("--bridge-id", required=True)
     reply.add_argument("--reply-key")
     reply.add_argument("--text", required=True)
+    rebind = sub.add_parser("rebind")
+    rebind.add_argument("--channel", required=True)
+    rebind.add_argument("--thread-ts", required=True)
     post = sub.add_parser("post")
     post.add_argument("--channel", required=True)
     post.add_argument("--thread-ts", required=True)
@@ -219,6 +222,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = broker_call({
             "op": "reply", "bridge_id": args.bridge_id,
             "reply_key": args.reply_key or "", "text": args.text,
+        })
+    elif args.command == "rebind":
+        kind, source = detected_source(args)
+        result = broker_call({
+            "op": "rebind", "channel_id": args.channel,
+            "thread_ts": args.thread_ts, "source_kind": kind, "source": source,
         })
     elif args.command == "post":
         result = broker_call({
