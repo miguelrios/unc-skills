@@ -114,6 +114,15 @@ class SchemaMigrationContractTest(unittest.TestCase):
             implementation.rindex("GREATEST(last_item_id,%s)"),
         )
 
+    def test_managed_upgrade_documents_split_role_grant_refresh(self) -> None:
+        guide = " ".join(
+            (SERVER / "deploy" / "README.md").read_text().split()
+        ).casefold()
+        self.assertIn(f"schema migrations 1 through {SCHEMA_VERSION}", guide)
+        self.assertIn("refresh runtime grants after every migration", guide)
+        self.assertIn("on all tables in schema public", guide)
+        self.assertIn("on all sequences in schema public", guide)
+
 
 class EmbeddingBackfillWatermarkTest(unittest.TestCase):
     def test_global_backfill_advances_cursor_only_after_embedding_write(self) -> None:

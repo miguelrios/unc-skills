@@ -16,7 +16,7 @@ infrastructure. The example is synthetic; a live manifest belongs in a private m
 location and contains references, never credential values.
 
 The production database gate requires a standard PostgreSQL URL with
-`sslmode=verify-full` and an explicit trust root, schema migrations 1 through 12,
+`sslmode=verify-full` and an explicit trust root, schema migrations 1 through 14,
 pgvector 0.8.0 or newer, and a runtime role without superuser, database/role creation,
 replication, or RLS-bypass privilege:
 
@@ -107,6 +107,21 @@ a separate administrative credential, then retain only this least-privilege
 runtime URL in the injected environment. The provider token needs only database
 read/create permissions; the Tailscale OAuth client must be restricted to the
 dedicated gateway tag.
+
+When migration and runtime use separate PostgreSQL roles, refresh runtime grants
+after every migration and before deleting a short-lived migration role. Replace
+`recall_runtime` with the actual runtime role identifier:
+
+```sql
+GRANT USAGE ON SCHEMA public TO recall_runtime;
+GRANT SELECT, INSERT, UPDATE, DELETE
+  ON ALL TABLES IN SCHEMA public TO recall_runtime;
+GRANT USAGE, SELECT
+  ON ALL SEQUENCES IN SCHEMA public TO recall_runtime;
+```
+
+Apply only the grants the enabled runtime operations need. Reassign objects to the
+durable owner before deleting a temporary migration role.
 
 After reviewing the zero-network preview and mode-0600 approval document, run
 the exact approved apply under 1Password injection:
