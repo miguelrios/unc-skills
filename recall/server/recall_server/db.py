@@ -227,10 +227,13 @@ class BrainStore:
                     ]
                 row = conn.execute(
                     f"""SELECT count(*) AS embedded,
-                               (SELECT count(*) FROM items WHERE deleted_at IS NULL) AS live
+                               (SELECT count(*) FROM items
+                                WHERE deleted_at IS NULL
+                                  AND btrim(text_redacted) <> '') AS live
                         FROM item_embeddings embedding
                         JOIN items item ON item.id=embedding.item_id
-                        WHERE item.deleted_at IS NULL{compatibility}""",
+                        WHERE item.deleted_at IS NULL
+                          AND btrim(item.text_redacted) <> ''{compatibility}""",
                     values,
                 ).fetchone()
                 metrics["embedded_items"] = row["embedded"]
@@ -238,7 +241,8 @@ class BrainStore:
             else:
                 metrics["embedded_items"] = 0
                 metrics["embedding_lag"] = conn.execute(
-                    "SELECT count(*) AS n FROM items WHERE deleted_at IS NULL"
+                    """SELECT count(*) AS n FROM items
+                       WHERE deleted_at IS NULL AND btrim(text_redacted) <> ''"""
                 ).fetchone()["n"]
             return metrics
 
@@ -278,6 +282,7 @@ class BrainStore:
                            FROM items item
                            LEFT JOIN item_embeddings embedding ON embedding.item_id=item.id
                            WHERE item.deleted_at IS NULL
+                             AND btrim(item.text_redacted) <> ''
                              AND (%s::text IS NULL OR item.source_id=%s)
                              AND (%s::text IS NULL OR item.surface=%s)
                              AND (
