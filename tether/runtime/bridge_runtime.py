@@ -76,6 +76,7 @@ SLACK_METHOD_PATHS = {
     "chat.postMessage": "/api/chat.postMessage",
     "conversations.history": "/api/conversations.history",
     "conversations.join": "/api/conversations.join",
+    "conversations.open": "/api/conversations.open",
     "conversations.replies": "/api/conversations.replies",
 }
 class BridgeRequest(TypedDict, total=False):
@@ -92,6 +93,7 @@ class BridgeRequest(TypedDict, total=False):
     reply_key: str
     file_path: str | None
     limit: int
+    user_ids: list[str]
 
 
 @dataclass(frozen=True)
@@ -791,6 +793,35 @@ class Broker:
             "user": str(result.get("user") or ""),
         }
 
+    def _dm_notify(
+        self,
+        incoming: BridgeRequest,
+        config: Config,
+        allowed_users: tuple[str, ...],
+    ) -> dict[str, Any]:
+        requested = incoming.get("user_ids")
+        if not isinstance(requested, list):
+            raise ValueError("DM recipients must be a Slack member ID list")
+        users = list(dict.fromkeys(str(value) for value in requested))
+        if not 1 <= len(users) <= 8 or any(not ID_PATTERN.fullmatch(value) for value in users):
+            raise ValueError("DM recipients must contain 1-8 valid Slack member IDs")
+        unauthorized = sorted(set(users) - set(allowed_users))
+        if unauthorized:
+            raise ValueError("DM recipients must all be explicitly allowlisted Hermes operators")
+        opened = _slack_call(
+            self.token,
+            "conversations.open",
+            {"users": ",".join(users), "return_im": True},
+        )
+        channel = opened.get("channel")
+        if not isinstance(channel, dict) or not ID_PATTERN.fullmatch(str(channel.get("id") or "")):
+            raise RuntimeError("Slack opened a DM without returning a valid channel")
+        request = BridgeRequest(incoming)
+        request["channel_id"] = str(channel["id"])
+        if not request.get("team_id"):
+            request["team_id"] = str(self._identity().get("team_id") or config.team_id)
+        return self._notify(request, config, allowed_users)
+
     def _notify(
         self,
         incoming: BridgeRequest,
@@ -1005,6 +1036,9 @@ class Broker:
         if operation == "notify":
             with self._notify_lock:
                 return self._notify(request, config, allowed_users)
+        if operation == "dm_notify":
+            with self._notify_lock:
+                return self._dm_notify(request, config, allowed_users)
         if operation == "attach":
             with self._notify_lock:
                 return self._attach(request, config, allowed_users)
