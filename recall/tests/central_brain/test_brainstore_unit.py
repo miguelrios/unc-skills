@@ -221,6 +221,44 @@ class HttpBoundaryContractTest(unittest.TestCase):
         handler.store.service_metrics.assert_not_called()
         handler.send_json.assert_called_once_with(200, {"status": "ready"})
 
+    def test_operational_health_uses_one_bounded_projection_probe(self) -> None:
+        connection = mock.MagicMock()
+        connection.execute.return_value.fetchone.return_value = {"projection_lag": 0}
+        context = mock.MagicMock()
+        context.__enter__.return_value = connection
+        store = BrainStore("postgresql://synthetic.invalid/recall")
+        store.connect = mock.MagicMock(return_value=context)
+
+        self.assertEqual(
+            store.operational_health(),
+            {"status": "ok", "projection_lag": 0},
+        )
+        connection.execute.assert_called_once()
+        sql = connection.execute.call_args.args[0]
+        self.assertIn("ORDER BY id DESC LIMIT 1", sql)
+        self.assertNotIn("count(", sql.casefold())
+
+    def test_remote_doctor_uses_bounded_health_not_full_metrics(self) -> None:
+        handler = object.__new__(Handler)
+        handler.path = "/v1/doctor"
+        handler.require = mock.MagicMock(return_value={"source_id": "source-a"})
+        handler.store = mock.MagicMock()
+        handler.store.operational_health.return_value = {
+            "status": "ok",
+            "projection_lag": 0,
+        }
+        handler.send_json = mock.MagicMock()
+
+        Handler.do_GET(handler)
+
+        handler.store.operational_health.assert_called_once_with()
+        handler.store.doctor.assert_not_called()
+        handler.store.service_metrics.assert_not_called()
+        handler.send_json.assert_called_once_with(
+            200,
+            {"status": "ok", "projection_lag": 0},
+        )
+
     def test_search_rejects_oversized_query_before_database_or_model_io(self) -> None:
         with self.assertRaisesRegex(ValueError, "too large"):
             BrainStore("postgresql://unused").search("x" * 8193)

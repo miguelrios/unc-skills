@@ -292,10 +292,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(200 if result else 404, result or {"error": "not found"})
             return
         if parsed.path == "/v1/doctor":
-            principal = self.require("read")
-            if not principal:
+            if not self.require("read"):
                 return
-            self.send_json(200, self.store.doctor(principal.get("source_id")))
+            self.send_json(200, self.store.operational_health())
             return
         self.send_json(404, {"error": "not found"})
 
