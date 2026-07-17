@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import ssl
@@ -616,6 +617,259 @@ class RenderPrivateStackAdapter:
                 logical_id,
                 [core["id"]],
             ),
+        }
+
+
+class RenderPublicMcpAdapter(RenderPrivateStackAdapter):
+    """One public HTTPS service with an MCP-only application surface."""
+
+    def __init__(
+        self,
+        provider: JsonProvider,
+        *,
+        owner_id: str,
+        region_selection: str,
+        billing_selection: str,
+        region: str,
+        name: str,
+        plan: str,
+        embedding_api_key: str,
+        database_url: str,
+    ):
+        super().__init__(
+            provider,
+            {},
+            owner_id=owner_id,
+            region_selection=region_selection,
+            billing_selection=billing_selection,
+            region=region,
+            core_name=name,
+            core_plan=plan,
+            embedding_api_key=embedding_api_key,
+            database_url=database_url,
+        )
+        self.owner_id = owner_id
+        self.region = region
+
+    def _public_env(self, embedding: dict[str, Any]) -> list[dict[str, str]]:
+        return [
+            *self._core_env(embedding),
+            {"key": "RECALL_HTTP_PROFILE", "value": "public-mcp"},
+        ]
+
+    def _validate_public(self, service: object) -> dict[str, Any]:
+        if not isinstance(service, dict):
+            raise LiveProviderError("provider_response_invalid")
+        details = service.get("serviceDetails")
+        url = details.get("url") if isinstance(details, dict) else None
+        parsed = urlsplit(url) if isinstance(url, str) else None
+        expected_details = {
+            "runtime": "image",
+            "region": self.region,
+            "plan": self.core_plan,
+            "numInstances": 1,
+            "healthCheckPath": "/readyz",
+            "dockerCommand": (
+                "serve --host 0.0.0.0 --port 10000 --require-auth "
+                "--capability-profile production"
+            ),
+        }
+        if (
+            service.get("name") != self.core_name
+            or service.get("ownerId") != self.owner_id
+            or service.get("type") != "web_service"
+            or not isinstance(service.get("id"), str)
+            or not isinstance(details, dict)
+            or any(details.get(key) != value for key, value in expected_details.items())
+            or parsed is None
+            or parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise LiveProviderError("render_public_service_drift")
+        return service
+
+    def _create_public(
+        self,
+        image: str,
+        env_vars: list[dict[str, str]],
+    ) -> dict[str, Any]:
+        if not IMAGE_RE.fullmatch(image):
+            raise LiveProviderError("render_image_unpinned")
+        status, body = self.services.provider.request(
+            "POST",
+            "/services",
+            {
+                "type": "web_service",
+                "name": self.core_name,
+                "ownerId": self.owner_id,
+                "autoDeploy": "no",
+                "image": {
+                    "ownerId": self.owner_id,
+                    "imagePath": image,
+                },
+                "envVars": env_vars,
+                "secretFiles": [],
+                "serviceDetails": {
+                    "runtime": "image",
+                    "plan": self.core_plan,
+                    "region": self.region,
+                    "numInstances": 1,
+                    "healthCheckPath": "/readyz",
+                    "dockerCommand": (
+                        "serve --host 0.0.0.0 --port 10000 --require-auth "
+                        "--capability-profile production"
+                    ),
+                },
+            },
+        )
+        service = body.get("service") if isinstance(body, dict) else None
+        if status != 201:
+            raise LiveProviderError("render_public_service_create_failed")
+        service = self._validate_public(service)
+        if service.get("imagePath") != image:
+            raise LiveProviderError("render_public_service_drift")
+        self.services.validate_configuration(service["id"], env_vars=env_vars)
+        return service
+
+    def ensure(self, logical_id: str, desired: dict[str, Any]) -> dict[str, Any]:
+        _selection(
+            desired,
+            region=self.region_selection,
+            billing=self.billing_selection,
+        )
+        embedding = self._validate_embedding(desired.get("embedding"))
+        image = desired.get("image")
+        if (
+            desired.get("adapter") != "render-public-mcp"
+            or desired.get("public_ingress") is not True
+            or not isinstance(image, str)
+            or not IMAGE_RE.fullmatch(image)
+        ):
+            raise LiveProviderError("render_public_service_contract_invalid")
+        env_vars = self._public_env(embedding)
+        service = self.services.find(self.core_name)
+        created = service is None
+        if service is None:
+            service = self._create_public(image, env_vars)
+        else:
+            service = self._validate_public(service)
+            if service.get("imagePath") != image:
+                raise LiveProviderError("render_public_service_drift")
+            self.services.validate_configuration(service["id"], env_vars=env_vars)
+        return {
+            "action": "created" if created else "unchanged",
+            "receipt_sha256": _receipt("render", logical_id, [service["id"]]),
+            "public_url": service["serviceDetails"]["url"].rstrip("/"),
+        }
+
+
+class RenderDedicatedIpAdapter:
+    """Paid, explicit workspace-scoped dedicated egress for one Render region."""
+
+    def __init__(
+        self,
+        provider: JsonProvider,
+        *,
+        owner_id: str,
+        region: str,
+        name: str,
+    ):
+        if not owner_id or not region or not name:
+            raise LiveProviderError("dedicated_ip_configuration_invalid")
+        self.provider = provider
+        self.owner_id = owner_id
+        self.region = region
+        self.name = name
+
+    def _list(self) -> list[dict[str, Any]]:
+        query = urlencode({"ownerId": self.owner_id})
+        status, body = self.provider.request("GET", f"/dedicated-ips?{query}")
+        if status != 200 or not isinstance(body, list):
+            raise LiveProviderError("dedicated_ip_lookup_failed")
+        matches = []
+        for item in body:
+            value = (
+                item.get("dedicatedIp")
+                if isinstance(item, dict) and "dedicatedIp" in item
+                else item
+            )
+            if isinstance(value, dict) and value.get("name") == self.name:
+                matches.append(value)
+        if len(matches) > 1:
+            raise LiveProviderError("dedicated_ip_duplicate")
+        return matches
+
+    def _validate(self, value: object) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            raise LiveProviderError("provider_response_invalid")
+        ips = value.get("ips")
+        status = value.get("status")
+        try:
+            parsed_ips = [ipaddress.ip_address(item) for item in ips]
+        except (TypeError, ValueError):
+            raise LiveProviderError("dedicated_ip_drift") from None
+        if (
+            value.get("name") != self.name
+            or value.get("ownerId") != self.owner_id
+            or value.get("region") != self.region
+            or value.get("environmentIds", []) != []
+            or not isinstance(value.get("id"), str)
+            or status
+            not in {"CREATING", "PROVISIONING", "RUNNING", "FAILED", "DELETING"}
+            or any(item.version != 4 for item in parsed_ips)
+            or (status == "RUNNING" and len(parsed_ips) != 3)
+            or (status != "RUNNING" and parsed_ips)
+        ):
+            raise LiveProviderError("dedicated_ip_drift")
+        if status == "FAILED":
+            raise LiveProviderError("dedicated_ip_failed")
+        return value
+
+    def ensure(self, logical_id: str, desired: dict[str, Any]) -> dict[str, Any]:
+        if (
+            not isinstance(desired, dict)
+            or set(desired) != {"purchase_approved"}
+            or type(desired["purchase_approved"]) is not bool
+        ):
+            raise LiveProviderError("dedicated_ip_contract_invalid")
+        matches = self._list()
+        created = False
+        if matches:
+            value = self._validate(matches[0])
+        else:
+            if not desired["purchase_approved"]:
+                raise LiveProviderError(
+                    "dedicated_ip_purchase_approval_required"
+                )
+            status, value = self.provider.request(
+                "POST",
+                "/dedicated-ips",
+                {
+                    "name": self.name,
+                    "description": "Recall production database egress",
+                    "ownerId": self.owner_id,
+                    "region": self.region,
+                    "environmentIds": [],
+                },
+            )
+            if status != 201:
+                raise LiveProviderError("dedicated_ip_create_failed")
+            value = self._validate(value)
+            created = True
+        ips = list(value["ips"])
+        return {
+            "action": "created" if created else "unchanged",
+            "receipt_sha256": _receipt(
+                "render-dedicated-ip",
+                logical_id,
+                [value["id"]],
+            ),
+            "ready": value["status"] == "RUNNING",
+            "ips": ips,
         }
 
 
