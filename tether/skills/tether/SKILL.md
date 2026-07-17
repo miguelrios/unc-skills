@@ -33,7 +33,12 @@ Native Codex and Claude Code replies resume the captured session. Zellij-only re
 
 Tether uses Socket Mode for immediate replies and polls recent active bridge threads as a deduplicated recovery path. A reply missed during a websocket disconnect or gateway restart is admitted through the same allowlist and owner checks, then handled once. Do not add a second relay or polling script.
 
-Peer agents may collaborate through normal Slack conversation when Hermes is configured with `SLACK_ALLOW_BOTS=all` and `TETHER_ALLOWED_BOT_USERS` contains their comma-separated Slack member IDs. Tether rejects every other bot identity. Let the agent judge each admitted turn from the full shared-thread context instead of requiring mechanical mentions. The agent must return exactly `NO_REPLY` when a response is not clearly needed; Hermes suppresses that marker before delivery. Do not send courtesy acknowledgments or keep a converged conversation alive.
+When a bound session is busy, Tether batches queued follow-ups into one next turn. The bound agent
+is the sole writer for that batch: it posts at most one useful reply, or `NO_REPLY` when an earlier
+response already handled the thread. Bound-session replies default to 50 words, 500 characters,
+and 3 sentences. Tether does not post queue position or periodic working messages.
+
+Peer agents may collaborate through normal Slack conversation when Hermes is configured with `SLACK_ALLOW_BOTS=all` and `TETHER_ALLOWED_BOT_USERS` contains their comma-separated Slack member IDs. Tether rejects every other bot identity. In a bound thread, trusted peer turns go to the exact bound session too; Hermes is never a second writer. Let the agent judge each admitted turn from the full shared-thread context instead of requiring mechanical mentions. The agent must return exactly `NO_REPLY` when a response is not clearly needed; Hermes suppresses that marker before delivery. Do not send courtesy acknowledgments or keep a converged conversation alive.
 
 Completion criterion: the result is posted to the same thread, or the same thread receives a sanitized failure explaining that no alternate session was used.
 
@@ -45,6 +50,7 @@ Completion criterion: the result is posted to the same thread, or the same threa
 - Use `cancel`, `stop`, `nvm`, or `never mind` in Slack to stop an active native continuation.
 - Run `tether doctor` after setup or a Hermes upgrade.
 - Diagnose one thread without loading a Slack token: `tether thread --channel C... --thread-ts 123.456`.
+- If an intentional agent restart changes the exact pane process fingerprint, run `tether rebind --channel C... --thread-ts 123.456` from the intended replacement pane, then resend or replay the failed request. Never guess another pane.
 - Append progress to an existing thread without creating a second bridge: `tether post --channel C... --thread-ts 123.456 --text '...'`.
 
 Read [references/setup.md](references/setup.md) for installation and configuration. Read [references/contract.md](references/contract.md) when changing an automation or diagnosing routing.

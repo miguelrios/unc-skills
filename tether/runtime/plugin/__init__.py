@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import functools
 import importlib
 import importlib.util
+import json
 import logging
 import os
 import sys
@@ -38,6 +40,7 @@ deliver_zellij = runtime.deliver_zellij
 effective_allowed_users = runtime.effective_allowed_users
 load_config = runtime.load_config
 start_broker = runtime.start_broker
+validate_reply_text = runtime.validate_reply_text
 
 
 log = logging.getLogger(__name__)
@@ -75,6 +78,49 @@ def _reply_poll_interval() -> int:
     return _bounded_env_int("TETHER_REPLY_POLL_SECONDS", 30, 10, 300)
 
 
+def _import_native_slack_participation(adapter) -> int:
+    """Seed restart recovery from Hermes's recent native Slack sessions."""
+    sessions_path = runtime.HERMES_HOME / "sessions" / "sessions.json"
+    try:
+        payload = json.loads(sessions_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return 0
+    sessions = payload.values() if isinstance(payload, dict) else ()
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=7)
+    recent_sessions = []
+    for session in sessions:
+        if not isinstance(session, dict):
+            continue
+        updated_at = str(session.get("updated_at") or "")
+        try:
+            updated = datetime.datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+            if updated.tzinfo is None:
+                updated = updated.replace(tzinfo=datetime.timezone.utc)
+        except ValueError:
+            continue
+        if updated >= cutoff:
+            recent_sessions.append((updated, session))
+    recent_sessions.sort(key=lambda item: item[0], reverse=True)
+    imported = 0
+    for updated, session in recent_sessions[:2000]:
+        origin = session.get("origin")
+        if not isinstance(origin, dict) or origin.get("platform") != "slack":
+            continue
+        channel_id = str(origin.get("chat_id") or "")
+        thread_ts = str(origin.get("thread_id") or "")
+        if not channel_id or not thread_ts:
+            continue
+        team_id = str(getattr(adapter, "_channel_team", {}).get(channel_id, "") or "")
+        store.mark_participation(
+            team_id,
+            channel_id,
+            thread_ts,
+            observed_at=updated.astimezone(datetime.timezone.utc).isoformat(),
+        )
+        imported += 1
+    return imported
+
+
 def _health_status() -> dict[str, Any]:
     now = time.monotonic()
     interval = _reply_poll_interval()
@@ -108,10 +154,56 @@ def _bridge_for_slack_event(adapter, event):
 
 def _mark_bridge_thread_before_slack_gate(adapter, event) -> bool:
     bridge = _bridge_for_slack_event(adapter, event)
-    if bridge is None:
+    thread_ts = str(event.get("thread_ts") or "")
+    channel_id = str(event.get("channel") or event.get("channel_id") or "")
+    team_id = str(
+        event.get("team") or event.get("team_id")
+        or getattr(adapter, "_channel_team", {}).get(channel_id, "") or ""
+    )
+    if bridge is None and not store.participates(team_id, channel_id, thread_ts):
         return False
-    adapter._bot_message_ts.add(bridge.thread_ts)
+    adapter._bot_message_ts.add(thread_ts)
     return True
+
+
+async def _discover_existing_thread_participation(adapter, event) -> bool:
+    """Recover participation for threads created before persistence existed."""
+    thread_ts = str(event.get("thread_ts") or "")
+    channel_id = str(event.get("channel") or event.get("channel_id") or "")
+    if not thread_ts or not channel_id:
+        return False
+    team_id = str(
+        event.get("team") or event.get("team_id")
+        or getattr(adapter, "_channel_team", {}).get(channel_id, "") or ""
+    )
+    key = (team_id, channel_id, thread_ts)
+    misses = getattr(adapter, "_tether_participation_misses", None)
+    if misses is None:
+        misses = adapter._tether_participation_misses = set()
+    if key in misses:
+        return False
+    bot_user_id = (
+        getattr(adapter, "_team_bot_user_ids", {}).get(team_id)
+        or getattr(adapter, "_bot_user_id", None)
+    )
+    if not bot_user_id:
+        return False
+    try:
+        result = await adapter._get_client(channel_id).conversations_replies(
+            channel=channel_id, ts=thread_ts, limit=200,
+        )
+    except Exception:
+        return False
+    participated = any(
+        isinstance(message, dict) and str(message.get("user") or "") == str(bot_user_id)
+        for message in result.get("messages", [])
+    )
+    if participated:
+        store.mark_participation(team_id, channel_id, thread_ts)
+        adapter._bot_message_ts.add(thread_ts)
+        return True
+    misses.add(key)
+    return False
 
 
 def _is_bot_message(event: dict[str, Any]) -> bool:
@@ -201,16 +293,21 @@ def _install_slack_bridge_prefilter():
         _ensure_reply_poller(self)
         try:
             bridge = _bridge_for_slack_event(self, event)
-            if bridge is not None:
-                if _is_bot_message(event) and not _allows_bot_message(self, event, bridge.team_id):
-                    return None
-                self._bot_message_ts.add(bridge.thread_ts)
+            channel_id = str(event.get("channel") or event.get("channel_id") or "")
+            team_id = str(
+                event.get("team") or event.get("team_id")
+                or getattr(self, "_channel_team", {}).get(channel_id, "") or ""
+            )
+            if _is_bot_message(event) and not _allows_bot_message(self, event, team_id):
+                return None
+            marked = _mark_bridge_thread_before_slack_gate(self, event)
+            if not marked and event.get("thread_ts"):
+                marked = await _discover_existing_thread_participation(self, event)
+            if marked and bridge is None and not event.get("_tether_polled"):
                 event_id = str(event.get("ts") or "")
-                if (
-                    not event.get("_tether_polled")
-                    and _is_bot_message(event)
-                    and event_id
-                    and not store.mark_ingress(event_id, bridge.bridge_id)
+                thread_ts = str(event.get("thread_ts") or "")
+                if event_id and not store.mark_thread_ingress(
+                    event_id, team_id, channel_id, thread_ts,
                 ):
                     return None
         except Exception:
@@ -224,6 +321,9 @@ def _install_slack_bridge_prefilter():
         connected = await original_connect(self, *args, **kwargs)
         state.slack_transport_connected = bool(connected)
         if connected:
+            imported = _import_native_slack_participation(self)
+            if imported:
+                log.info("Tether imported %d recent native Slack thread(s)", imported)
             _ensure_reply_poller(self)
         return connected
 
@@ -237,7 +337,24 @@ def _install_slack_bridge_prefilter():
             if _is_silence_control_output(content):
                 log.info("Tether suppressed an internal silence control token at Slack egress")
                 return {"ok": True, "suppressed": True}
-            return await original_send(self, *args, **kwargs)
+            result = await original_send(self, *args, **kwargs)
+            succeeded = (
+                bool(result.get("ok", result.get("success", True)))
+                if isinstance(result, dict)
+                else bool(getattr(result, "success", True))
+            )
+            if not succeeded:
+                return result
+            channel_id = str(kwargs.get("chat_id") or kwargs.get("channel") or (args[0] if args else ""))
+            metadata = kwargs.get("metadata") or (args[3] if len(args) >= 4 else {}) or {}
+            reply_to = kwargs.get("reply_to") or (args[2] if len(args) >= 3 else "")
+            thread_ts = str(
+                metadata.get("thread_id") or metadata.get("thread_ts") or reply_to or ""
+            )
+            if channel_id and thread_ts:
+                team_id = str(getattr(self, "_channel_team", {}).get(channel_id, "") or "")
+                store.mark_participation(team_id, channel_id, thread_ts)
+            return result
 
         SlackAdapter.send = bridged_send
     if original_restart is not None:
@@ -258,31 +375,50 @@ async def _poll_recent_replies(adapter) -> int:
     hours = _bounded_env_int("TETHER_REPLY_RECOVERY_HOURS", 24, 1, 168)
     batch_size = _bounded_env_int("TETHER_REPLY_POLL_BATCH", 10, 1, 25)
     bridges = store.recent_active_bridges(hours=hours, limit=100)
-    if not bridges:
+    bridge_keys = {(bridge.team_id, bridge.channel_id, bridge.thread_ts) for bridge in bridges}
+    participating = [
+        item for item in store.recent_participating_threads(hours=max(hours, 168), limit=500)
+        if item[:3] not in bridge_keys
+    ]
+    targets = [
+        (bridge, bridge.team_id, bridge.channel_id, str(bridge.thread_ts), None)
+        for bridge in bridges
+    ] + [(None, *item) for item in participating]
+    if not targets:
         return 0
-    start = state.poll_cursor % len(bridges)
-    batch = (bridges + bridges)[start:start + min(batch_size, len(bridges))]
-    state.poll_cursor = (start + len(batch)) % len(bridges)
+    start = state.poll_cursor % len(targets)
+    batch = (targets + targets)[start:start + min(batch_size, len(targets))]
+    state.poll_cursor = (start + len(batch)) % len(targets)
     oldest = f"{time.time() - hours * 3600:.6f}"
     recovered = 0
     succeeded = 0
-    for bridge in batch:
+    allowed_users = set(effective_allowed_users())
+    for bridge, team_id, channel_id, thread_ts, participation_since in batch:
         try:
-            client = adapter._get_client(bridge.channel_id)
-            channel_key = (bridge.team_id, bridge.channel_id)
-            if bridge.channel_id.startswith("C") and channel_key not in state.joined_channels:
-                await client.conversations_join(channel=bridge.channel_id)
+            client = adapter._get_client(channel_id)
+            channel_key = (team_id, channel_id)
+            if channel_id.startswith("C") and channel_key not in state.joined_channels:
+                try:
+                    await client.conversations_history(channel=channel_id, limit=1)
+                except Exception as exc:
+                    if "not_in_channel" not in str(exc):
+                        raise
+                    await client.conversations_join(channel=channel_id)
                 state.joined_channels.add(channel_key)
             result = await client.conversations_replies(
-                channel=bridge.channel_id,
-                ts=bridge.thread_ts,
-                oldest=oldest,
+                channel=channel_id,
+                ts=thread_ts,
+                oldest=(
+                    f"{max(float(oldest), participation_since):.6f}"
+                    if participation_since is not None else oldest
+                ),
                 inclusive=False,
                 limit=100,
             )
             succeeded += 1
         except Exception as exc:
-            log.warning("Could not poll Tether thread %s: %s", bridge.bridge_id, type(exc).__name__)
+            target = bridge.bridge_id if bridge is not None else f"{channel_id}:{thread_ts}"
+            log.warning("Could not poll Tether thread %s: %s", target, type(exc).__name__)
             continue
         for message in result.get("messages", []):
             if not isinstance(message, dict):
@@ -290,26 +426,36 @@ async def _poll_recent_replies(adapter) -> int:
             event_id = str(message.get("ts") or "")
             user_id = str(message.get("user") or "")
             text = str(message.get("text") or "")
-            bot_allowed = _allows_bot_message(adapter, message, bridge.team_id)
+            bot_allowed = _allows_bot_message(adapter, message, team_id)
             if (
                 not event_id
-                or event_id == bridge.thread_ts
+                or event_id == thread_ts
                 or not text.strip()
                 or (_is_bot_message(message) and not bot_allowed)
-                or (not _is_bot_message(message) and not _authorized(bridge, user_id))
+                or (
+                    not _is_bot_message(message)
+                    and (
+                        user_id not in allowed_users
+                        or (bridge is not None and not _authorized(bridge, user_id))
+                    )
+                )
                 or store.has_ingress(event_id)
             ):
                 continue
+            if bridge is None:
+                claimed = store.mark_thread_ingress(
+                    event_id, team_id, channel_id, thread_ts,
+                )
+                if not claimed:
+                    continue
             event = dict(message)
             event.update({
-                "channel": bridge.channel_id,
-                "team": bridge.team_id,
-                "thread_ts": bridge.thread_ts,
-                "channel_type": "im" if bridge.channel_id.startswith("D") else "channel",
+                "channel": channel_id,
+                "team": team_id,
+                "thread_ts": thread_ts,
+                "channel_type": "im" if channel_id.startswith("D") else "channel",
                 "_tether_polled": True,
             })
-            if _is_bot_message(message) and not store.mark_ingress(event_id, bridge.bridge_id):
-                continue
             await adapter._handle_slack_message(event)
             recovered += 1
     if batch and not succeeded:
@@ -356,23 +502,6 @@ def _suppress_bridge_reaction(event, gateway):
         )
 
 
-async def _progress(adapter, bridge):
-    delay = 5
-    elapsed = 0
-    while True:
-        await asyncio.sleep(delay)
-        elapsed += delay
-        text = "_Working in the bound agent session…_" if elapsed < 60 else f"_Still working in the bound agent session ({elapsed // 60}m)…_"
-        await adapter.send(bridge.channel_id, text, metadata={"thread_id": bridge.thread_ts})
-        delay = 300
-
-
-async def _stop_progress(task: asyncio.Task) -> None:
-    if not task.done():
-        task.cancel()
-    await asyncio.gather(task, return_exceptions=True)
-
-
 def _failure_reason(exc: Exception) -> str:
     text = str(exc).lower()
     if "credential" in text or "authentication" in text or "401" in text:
@@ -386,11 +515,34 @@ def _failure_reason(exc: Exception) -> str:
     return "the bound session could not be resumed"
 
 
-def _run_recovered_event(bridge, item):
+def _batch_prompt(items) -> str:
+    if len(items) == 1:
+        return items[0]["text"]
+    sections = [
+        f"[Slack follow-up {index} of {len(items)}]\n{item['text']}"
+        for index, item in enumerate(items, start=1)
+    ]
+    return (
+        "These follow-ups arrived while the bound session was busy. Handle them together, "
+        "using the latest message when requests overlap.\n\n" + "\n\n".join(sections)
+    )
+
+
+def _finish_batch(items, error: str | None = None) -> None:
+    for item in items:
+        store.finish_event(item["event_id"], error)
+
+
+def _run_recovered_event(bridge, items):
+    prompt = _batch_prompt(items)
     if _has_bound_zellij_pane(bridge):
-        deliver_zellij(bridge, item["text"])
+        deliver_zellij(bridge, prompt)
         return ""
-    return continue_native(bridge, item["text"])
+    return continue_native(
+        bridge,
+        prompt + "\n\nReturn one useful Slack update only, within 50 words and 3 sentences. "
+        "Return exactly NO_REPLY if the thread is already answered.",
+    )
 
 
 def _has_bound_zellij_pane(bridge) -> bool:
@@ -405,25 +557,22 @@ def _has_bound_zellij_pane(bridge) -> bool:
 def _recover_queued_events():
     for bridge_id in store.queued_bridge_ids():
         while True:
-            item = store.claim_next_event(bridge_id)
-            if item is None:
+            items = store.claim_event_batch(bridge_id)
+            if not items:
                 break
             bridge = store.get(bridge_id)
             if bridge is None or not bridge.thread_ts:
-                store.finish_event(item["event_id"], "bridge is no longer active")
+                _finish_batch(items, "bridge is no longer active")
                 continue
             try:
-                broker_call({
-                    "op": "reply", "bridge_id": bridge_id,
-                    "text": "_Resuming a queued continuation after a Hermes gateway restart…_",
-                })
-                response = _run_recovered_event(bridge, item)
-                if response:
+                response = _run_recovered_event(bridge, items)
+                if response and response.strip() != "NO_REPLY":
+                    response = validate_reply_text(response)
                     broker_call({"op": "reply", "bridge_id": bridge_id, "text": response})
-                store.finish_event(item["event_id"])
+                _finish_batch(items)
             except Exception as exc:
                 reason = _failure_reason(exc)
-                store.finish_event(item["event_id"], f"{type(exc).__name__}: {reason}")
+                _finish_batch(items, f"{type(exc).__name__}: {reason}")
                 log.error("Recovered bridge reply failed for %s: %s", bridge_id, reason)
                 try:
                     broker_call({"op": "reply", "bridge_id": bridge_id, "text": f"The recovered continuation failed because {reason}."})
@@ -435,29 +584,36 @@ async def _drain_bridge(bridge_id, gateway, platform):
     lock = state.bridge_locks.setdefault(bridge_id, asyncio.Lock())
     async with lock:
         while True:
-            item = store.claim_next_event(bridge_id)
-            if item is None:
+            items = store.claim_event_batch(bridge_id)
+            if not items:
                 return
             bridge = store.get(bridge_id)
             if bridge is None or not bridge.thread_ts:
-                store.finish_event(item["event_id"], "bridge is no longer active")
+                _finish_batch(items, "bridge is no longer active")
                 continue
             adapter = gateway.adapters[platform]
-            progress = asyncio.create_task(_progress(adapter, bridge))
             cancellation = threading.Event()
             state.active_cancellations[bridge_id] = cancellation
             try:
+                prompt = _batch_prompt(items)
                 if _has_bound_zellij_pane(bridge):
-                    await asyncio.to_thread(deliver_zellij, bridge, item["text"])
+                    await asyncio.to_thread(deliver_zellij, bridge, prompt)
                     response = ""
                 else:
-                    response = await asyncio.to_thread(continue_native, bridge, item["text"], cancellation)
-                if response:
+                    response = await asyncio.to_thread(
+                        continue_native,
+                        bridge,
+                        prompt + "\n\nReturn one useful Slack update only, within 50 words and 3 sentences. "
+                        "Return exactly NO_REPLY if the thread is already answered.",
+                        cancellation,
+                    )
+                if response and response.strip() != "NO_REPLY":
+                    response = validate_reply_text(response)
                     await adapter.send(bridge.channel_id, response, metadata={"thread_id": bridge.thread_ts})
-                store.finish_event(item["event_id"])
+                _finish_batch(items)
             except Exception as exc:
                 reason = _failure_reason(exc)
-                store.finish_event(item["event_id"], f"{type(exc).__name__}: {reason}")
+                _finish_batch(items, f"{type(exc).__name__}: {reason}")
                 log.error("Bridge reply failed for %s: %s", bridge.bridge_id, reason)
                 try:
                     await adapter.send(
@@ -469,7 +625,6 @@ async def _drain_bridge(bridge_id, gateway, platform):
                     log.exception("Could not report bridge failure in Slack for %s", bridge.bridge_id)
             finally:
                 state.active_cancellations.pop(bridge_id, None)
-                await _stop_progress(progress)
 
 
 def _authorized(bridge, user_id: str) -> bool:
@@ -484,17 +639,22 @@ def _pre_gateway_dispatch(*, event, gateway, **_kwargs):
     bridge = store.find(str(source.guild_id or ""), str(source.chat_id), str(source.thread_id))
     if bridge is None:
         return None
-    # Peer bots belong to the Hermes conversation, never a captured native
-    # coding session. The conversation agent decides whether to answer.
-    if getattr(source, "is_bot", False):
-        return None
+    # Once a thread resolves to Tether, the exact bound session is its sole
+    # writer for admitted human and trusted peer-agent turns. Hermes must not
+    # leave its generic processing/success reaction behind.
+    is_bot = bool(getattr(source, "is_bot", False))
     user_id = str(source.user_id or "")
-    if not _authorized(bridge, user_id):
+    if is_bot and user_id not in _allowed_peer_bot_users():
+        return {"action": "skip", "reason": "bridge-bot-not-authorized"}
+    # Tether must not leave its generic
+    # processing/success reaction behind. In particular, an authorization
+    # rejection is not a successful handoff.
+    _suppress_bridge_reaction(event, gateway)
+    if not is_bot and not _authorized(bridge, user_id):
         return {"action": "skip", "reason": "bridge-user-not-authorized"}
     event_id = str(event.message_id or source.message_id or "")
     if not store.mark_ingress(event_id, bridge.bridge_id):
         return {"action": "skip", "reason": "tether-duplicate"}
-    _suppress_bridge_reaction(event, gateway)
     if bridge.source_kind in {"headless_run", "hermes_session"}:
         run_id = str(bridge.source.get("run_id") or bridge.source.get("session_id") or "unknown")
         cwd = str(bridge.source.get("cwd") or "")
@@ -527,14 +687,6 @@ def _pre_gateway_dispatch(*, event, gateway, **_kwargs):
         return {"action": "skip", "reason": "tether-cancel"}
     inserted = store.enqueue_event(event_id, bridge.bridge_id, delta)
     if inserted:
-        pending = store.pending_count(bridge.bridge_id)
-        if pending > 1:
-            asyncio.get_running_loop().create_task(
-                gateway.adapters[source.platform].send(
-                    bridge.channel_id, f"_Queued behind {pending - 1} active reply._",
-                    metadata={"thread_id": bridge.thread_ts},
-                )
-            )
         asyncio.get_running_loop().create_task(_drain_bridge(bridge.bridge_id, gateway, source.platform))
     return {"action": "skip", "reason": "tether-handled"}
 

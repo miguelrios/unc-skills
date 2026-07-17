@@ -1,5 +1,6 @@
 import asyncio
 import concurrent.futures
+import datetime
 import hashlib
 import importlib.util
 import json
@@ -78,6 +79,17 @@ class StoreTest(unittest.TestCase):
         self.store.finish_event(first["event_id"])
         self.assertEqual(self.store.claim_next_event(bridge.bridge_id)["text"], "second")
 
+    def test_queued_followups_are_claimed_as_one_batch(self):
+        bridge = self.store.bind(self.store.create(self.request()).bridge_id, "123.456")
+        self.assertTrue(self.store.enqueue_event("111.1", bridge.bridge_id, "first follow-up"))
+        self.assertTrue(self.store.enqueue_event("111.2", bridge.bridge_id, "second follow-up"))
+        batch = self.store.claim_event_batch(bridge.bridge_id)
+        self.assertEqual(
+            [(item["event_id"], item["text"]) for item in batch],
+            [("111.1", "first follow-up"), ("111.2", "second follow-up")],
+        )
+        self.assertEqual(self.store.claim_event_batch(bridge.bridge_id), [])
+
     def test_processing_events_are_requeued_after_restart(self):
         bridge = self.store.create(self.request())
         self.assertTrue(self.store.enqueue_event("111.1", bridge.bridge_id, "resume me"))
@@ -119,6 +131,16 @@ class StoreTest(unittest.TestCase):
         request["owner_user_id"] = "not-a-slack-id"
         with self.assertRaises(ValueError):
             self.store.create(request)
+
+    def test_user_id_cannot_be_stored_as_a_channel(self):
+        with self.assertRaisesRegex(ValueError, "invalid Slack channel"):
+            self.store.create({
+                "source_kind": "headless_run",
+                "source": {"run_id": "run-1"},
+                "owner_user_id": "U12345678",
+                "channel_id": "U12345678",
+                "idempotency_key": "bad-user-destination",
+            })
 
     def test_source_metadata_rejects_unknown_or_oversized_values(self):
         request = self.request()
@@ -174,6 +196,80 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(status["protocol_version"], 2)
         self.assertNotIn("allowed_users", status, "status reports readiness, never identities")
 
+    def test_shared_channel_rejects_accidental_owner_restriction(self):
+        broker = self.runtime.Broker("test-token", self.store)
+        request = {
+            "op": "notify", "text": "finished", "source_kind": "headless_run",
+            "source": {"run_id": "run-owner", "cwd": "/tmp/project"},
+            "owner_user_id": "U12345678",
+            "channel_id": "C12345678",
+            "idempotency_key": "run-owner",
+        }
+        with mock.patch.dict(
+            os.environ, {"SLACK_ALLOWED_USERS": "U12345678,U87654321"}, clear=False
+        ), self.assertRaisesRegex(ValueError, "owner-restricted shared-channel"):
+            broker.handle(request)
+
+    def test_bound_reply_is_brief_and_idempotent_per_agent_turn(self):
+        bridge = self.store.bind(self.store.create(self.request()).bridge_id, "123.456")
+        broker = self.runtime.Broker("test-token", self.store)
+        request = {
+            "op": "reply", "bridge_id": bridge.bridge_id,
+            "reply_key": "tether-123456789abc", "text": "Fixed and verified.",
+        }
+        with mock.patch.object(broker, "_ensure_channel_membership"), mock.patch.object(
+            self.runtime, "slack_post", return_value="123.457",
+        ) as post:
+            first = broker.handle(request)
+            second = broker.handle(request)
+        self.assertFalse(first["deduplicated"])
+        self.assertTrue(second["deduplicated"])
+        self.assertEqual(post.call_count, 1)
+
+        too_long = " ".join(["detail"] * 51)
+        with self.assertRaisesRegex(ValueError, "Slack reply is too long"):
+            broker.handle({
+                "op": "reply", "bridge_id": bridge.bridge_id,
+                "reply_key": "tether-abcdef123456", "text": too_long,
+            })
+
+    def test_explicit_rebind_updates_only_the_matching_active_thread(self):
+        bridge = self.store.bind(self.store.create(self.request()).bridge_id, "123.456")
+        broker = self.runtime.Broker("test-token", self.store)
+        result = broker.handle({
+            "op": "rebind",
+            "channel_id": bridge.channel_id,
+            "thread_ts": bridge.thread_ts,
+            "source_kind": "zellij_pane",
+            "source": {
+                "session_name": "work", "pane_id": "7", "cwd": "/tmp/project",
+                "pane_agent": "claude", "pane_command_hash": "new-fingerprint",
+            },
+        })
+        rebound = self.store.get(bridge.bridge_id)
+        self.assertEqual(result["bridge_id"], bridge.bridge_id)
+        self.assertEqual(rebound.source_kind, "zellij_pane")
+        self.assertEqual(rebound.source["pane_command_hash"], "new-fingerprint")
+        with self.assertRaisesRegex(ValueError, "active bridge not found"):
+            broker.handle({
+                "op": "rebind",
+                "channel_id": "C99999999",
+                "thread_ts": bridge.thread_ts,
+                "source_kind": "zellij_pane",
+                "source": rebound.source,
+            })
+
+    def test_no_reply_control_token_is_suppressed(self):
+        bridge = self.store.bind(self.store.create(self.request()).bridge_id, "123.456")
+        broker = self.runtime.Broker("test-token", self.store)
+        with mock.patch.object(self.runtime, "slack_post") as post:
+            result = broker.handle({
+                "op": "reply", "bridge_id": bridge.bridge_id,
+                "reply_key": "tether-abcdef123456", "text": "NO_REPLY",
+            })
+        self.assertTrue(result["suppressed"])
+        post.assert_not_called()
+
     def test_thread_history_stays_behind_broker_and_returns_sanitized_messages(self):
         broker = self.runtime.Broker("test-token", self.store)
         response = {
@@ -183,7 +279,7 @@ class StoreTest(unittest.TestCase):
             }]
         }
         with mock.patch.object(self.runtime, "_slack_call", side_effect=[
-            {"ok": True, "channel": {"id": "C12345678"}}, response,
+            {"ok": True, "messages": []}, response,
         ]) as call:
             result = broker.handle({
                 "op": "thread_history", "channel_id": "C12345678",
@@ -193,7 +289,10 @@ class StoreTest(unittest.TestCase):
             "ts": "123.456", "thread_ts": "100.000", "text": "reply", "user": "U12345678",
         }])
         self.assertEqual(call.call_args_list, [
-            mock.call("test-token", "conversations.join", {"channel": "C12345678"}),
+            mock.call(
+                "test-token", "conversations.history",
+                {"channel": "C12345678", "limit": 1},
+            ),
             mock.call(
                 "test-token", "conversations.replies",
                 {"channel": "C12345678", "ts": "100.000", "limit": 10},
@@ -202,12 +301,37 @@ class StoreTest(unittest.TestCase):
 
     def test_public_destination_is_joined_only_once_per_broker(self):
         broker = self.runtime.Broker("test-token", self.store)
-        with mock.patch.object(self.runtime, "_slack_call", return_value={"ok": True}) as call:
+        with mock.patch.object(
+            self.runtime,
+            "_slack_call",
+            side_effect=[
+                RuntimeError("Slack API error: not_in_channel"),
+                {"ok": True},
+            ],
+        ) as call:
             broker._ensure_channel_membership("C12345678")
             broker._ensure_channel_membership("C12345678")
             broker._ensure_channel_membership("D12345678")
+        self.assertEqual(call.call_args_list, [
+            mock.call(
+                "test-token", "conversations.history",
+                {"channel": "C12345678", "limit": 1},
+            ),
+            mock.call("test-token", "conversations.join", {"channel": "C12345678"}),
+        ])
+
+    def test_dm_with_c_prefixed_id_is_not_joined(self):
+        broker = self.runtime.Broker("test-token", self.store)
+        with mock.patch.object(
+            self.runtime,
+            "_slack_call",
+            return_value={"ok": True, "messages": []},
+        ) as call:
+            broker._ensure_channel_membership("C0BHSK52GP5")
         call.assert_called_once_with(
-            "test-token", "conversations.join", {"channel": "C12345678"},
+            "test-token",
+            "conversations.history",
+            {"channel": "C0BHSK52GP5", "limit": 1},
         )
 
     def test_identity_returns_only_nonsecret_bot_metadata(self):
@@ -233,6 +357,29 @@ class StoreTest(unittest.TestCase):
         post.assert_called_once_with("test-token", "C12345678", "progress", "123.456")
         self.assertEqual(result["thread_ts"], "123.456")
         self.assertEqual(self.store.recent_active_bridges(), [])
+        self.assertTrue(self.store.participates("", "C12345678", "123.456"))
+
+    def test_thread_participation_survives_store_reopen_and_team_lookup(self):
+        self.store.mark_participation("T12345678", "C12345678", "123.456")
+        reopened = self.runtime.Store(self.store.path)
+        self.assertTrue(reopened.participates("T12345678", "C12345678", "123.456"))
+        self.assertFalse(reopened.participates("T99999999", "C12345678", "123.456"))
+
+    def test_participating_thread_ingress_is_deduplicated_and_kept_recent(self):
+        self.store.mark_participation("T12345678", "C12345678", "123.456")
+        self.assertTrue(self.store.mark_thread_ingress(
+            "123.457", "T12345678", "C12345678", "123.456",
+        ))
+        self.assertFalse(self.store.mark_thread_ingress(
+            "123.457", "T12345678", "C12345678", "123.456",
+        ))
+        self.assertTrue(self.store.has_ingress("123.457"))
+        recent = self.store.recent_participating_threads()
+        self.assertIn(
+            ("T12345678", "C12345678", "123.456"),
+            [item[:3] for item in recent],
+        )
+        self.assertIsInstance(recent[0][3], float)
 
     def test_concurrent_idempotent_notifications_post_one_root_message(self):
         broker = self.runtime.Broker("test-token", self.store)
@@ -445,6 +592,16 @@ class CredentialBoundaryTest(unittest.TestCase):
         self.assertTrue(any("send-keys" in command and "Enter" in command for command in commands))
         self.assertEqual(sum("dump-screen" in command for command in commands), 2)
         self.assertGreaterEqual(identity.call_count, 2)
+        written = next(
+            command[-1] for command in commands
+            if "write-chars" in command
+        )
+        self.assertIn("--reply-key " + marker, written)
+        self.assertIn("at most one Slack message", written)
+        self.assertIn("50 words", written)
+        inbox = self.home / ".local" / "share" / "tether" / "inbox" / f"{marker}.txt"
+        self.assertEqual(inbox.read_text().strip(), text)
+        self.assertEqual(inbox.stat().st_mode & 0o777, 0o600)
 
 
 class NotifierTest(unittest.TestCase):
@@ -513,6 +670,28 @@ class NotifierTest(unittest.TestCase):
         self.assertEqual(kind, "zellij_pane")
         self.assertEqual(source["pane_command_hash"], "abc123")
         capture.assert_called_once_with("work", "7", str(pathlib.Path.cwd()))
+
+    def test_rebind_captures_the_current_exact_pane(self):
+        identity = {
+            "session_name": "work", "pane_id": "7", "cwd": "/tmp/project",
+            "pane_agent": "claude", "pane_command_hash": "new-fingerprint",
+        }
+        with mock.patch.dict(os.environ, {
+            "ZELLIJ_SESSION_NAME": "work",
+            "ZELLIJ_PANE_ID": "7",
+        }, clear=True), mock.patch.object(
+            self.notifier, "zellij_pane_identity", return_value=identity,
+        ), mock.patch.object(
+            self.notifier, "broker_call",
+            return_value={"ok": True, "thread_ts": "123.456"},
+        ) as broker:
+            result = self.notifier.main([
+                "rebind", "--channel", "C12345678", "--thread-ts", "123.456",
+            ])
+        self.assertEqual(result, 0)
+        request = broker.call_args.args[0]
+        self.assertEqual(request["op"], "rebind")
+        self.assertEqual(request["source"]["pane_command_hash"], "new-fingerprint")
 
     def test_noninteractive_setup_delegates_manifest_to_hermes(self):
         args = types.SimpleNamespace(non_interactive=True, no_restart=False)
@@ -612,6 +791,75 @@ class PluginRoutingTest(unittest.TestCase):
         })
         return self.plugin.store.bind(bridge.bridge_id, "123.456")
 
+    def test_imports_recent_native_slack_sessions_for_restart_recovery(self):
+        sessions = self.runtime.HERMES_HOME / "sessions" / "sessions.json"
+        sessions.parent.mkdir(parents=True)
+        sessions.write_text(json.dumps({
+            "agent:main:slack:dm:C0BHSK52GP5:1784319237.201969": {
+                "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "origin": {
+                    "platform": "slack",
+                    "chat_id": "C0BHSK52GP5",
+                    "thread_id": "1784319237.201969",
+                },
+            },
+            "old": {
+                "updated_at": "2020-01-01T00:00:00+00:00",
+                "origin": {
+                    "platform": "slack",
+                    "chat_id": "COLD00000",
+                    "thread_id": "100.000",
+                },
+            },
+        }))
+        adapter = types.SimpleNamespace(
+            _channel_team={"C0BHSK52GP5": "T12345678"},
+        )
+        imported = self.plugin._import_native_slack_participation(adapter)
+        self.assertEqual(imported, 1)
+        self.assertTrue(self.plugin.store.participates(
+            "T12345678", "C0BHSK52GP5", "1784319237.201969",
+        ))
+        participation = self.plugin.store.recent_participating_threads(
+            hours=24 * 365, limit=10,
+        )
+        self.assertLess(participation[0][3], datetime.datetime.now().timestamp() + 1)
+
+    def test_import_uses_newest_sessions_when_store_exceeds_limit(self):
+        sessions = self.runtime.HERMES_HOME / "sessions" / "sessions.json"
+        sessions.parent.mkdir(parents=True)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        payload = {
+            f"old-{index}": {
+                "updated_at": (now - datetime.timedelta(days=30)).isoformat(),
+                "origin": {
+                    "platform": "slack",
+                    "chat_id": "COLD00000",
+                    "thread_id": f"{index}.000",
+                },
+            }
+            for index in range(2000)
+        }
+        payload["recent"] = {
+            "updated_at": now.isoformat(),
+            "origin": {
+                "platform": "slack",
+                "chat_id": "C0BHSK52GP5",
+                "thread_id": "1784319237.201969",
+            },
+        }
+        sessions.write_text(json.dumps(payload))
+        adapter = types.SimpleNamespace(
+            _channel_team={"C0BHSK52GP5": "T12345678"},
+        )
+
+        imported = self.plugin._import_native_slack_participation(adapter)
+
+        self.assertEqual(imported, 1)
+        self.assertTrue(self.plugin.store.participates(
+            "T12345678", "C0BHSK52GP5", "1784319237.201969",
+        ))
+
     def test_authorization_fails_closed_and_honors_owner(self):
         bridge = self.make_bridge()
         self.assertTrue(self.plugin._authorized(bridge, "U12345678"))
@@ -625,6 +873,42 @@ class PluginRoutingTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"SLACK_ALLOWED_USERS": "U12345678"}, clear=False):
             self.assertTrue(self.plugin._authorized(bridge, "U12345678"))
 
+    def test_unauthorized_bridge_reply_does_not_keep_success_reaction(self):
+        self.make_bridge(owner="U12345678")
+
+        class Platform:
+            value = "slack"
+
+        platform = Platform()
+        source = types.SimpleNamespace(
+            platform=platform, thread_id="123.456", guild_id="T12345678",
+            chat_id="C12345678", user_id="U99999999", message_id="111.1",
+            is_bot=False,
+        )
+        event = types.SimpleNamespace(source=source, message_id="111.1", text="continue")
+
+        class Adapter:
+            _reacting_message_ids = {"111.1"}
+
+            def __init__(self):
+                self.removed = []
+
+            async def _remove_reaction(self, channel, event_id, reaction):
+                self.removed.append((channel, event_id, reaction))
+
+        adapter = Adapter()
+        gateway = types.SimpleNamespace(adapters={platform: adapter})
+
+        async def exercise():
+            result = self.plugin._pre_gateway_dispatch(event=event, gateway=gateway)
+            await asyncio.sleep(0)
+            return result
+
+        result = asyncio.run(exercise())
+        self.assertEqual(result["reason"], "bridge-user-not-authorized")
+        self.assertNotIn("111.1", adapter._reacting_message_ids)
+        self.assertEqual(adapter.removed, [("C12345678", "111.1", "eyes")])
+
     def test_exact_thread_prefilter_marks_only_active_bridge(self):
         self.make_bridge()
         adapter = types.SimpleNamespace(_bot_message_ts=set(), _channel_team={"C12345678": "T12345678"})
@@ -635,6 +919,73 @@ class PluginRoutingTest(unittest.TestCase):
         self.assertFalse(self.plugin._mark_bridge_thread_before_slack_gate(adapter, {
             "thread_ts": "999.999", "channel": "C12345678",
         }))
+
+    def test_prefilter_marks_persisted_non_bridge_participation(self):
+        self.plugin.store.mark_participation("T12345678", "C12345678", "123.456")
+        adapter = types.SimpleNamespace(_bot_message_ts=set(), _channel_team={"C12345678": "T12345678"})
+        self.assertTrue(self.plugin._mark_bridge_thread_before_slack_gate(adapter, {
+            "thread_ts": "123.456", "channel": "C12345678",
+        }))
+        self.assertIn("123.456", adapter._bot_message_ts)
+
+    def test_native_send_persists_thread_participation(self):
+        class SlackAdapter:
+            _tether_prefilter = False
+
+            def __init__(self):
+                self._bot_message_ts = set()
+                self._channel_team = {"C12345678": "T12345678"}
+
+            async def connect(self):
+                return True
+
+            async def send(self, channel, content, reply_to=None, metadata=None):
+                return {"ok": True}
+
+            async def _handle_slack_message(self, event):
+                return event
+
+        modules = {
+            "plugins": types.ModuleType("plugins"),
+            "plugins.platforms": types.ModuleType("plugins.platforms"),
+            "plugins.platforms.slack": types.ModuleType("plugins.platforms.slack"),
+            "plugins.platforms.slack.adapter": types.ModuleType("plugins.platforms.slack.adapter"),
+        }
+        modules["plugins.platforms.slack.adapter"].SlackAdapter = SlackAdapter
+        with mock.patch.dict(sys.modules, modules), mock.patch.object(self.plugin, "_ensure_reply_poller"):
+            self.plugin._install_slack_bridge_prefilter()
+            adapter = SlackAdapter()
+            asyncio.run(adapter.send("C12345678", "done", "123.456", None))
+        self.assertTrue(self.plugin.store.participates(
+            "T12345678", "C12345678", "123.456",
+        ))
+
+    def test_existing_bot_thread_is_discovered_once_and_persisted(self):
+        class Client:
+            calls = 0
+
+            async def conversations_replies(self, **kwargs):
+                self.calls += 1
+                return {"messages": [
+                    {"ts": "123.456", "user": "UHUMAN001"},
+                    {"ts": "123.457", "user": "UBOT00001", "bot_id": "BBOT00001"},
+                ]}
+
+        client = Client()
+        adapter = types.SimpleNamespace(
+            _bot_message_ts=set(),
+            _channel_team={"C12345678": "T12345678"},
+            _team_bot_user_ids={"T12345678": "UBOT00001"},
+            _get_client=lambda _channel: client,
+        )
+        event = {"thread_ts": "123.456", "channel": "C12345678"}
+        self.assertTrue(asyncio.run(
+            self.plugin._discover_existing_thread_participation(adapter, event)
+        ))
+        self.assertTrue(self.plugin.store.participates(
+            "T12345678", "C12345678", "123.456",
+        ))
+        self.assertEqual(client.calls, 1)
 
     def test_prefilter_admits_unmentioned_reply_before_hermes_mention_gate(self):
         self.make_bridge()
@@ -714,8 +1065,11 @@ class PluginRoutingTest(unittest.TestCase):
         ]
 
         class Client:
+            async def conversations_history(self, **_kwargs):
+                return {"ok": True, "messages": []}
+
             async def conversations_join(self, **_kwargs):
-                return {"ok": True}
+                raise AssertionError("already-accessible DM must not be joined")
 
             async def conversations_replies(self, **_kwargs):
                 return {"messages": messages}
@@ -729,15 +1083,105 @@ class PluginRoutingTest(unittest.TestCase):
 
             async def _handle_slack_message(self, event):
                 self.events.append(event)
-                self_plugin.store.mark_ingress(str(event["ts"]), bridge.bridge_id)
+                source = types.SimpleNamespace(
+                    platform=platform,
+                    thread_id=event["thread_ts"],
+                    guild_id="T12345678",
+                    chat_id=event["channel"],
+                    user_id=event["user"],
+                    message_id=event["ts"],
+                    is_bot=False,
+                )
+                gateway_event = types.SimpleNamespace(
+                    source=source,
+                    message_id=event["ts"],
+                    text=event["text"],
+                )
+                result = self_plugin._pre_gateway_dispatch(
+                    event=gateway_event,
+                    gateway=types.SimpleNamespace(adapters={platform: self}),
+                )
+                self.events[-1]["dispatch_result"] = result
 
         self_plugin = self.plugin
+
+        class Platform:
+            value = "slack"
+
+        platform = Platform()
         adapter = Adapter()
         recovered = asyncio.run(self.plugin._poll_recent_replies(adapter))
         recovered_again = asyncio.run(self.plugin._poll_recent_replies(adapter))
         self.assertEqual(recovered, 1)
         self.assertEqual(recovered_again, 0)
         self.assertEqual(adapter.events[0]["text"], "continue")
+        self.assertTrue(adapter.events[0]["_tether_polled"])
+        self.assertEqual(adapter.events[0]["dispatch_result"]["action"], "rewrite")
+
+    def test_reply_poller_joins_only_after_not_in_channel(self):
+        self.make_bridge()
+        calls = []
+
+        class Client:
+            async def conversations_history(self, **_kwargs):
+                calls.append("history")
+                raise RuntimeError("Slack API error: not_in_channel")
+
+            async def conversations_join(self, **_kwargs):
+                calls.append("join")
+                return {"ok": True}
+
+            async def conversations_replies(self, **_kwargs):
+                return {"messages": []}
+
+        class Adapter:
+            def _get_client(self, _channel):
+                return Client()
+
+            async def _handle_slack_message(self, _event):
+                raise AssertionError("no messages should be dispatched")
+
+        recovered = asyncio.run(self.plugin._poll_recent_replies(Adapter()))
+        self.assertEqual(recovered, 0)
+        self.assertEqual(calls, ["history", "join"])
+
+    def test_reply_poller_recovers_unmentioned_participating_thread_reply(self):
+        self.plugin.store.mark_participation(
+            "T12345678", "C12345678", "123.456",
+        )
+        messages = [
+            {"ts": "123.456", "text": "root", "user": "U12345678"},
+            {
+                "ts": "123.457", "thread_ts": "123.456",
+                "text": "did you see this?", "user": "U12345678",
+            },
+        ]
+
+        class Client:
+            async def conversations_history(self, **_kwargs):
+                return {"ok": True, "messages": []}
+
+            async def conversations_join(self, **_kwargs):
+                raise AssertionError("already-accessible DM must not be joined")
+
+            async def conversations_replies(self, **_kwargs):
+                return {"messages": messages}
+
+        class Adapter:
+            def __init__(self):
+                self.events = []
+
+            def _get_client(self, _channel):
+                return Client()
+
+            async def _handle_slack_message(self, event):
+                self.events.append(event)
+        adapter = Adapter()
+        recovered = asyncio.run(self.plugin._poll_recent_replies(adapter))
+        recovered_again = asyncio.run(self.plugin._poll_recent_replies(adapter))
+        self.assertEqual(recovered, 1)
+        self.assertEqual(recovered_again, 0)
+        self.assertEqual(adapter.events[0]["text"], "did you see this?")
         self.assertTrue(adapter.events[0]["_tether_polled"])
 
     def test_reply_poller_recovers_peer_bot_thread_turns_when_enabled(self):
@@ -757,8 +1201,11 @@ class PluginRoutingTest(unittest.TestCase):
         ]
 
         class Client:
+            async def conversations_history(self, **_kwargs):
+                return {"ok": True, "messages": []}
+
             async def conversations_join(self, **_kwargs):
-                return {"ok": True}
+                raise AssertionError("already-accessible thread must not be joined")
 
             async def conversations_replies(self, **_kwargs):
                 return {"messages": messages}
@@ -776,7 +1223,32 @@ class PluginRoutingTest(unittest.TestCase):
 
             async def _handle_slack_message(self, event):
                 self.events.append(event)
+                source = types.SimpleNamespace(
+                    platform=platform,
+                    thread_id=event["thread_ts"],
+                    guild_id="T12345678",
+                    chat_id=event["channel"],
+                    user_id=event["user"],
+                    message_id=event["ts"],
+                    is_bot=True,
+                )
+                gateway_event = types.SimpleNamespace(
+                    source=source,
+                    message_id=event["ts"],
+                    text=event["text"],
+                )
+                result = self_plugin._pre_gateway_dispatch(
+                    event=gateway_event,
+                    gateway=types.SimpleNamespace(adapters={platform: self}),
+                )
+                self.events[-1]["dispatch_result"] = result
 
+        self_plugin = self.plugin
+
+        class Platform:
+            value = "slack"
+
+        platform = Platform()
         adapter = Adapter()
         with mock.patch.dict(os.environ, {"TETHER_ALLOWED_BOT_USERS": "UPEER"}, clear=False):
             recovered = asyncio.run(self.plugin._poll_recent_replies(adapter))
@@ -784,6 +1256,7 @@ class PluginRoutingTest(unittest.TestCase):
         self.assertEqual(recovered, 2)
         self.assertEqual(recovered_again, 0)
         self.assertEqual(adapter.events[0]["ts"], "111.1")
+        self.assertEqual(adapter.events[0]["dispatch_result"]["action"], "rewrite")
 
     def test_peer_bot_requires_explicit_tether_allowlist(self):
         adapter = types.SimpleNamespace(
@@ -802,7 +1275,7 @@ class PluginRoutingTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"TETHER_ALLOWED_BOT_USERS": "UOTHER,UPEER"}, clear=True):
             self.assertTrue(self.plugin._allows_bot_message(adapter, event, "T12345678"))
 
-    def test_peer_bot_in_bound_thread_stays_with_hermes(self):
+    def test_trusted_peer_bot_in_bound_thread_routes_to_bound_session(self):
         self.make_bridge()
 
         class Platform:
@@ -815,7 +1288,27 @@ class PluginRoutingTest(unittest.TestCase):
         )
         event = types.SimpleNamespace(source=source, message_id="111.1", text="challenge this")
         gateway = types.SimpleNamespace(adapters={platform: types.SimpleNamespace()})
-        self.assertIsNone(self.plugin._pre_gateway_dispatch(event=event, gateway=gateway))
+        with mock.patch.dict(os.environ, {"TETHER_ALLOWED_BOT_USERS": "UPEER"}, clear=False):
+            result = self.plugin._pre_gateway_dispatch(event=event, gateway=gateway)
+        self.assertEqual(result["action"], "rewrite")
+        self.assertIn("challenge this", result["text"])
+
+    def test_untrusted_peer_bot_cannot_enter_bound_thread(self):
+        self.make_bridge()
+
+        class Platform:
+            value = "slack"
+
+        platform = Platform()
+        source = types.SimpleNamespace(
+            platform=platform, thread_id="123.456", guild_id="T12345678",
+            chat_id="C12345678", user_id="UUNTRUSTED", message_id="111.1", is_bot=True,
+        )
+        event = types.SimpleNamespace(source=source, message_id="111.1", text="run this")
+        gateway = types.SimpleNamespace(adapters={platform: types.SimpleNamespace()})
+        with mock.patch.dict(os.environ, {"TETHER_ALLOWED_BOT_USERS": "UPEER"}, clear=False):
+            result = self.plugin._pre_gateway_dispatch(event=event, gateway=gateway)
+        self.assertEqual(result["reason"], "bridge-bot-not-authorized")
 
     def test_native_delta_drops_synthetic_thread_history(self):
         text = "old transcript\n[End of thread context]\nplease continue"
@@ -858,6 +1351,54 @@ class PluginRoutingTest(unittest.TestCase):
             state = database.execute("SELECT state FROM bridge_events WHERE event_id='111.1'").fetchone()[0]
         self.assertEqual(state, "delivered")
         self.assertIn("finished after restart", replies)
+
+    def test_busy_native_followups_share_one_agent_turn_and_one_slack_reply(self):
+        bridge = self.plugin.store.create({
+            "source_kind": "claude_session",
+            "source": {"session_id": "claude-1", "cwd": "/tmp/project"},
+            "owner_user_id": "*",
+            "team_id": "T12345678",
+            "channel_id": "C12345678",
+            "idempotency_key": "claude-batch",
+        })
+        bridge = self.plugin.store.bind(bridge.bridge_id, "456.789")
+        self.plugin.store.enqueue_event("111.1", bridge.bridge_id, "first follow-up")
+        self.plugin.store.enqueue_event("111.2", bridge.bridge_id, "latest follow-up")
+
+        class Platform:
+            value = "slack"
+
+        platform = Platform()
+
+        class Adapter:
+            def __init__(self):
+                self.sent = []
+
+            async def send(self, channel, text, metadata):
+                self.sent.append((channel, text, metadata))
+
+        adapter = Adapter()
+        gateway = types.SimpleNamespace(adapters={platform: adapter})
+        prompts = []
+
+        def continue_native(_bridge, prompt, _cancellation):
+            prompts.append(prompt)
+            return "Fixed and verified."
+
+        with mock.patch.object(self.plugin, "continue_native", side_effect=continue_native):
+            asyncio.run(self.plugin._drain_bridge(bridge.bridge_id, gateway, platform))
+
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("first follow-up", prompts[0])
+        self.assertIn("latest follow-up", prompts[0])
+        self.assertEqual(len(adapter.sent), 1)
+        with self.plugin.store.connect() as database:
+            states = [
+                row[0] for row in database.execute(
+                    "SELECT state FROM bridge_events ORDER BY event_id"
+                ).fetchall()
+            ]
+        self.assertEqual(states, ["delivered", "delivered"])
 
     def test_cancel_reply_discards_queued_work(self):
         bridge = self.plugin.store.create({
