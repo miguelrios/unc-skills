@@ -170,9 +170,33 @@ Searches have a 300ms database-work budget by default. Override it only within t
 10–2000ms range with `RECALL_SEARCH_DEADLINE_MS`; the response and service log expose only
 content-free per-leg timings, result counts, and the deadline outcome.
 
-Semantic retrieval requires PostgreSQL with pgvector and a loopback-only embedding sidecar. The
-packaged unit pins TEI 1.9 and Qwen3-Embedding-0.6B, binds only `127.0.0.1:8089`, and never exposes
-an embedding route through Tailscale Serve. Keep `RECALL_EMBEDDING_BATCH_SIZE=1`: the derivation
+Semantic retrieval requires PostgreSQL with pgvector and one explicitly selected embedding
+profile. Recall supports three protocols:
+
+- `voyage` is the recommended hosted profile. `voyage-4` supports 512-dimensional output and
+  distinct `document`/`query` retrieval modes.
+- `openai` calls the standard `/v1/embeddings` contract and works with OpenAI-compatible hosted or
+  local services. Optional document/query prefixes support asymmetric open models such as Nomic.
+- `tei` preserves the pinned local Qwen profile below for operators who prioritize private
+  inference and accept its compute footprint.
+
+Leaving `RECALL_EMBEDDING_URL` unset is a supported zero-dependency lexical-only profile. This is
+degraded retrieval, not failed startup. Hosted profiles send projected memory text to the selected
+provider; operators must make that privacy choice deliberately.
+
+Every non-loopback endpoint must use HTTPS, exactly match
+`RECALL_EMBEDDING_APPROVED_URL`, and read its bearer from exactly one protected source:
+an owner-only, non-symlink `RECALL_EMBEDDING_KEY_FILE`, or the deployment secret variable named
+by `RECALL_EMBEDDING_KEY_ENV`. The latter is the normal container pattern; the variable's value
+must be injected by the secret manager and never written in the config file. Recall rejects
+redirects, rereads the selected key source, validates response
+indices, dimensions, and finite values, and fingerprints the protocol, model version, dimensions,
+and query/document transformation. A profile change therefore makes old vectors stale until the
+online backfill converges.
+
+The optional packaged self-hosted unit pins TEI 1.9 and Qwen3-Embedding-0.6B, binds only
+`127.0.0.1:8089`, and never exposes an embedding route through Tailscale Serve. Keep
+`RECALL_EMBEDDING_BATCH_SIZE=1`: the derivation
 fingerprint and backfill deliberately trade background throughput for reproducible Qwen document
 vectors. The sidecar admits only one single-input request at a time because this Qwen/TEI CPU path is
 not reproducible across batched requests. An overlapping request is rejected and retrieval safely
@@ -189,7 +213,8 @@ sets its endpoint at `ExecStart`, after `EnvironmentFile` loading, so the live-q
 the dedicated backfill route through systemd environment precedence. Its 120-second transport timeout
 allows long CPU inference to finish under contention without relaxing the live-query timeout.
 
-Query planning is optional but, when enabled, must use the staging LiteLLM HTTPS router plus a
+Query planning is separate from embeddings and optional. When enabled, it must use the staging
+LiteLLM HTTPS router plus a
 short-lived model-scoped virtual key in a non-symlink owner-only file. A separate secret-manager
 timer must atomically replace that file before expiry. Never place a LiteLLM master key in
 `service.env`, pass it to Recall, or call a model provider directly. Recall rereads the key on every

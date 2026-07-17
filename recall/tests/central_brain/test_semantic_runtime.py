@@ -63,6 +63,233 @@ class SemanticRuntimeContractTest(unittest.TestCase):
         )
         self.assertEqual(runtime.embedding_url, "http://embedding.internal:80")
 
+    def test_openai_embedding_protocol_requires_https_and_exact_approval(self) -> None:
+        with self.assertRaisesRegex(ValueError, "HTTPS"):
+            SemanticRuntime(
+                embedding_protocol="openai",
+                embedding_url="http://embeddings.example/v1",
+                embedding_approved_url="http://embeddings.example/v1",
+                model="synthetic-embedding",
+                revision="managed-v1",
+                dimensions=512,
+            )
+        with self.assertRaisesRegex(ValueError, "approved embedding endpoint"):
+            SemanticRuntime(
+                embedding_protocol="openai",
+                embedding_url="https://embeddings.example/v1",
+                embedding_approved_url="https://other.example/v1",
+                model="synthetic-embedding",
+                revision="managed-v1",
+                dimensions=512,
+            )
+
+    def test_openai_embedding_protocol_uses_standard_contract_and_owner_only_key(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            key = Path(temporary) / "embedding.key"
+            key.write_text("short-lived-synthetic-embedding-key")
+            os.chmod(key, 0o600)
+            runtime = SemanticRuntime(
+                embedding_protocol="openai",
+                embedding_url="https://embeddings.example",
+                embedding_approved_url="https://embeddings.example",
+                embedding_key_file=str(key),
+                model="synthetic-embedding",
+                revision="managed-v1",
+                dimensions=512,
+                embedding_batch_size=2,
+            )
+            vectors = [[0.0] * 512, [1.0] * 512]
+            response = {
+                "object": "list",
+                "data": [
+                    {"object": "embedding", "index": 1, "embedding": vectors[1]},
+                    {"object": "embedding", "index": 0, "embedding": vectors[0]},
+                ],
+                "model": "synthetic-embedding",
+            }
+            with (
+                mock.patch.object(runtime, "_get") as get,
+                mock.patch.object(runtime, "_post", return_value=response) as post,
+            ):
+                self.assertEqual(runtime.embed_documents(["one", "two"]), vectors)
+            get.assert_not_called()
+            self.assertEqual(post.call_args.args[0], "https://embeddings.example/v1/embeddings")
+            self.assertEqual(
+                post.call_args.args[1],
+                {
+                    "model": "synthetic-embedding",
+                    "input": ["one", "two"],
+                    "encoding_format": "float",
+                    "dimensions": 512,
+                },
+            )
+            self.assertEqual(
+                post.call_args.args[2]["Authorization"],
+                "Bearer short-lived-synthetic-embedding-key",
+            )
+            os.chmod(key, 0o644)
+            with self.assertRaisesRegex(PermissionError, "owner-only"):
+                runtime.embed_documents(["must not leave"])
+
+    def test_voyage_protocol_distinguishes_documents_and_queries(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            key = Path(temporary) / "embedding.key"
+            key.write_text("short-lived-synthetic-embedding-key")
+            os.chmod(key, 0o600)
+            runtime = SemanticRuntime(
+                embedding_protocol="voyage",
+                embedding_url="https://api.voyage.example",
+                embedding_approved_url="https://api.voyage.example",
+                embedding_key_file=str(key),
+                model="voyage-synthetic",
+                revision="voyage-synthetic-v1",
+                dimensions=512,
+            )
+            vector = [0.0] * 512
+            response = {
+                "object": "list",
+                "data": [{"object": "embedding", "index": 0, "embedding": vector}],
+                "model": "voyage-synthetic",
+            }
+            with mock.patch.object(runtime, "_post", return_value=response) as post:
+                runtime.embed_documents(["decision"])
+                runtime.embed_query("what did we choose?")
+            self.assertEqual(
+                [call.args[1] for call in post.call_args_list],
+                [
+                    {
+                        "model": "voyage-synthetic",
+                        "input": ["decision"],
+                        "input_type": "document",
+                        "output_dimension": 512,
+                        "output_dtype": "float",
+                        "truncation": True,
+                    },
+                    {
+                        "model": "voyage-synthetic",
+                        "input": ["what did we choose?"],
+                        "input_type": "query",
+                        "output_dimension": 512,
+                        "output_dtype": "float",
+                        "truncation": True,
+                    },
+                ],
+            )
+
+    def test_voyage_environment_profile_has_hosted_batch_defaults(self) -> None:
+        environment = {
+            "RECALL_EMBEDDING_PROTOCOL": "voyage",
+            "RECALL_EMBEDDING_URL": "https://api.voyage.example",
+            "RECALL_EMBEDDING_APPROVED_URL": "https://api.voyage.example",
+            "RECALL_EMBEDDING_KEY_ENV": "VOYAGE_API_KEY",
+            "VOYAGE_API_KEY": "short-lived-synthetic-embedding-key",
+            "RECALL_EMBEDDING_MODEL": "voyage-synthetic",
+            "RECALL_EMBEDDING_DIMENSIONS": "512",
+        }
+        with mock.patch.dict(os.environ, environment, clear=True):
+            runtime = SemanticRuntime.from_env()
+        self.assertIsNotNone(runtime)
+        assert runtime is not None
+        self.assertEqual(runtime.embedding_protocol, "voyage")
+        self.assertEqual(runtime.revision, "voyage-synthetic")
+        self.assertEqual(runtime.embedding_batch_size, 64)
+        self.assertEqual(runtime.query_prefix, "")
+
+    def test_managed_key_may_come_from_a_named_secret_environment_variable(
+        self,
+    ) -> None:
+        runtime = SemanticRuntime(
+            embedding_protocol="voyage",
+            embedding_url="https://api.voyage.example",
+            embedding_approved_url="https://api.voyage.example",
+            embedding_key_env="VOYAGE_API_KEY",
+            model="voyage-synthetic",
+            revision="voyage-synthetic-v1",
+            dimensions=512,
+        )
+        vector = [0.0] * 512
+        response = {"data": [{"index": 0, "embedding": vector}]}
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"VOYAGE_API_KEY": "short-lived-synthetic-embedding-key"},
+                clear=True,
+            ),
+            mock.patch.object(runtime, "_post", return_value=response) as post,
+        ):
+            runtime.embed_query("safe synthetic query")
+        self.assertEqual(
+            post.call_args.args[2]["Authorization"],
+            "Bearer short-lived-synthetic-embedding-key",
+        )
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(ValueError, "unavailable"):
+                runtime.embed_query("must not leave")
+
+    def test_managed_response_rejects_missing_duplicate_or_nonfinite_vectors(
+        self,
+    ) -> None:
+        runtime = SemanticRuntime(
+            embedding_protocol="openai",
+            embedding_url="http://127.0.0.1:8081",
+            model="synthetic-embedding",
+            revision="managed-v1",
+            dimensions=512,
+            embedding_batch_size=2,
+        )
+        vector = [0.0] * 512
+        with mock.patch.object(
+            runtime,
+            "_post",
+            return_value={
+                "data": [
+                    {"index": 0, "embedding": vector},
+                    {"index": 0, "embedding": vector},
+                ]
+            },
+        ):
+            with self.assertRaisesRegex(ValueError, "indices"):
+                runtime.embed_documents(["one", "two"])
+        invalid = vector.copy()
+        invalid[0] = float("nan")
+        with mock.patch.object(
+            runtime,
+            "_post",
+            return_value={"data": [{"index": 0, "embedding": invalid}]},
+        ):
+            with self.assertRaisesRegex(ValueError, "non-finite"):
+                runtime.embed_documents(["one"])
+
+    def test_embedding_prefixes_and_protocol_are_fingerprinted(self) -> None:
+        base = SemanticRuntime(
+            embedding_protocol="openai",
+            embedding_url="http://127.0.0.1:8081",
+            model="synthetic-embedding",
+            revision="managed-v1",
+            dimensions=512,
+        )
+        prefixed = SemanticRuntime(
+            embedding_protocol="openai",
+            embedding_url="http://127.0.0.1:8081",
+            model="synthetic-embedding",
+            revision="managed-v1",
+            dimensions=512,
+            document_prefix="search_document: ",
+            query_prefix="search_query: ",
+        )
+        vector = [0.0] * 512
+        response = {"data": [{"index": 0, "embedding": vector}]}
+        with mock.patch.object(prefixed, "_post", return_value=response) as post:
+            prefixed.embed_documents(["decision"])
+            prefixed.embed_query("what did we choose?")
+        self.assertEqual(
+            [call.args[1]["input"][0] for call in post.call_args_list],
+            ["search_document: decision", "search_query: what did we choose?"],
+        )
+        self.assertNotEqual(base.fingerprint, prefixed.fingerprint)
+
     def test_planner_must_match_the_approved_router(self) -> None:
         with self.assertRaisesRegex(ValueError, "approved router"):
             SemanticRuntime(
