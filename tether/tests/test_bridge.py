@@ -537,6 +537,9 @@ class CredentialBoundaryTest(unittest.TestCase):
         self.assertIn("--reply-key " + marker, written)
         self.assertIn("at most one Slack message", written)
         self.assertIn("50 words", written)
+        inbox = self.home / ".local" / "share" / "tether" / "inbox" / f"{marker}.txt"
+        self.assertEqual(inbox.read_text().strip(), text)
+        self.assertEqual(inbox.stat().st_mode & 0o777, 0o600)
 
 
 class NotifierTest(unittest.TestCase):

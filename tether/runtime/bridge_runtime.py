@@ -1164,9 +1164,32 @@ def deliver_zellij(bridge: Bridge, text: str) -> None:
     marker = "tether-" + hashlib.sha256(
         f"{bridge.bridge_id}\0{text}".encode()
     ).hexdigest()[:12]
+    inbox_dir = RUNTIME_HOME / "inbox"
+    inbox_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    inbox_dir.chmod(0o700)
+    now = time.time()
+    for stale in inbox_dir.glob("tether-*.txt"):
+        with contextlib.suppress(OSError):
+            if not stale.is_symlink() and now - stale.stat().st_mtime > 86_400:
+                stale.unlink()
+    inbox_path = inbox_dir / f"{marker}.txt"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(inbox_path, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as inbox:
+            inbox.write(text)
+            inbox.write("\n")
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(descriptor)
+        raise
+    inbox_path.chmod(0o600)
     instruction = (
-        f"[Hermes Slack follow-up batch; {marker}]\n{text}\n\n"
-        "Handle the requests above as one turn. Check the current thread/task state before responding. "
+        f"[Hermes Slack follow-up batch; {marker}] Read and handle the complete request in "
+        f"{inbox_path}, then delete that file. "
+        "Handle it as one turn. Check the current thread/task state before responding. "
         "Post at most one Slack message for this entire batch, only when a useful response is needed; "
         "do not post a second status summary or courtesy acknowledgment. Keep it within 50 words and "
         "3 sentences. If no new response is needed, run the command with NO_REPLY. Reply with: "
