@@ -488,13 +488,16 @@ def _pre_gateway_dispatch(*, event, gateway, **_kwargs):
     # coding session. The conversation agent decides whether to answer.
     if getattr(source, "is_bot", False):
         return None
+    # Once a thread resolves to Tether, Hermes must not leave its generic
+    # processing/success reaction behind. In particular, an authorization
+    # rejection is not a successful handoff.
+    _suppress_bridge_reaction(event, gateway)
     user_id = str(source.user_id or "")
     if not _authorized(bridge, user_id):
         return {"action": "skip", "reason": "bridge-user-not-authorized"}
     event_id = str(event.message_id or source.message_id or "")
     if not store.mark_ingress(event_id, bridge.bridge_id):
         return {"action": "skip", "reason": "tether-duplicate"}
-    _suppress_bridge_reaction(event, gateway)
     if bridge.source_kind in {"headless_run", "hermes_session"}:
         run_id = str(bridge.source.get("run_id") or bridge.source.get("session_id") or "unknown")
         cwd = str(bridge.source.get("cwd") or "")

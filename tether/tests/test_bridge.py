@@ -174,6 +174,20 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(status["protocol_version"], 2)
         self.assertNotIn("allowed_users", status, "status reports readiness, never identities")
 
+    def test_shared_channel_rejects_accidental_owner_restriction(self):
+        broker = self.runtime.Broker("test-token", self.store)
+        request = {
+            "op": "notify", "text": "finished", "source_kind": "headless_run",
+            "source": {"run_id": "run-owner", "cwd": "/tmp/project"},
+            "owner_user_id": "U12345678",
+            "channel_id": "C12345678",
+            "idempotency_key": "run-owner",
+        }
+        with mock.patch.dict(
+            os.environ, {"SLACK_ALLOWED_USERS": "U12345678,U87654321"}, clear=False
+        ), self.assertRaisesRegex(ValueError, "owner-restricted shared-channel"):
+            broker.handle(request)
+
     def test_thread_history_stays_behind_broker_and_returns_sanitized_messages(self):
         broker = self.runtime.Broker("test-token", self.store)
         response = {
@@ -624,6 +638,42 @@ class PluginRoutingTest(unittest.TestCase):
         bridge = self.make_bridge(owner="*")
         with mock.patch.dict(os.environ, {"SLACK_ALLOWED_USERS": "U12345678"}, clear=False):
             self.assertTrue(self.plugin._authorized(bridge, "U12345678"))
+
+    def test_unauthorized_bridge_reply_does_not_keep_success_reaction(self):
+        self.make_bridge(owner="U12345678")
+
+        class Platform:
+            value = "slack"
+
+        platform = Platform()
+        source = types.SimpleNamespace(
+            platform=platform, thread_id="123.456", guild_id="T12345678",
+            chat_id="C12345678", user_id="U99999999", message_id="111.1",
+            is_bot=False,
+        )
+        event = types.SimpleNamespace(source=source, message_id="111.1", text="continue")
+
+        class Adapter:
+            _reacting_message_ids = {"111.1"}
+
+            def __init__(self):
+                self.removed = []
+
+            async def _remove_reaction(self, channel, event_id, reaction):
+                self.removed.append((channel, event_id, reaction))
+
+        adapter = Adapter()
+        gateway = types.SimpleNamespace(adapters={platform: adapter})
+
+        async def exercise():
+            result = self.plugin._pre_gateway_dispatch(event=event, gateway=gateway)
+            await asyncio.sleep(0)
+            return result
+
+        result = asyncio.run(exercise())
+        self.assertEqual(result["reason"], "bridge-user-not-authorized")
+        self.assertNotIn("111.1", adapter._reacting_message_ids)
+        self.assertEqual(adapter.removed, [("C12345678", "111.1", "eyes")])
 
     def test_exact_thread_prefilter_marks_only_active_bridge(self):
         self.make_bridge()

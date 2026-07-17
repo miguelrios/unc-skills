@@ -94,6 +94,7 @@ class BridgeRequest(TypedDict, total=False):
 class Config:
     default_channel: str = ""
     default_owner: str = ""
+    allow_channel_owner_restrictions: bool = False
     team_id: str = ""
     allowed_users: tuple[str, ...] = ()
     native_timeout_seconds: int = 1800
@@ -130,7 +131,10 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
         raise ValueError("allowed_users contains an invalid Slack member ID")
     default_channel = str(raw.get("default_channel") or "")
     default_owner = str(raw.get("default_owner") or "")
+    allow_channel_owner_restrictions = raw.get("allow_channel_owner_restrictions", False)
     team_id = str(raw.get("team_id") or "")
+    if not isinstance(allow_channel_owner_restrictions, bool):
+        raise ValueError("allow_channel_owner_restrictions must be a boolean")
     if default_channel and not ID_PATTERN.fullmatch(default_channel):
         raise ValueError("default_channel is not a valid Slack channel ID")
     if default_owner and default_owner != "*" and not ID_PATTERN.fullmatch(default_owner):
@@ -140,6 +144,7 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
     return Config(
         default_channel=default_channel,
         default_owner=default_owner,
+        allow_channel_owner_restrictions=allow_channel_owner_restrictions,
         team_id=team_id,
         allowed_users=tuple(users),
         native_timeout_seconds=timeout,
@@ -545,6 +550,15 @@ class Broker:
             request.get("owner_user_id") or config.default_owner or ("*" if allowed_users else "")
         )
         request["team_id"] = str(request.get("team_id") or config.team_id)
+        if (
+            request["channel_id"].startswith(("C", "G"))
+            and request["owner_user_id"] != "*"
+            and not config.allow_channel_owner_restrictions
+        ):
+            raise ValueError(
+                "owner-restricted shared-channel bridges are disabled; omit --owner "
+                "or explicitly set allow_channel_owner_restrictions=true"
+            )
         text = str(request.get("text") or "")
         if not text.strip() or len(text) > MAX_TEXT:
             raise ValueError("notification text is empty or too large")

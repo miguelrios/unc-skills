@@ -17,6 +17,11 @@ An explicit run ID always creates `headless_run`, even inside Codex or Claude Co
 
 Resolve the exact persisted thread before bypassing Slack's mention gate. Then apply the global allowlist and any explicit per-bridge owner restriction. Shared channels accept every allowlisted operator by default; use one owner only for an intentionally private bridge. Fail closed at every missing field. Deduplicate by Slack message timestamp.
 
+By default, owner restrictions are accepted only for DMs. A public/private
+shared channel rejects an owner-restricted bridge unless the deployment opts in
+with `allow_channel_owner_restrictions = true`. A rejected handoff must not keep
+Hermes's processing or success reaction.
+
 Socket Mode is the primary inbound transport. Tether also polls a bounded batch of recently active threads through Hermes's existing Slack client. Polled events re-enter the normal adapter and gateway pipeline; a persistent ingress ledger prevents duplicate execution across live delivery, polling, and gateway restarts. Polling never weakens workspace, channel, allowlist, or bridge-owner checks.
 
 Peer-agent collaboration is agentic. Hermes may admit peer messages in threads where the agent is participating; Tether applies the same configured transport policy during reply recovery and routes those turns to the Hermes conversation, never into a captured native coding session. Code handles identity, self-echo prevention, and deduplication. The agent decides from conversation context whether a response is warranted and returns exactly `NO_REPLY` when it is not; Hermes suppresses that marker before Slack delivery.

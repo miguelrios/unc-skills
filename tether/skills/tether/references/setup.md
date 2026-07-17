@@ -37,6 +37,11 @@ The generated `${XDG_CONFIG_HOME:-~/.config}/tether/config.toml` is for optional
 
 An empty combined Hermes/Tether allowlist fails closed. Threads are shared among that explicit allowlist by default; set `default_owner` or pass `--owner` to restrict them to one member.
 
+Owner-restricted bridges in shared `C…`/`G…` channels are rejected by default
+because they can silently exclude another authorized operator. Use a DM for a
+private workflow. Deployments that deliberately need per-owner threads in a
+shared channel must explicitly set `allow_channel_owner_restrictions = true`.
+
 ## Native resume credentials
 
 Resumed Codex and Claude Code processes receive a minimal environment and may use normal user-level authentication. They never inherit Hermes's Slack variables.
