@@ -232,3 +232,13 @@ authorization. The owner chose migration before live source expansion. Issue #54
 into L0 as its remediation phase rather than added as a sixth loop. L1 through L4 retain their order,
 scope, quality floors, and human gates; only L0's central deployment, migration, and cutover work is
 expanded. No new personal source may be enabled until the revised L0 exit is complete.
+
+## Replan record — 2026-07-17
+
+The owner determined that Grep agents run in sandboxes outside the Tailnet, so Tailnet-only ingress
+cannot satisfy the primary MCP use case. No new source loop had begun. The unfinished L0 and the
+unchanged L1–L4 outcomes continue in the append-forward successor
+`docs/LOOP_CHAIN_RECALL_PUBLIC_MCP_AND_UNIVERSAL_INGESTION_2026-07-17.md`. The successor replaces the
+Tailnet-only acceptance row with a public HTTPS MCP boundary, explicit principal/capability
+authorization, dedicated Render egress, a PlanetScale allowlist, and a real Grep-sandbox E2E. This
+document remains the historical record and is not executed further.
