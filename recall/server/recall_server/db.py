@@ -35,8 +35,8 @@ class BrainStore:
                  semantic_runtime: SemanticRuntime | None = None):
         self.dsn = dsn
         configured = search_deadline_ms if search_deadline_ms is not None else int(os.environ.get("RECALL_SEARCH_DEADLINE_MS", str(DEFAULT_SEARCH_DEADLINE_MS)))
-        if not 10 <= configured <= 2000:
-            raise ValueError("search deadline must be between 10 and 2000 milliseconds")
+        if not 10 <= configured <= 5000:
+            raise ValueError("search deadline must be between 10 and 5000 milliseconds")
         self.search_deadline_ms = configured
         if semantic_runtime is not None and semantic_runtime.dimensions != 512:
             raise ValueError("BrainStore semantic runtime requires 512 dimensions")

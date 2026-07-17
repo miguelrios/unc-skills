@@ -176,7 +176,7 @@ C10 production cutover, replace it with continuous WAL archival plus daily base 
 same blank-database restore/fingerprint contract remains the gate.
 
 Searches have a 300ms database-work budget by default. Override it only within the validated
-10–2000ms range with `RECALL_SEARCH_DEADLINE_MS`; the response and service log expose only
+10–5000ms range with `RECALL_SEARCH_DEADLINE_MS`; the response and service log expose only
 content-free per-leg timings, result counts, and the deadline outcome.
 
 Semantic retrieval requires PostgreSQL with pgvector and one explicitly selected embedding

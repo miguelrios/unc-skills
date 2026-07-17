@@ -256,7 +256,7 @@ class LiveProviderAdapterTest(unittest.TestCase):
         self.assertEqual(env["RECALL_EMBEDDING_PROTOCOL"], "voyage")
         self.assertEqual(env["RECALL_EMBEDDING_KEY_ENV"], "RECALL_EMBEDDING_API_KEY")
         self.assertEqual(env["RECALL_EMBEDDING_API_KEY"], "synthetic-embedding-key")
-        self.assertEqual(env["RECALL_SEARCH_DEADLINE_MS"], "2000")
+        self.assertEqual(env["RECALL_SEARCH_DEADLINE_MS"], "5000")
         self.assertNotIn("public", json.dumps(creates).casefold())
         self.assertIn("core_url", context)
 
