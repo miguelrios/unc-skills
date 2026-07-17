@@ -193,7 +193,7 @@ class StoreTest(unittest.TestCase):
             }]
         }
         with mock.patch.object(self.runtime, "_slack_call", side_effect=[
-            {"ok": True, "channel": {"id": "C12345678", "is_member": True}}, response,
+            {"ok": True, "messages": []}, response,
         ]) as call:
             result = broker.handle({
                 "op": "thread_history", "channel_id": "C12345678",
@@ -204,8 +204,8 @@ class StoreTest(unittest.TestCase):
         }])
         self.assertEqual(call.call_args_list, [
             mock.call(
-                "test-token", "conversations.info",
-                {"channel": "C12345678"},
+                "test-token", "conversations.history",
+                {"channel": "C12345678", "limit": 1},
             ),
             mock.call(
                 "test-token", "conversations.replies",
@@ -216,7 +216,7 @@ class StoreTest(unittest.TestCase):
     def test_public_destination_is_joined_only_once_per_broker(self):
         broker = self.runtime.Broker("test-token", self.store)
         with mock.patch.object(self.runtime, "_slack_call", side_effect=[
-            {"ok": True, "channel": {"id": "C12345678", "is_member": False}},
+            RuntimeError("Slack API error: not_in_channel"),
             {"ok": True},
         ]) as call:
             broker._ensure_channel_membership("C12345678")
@@ -224,22 +224,22 @@ class StoreTest(unittest.TestCase):
             broker._ensure_channel_membership("D12345678")
         self.assertEqual(call.call_args_list, [
             mock.call(
-                "test-token", "conversations.info",
-                {"channel": "C12345678"},
+                "test-token", "conversations.history",
+                {"channel": "C12345678", "limit": 1},
             ),
             mock.call("test-token", "conversations.join", {"channel": "C12345678"}),
         ])
 
     def test_group_dm_with_channel_id_is_never_joined(self):
         broker = self.runtime.Broker("test-token", self.store)
-        with mock.patch.object(self.runtime, "_slack_call", return_value={
-            "ok": True, "channel": {"id": "C12345678", "is_mpim": True},
-        }) as call:
+        with mock.patch.object(
+            self.runtime, "_slack_call", return_value={"ok": True, "messages": []},
+        ) as call:
             broker._ensure_channel_membership("C12345678")
             broker._ensure_channel_membership("C12345678")
         call.assert_called_once_with(
-            "test-token", "conversations.info",
-            {"channel": "C12345678"},
+            "test-token", "conversations.history",
+            {"channel": "C12345678", "limit": 1},
         )
 
     def test_identity_returns_only_nonsecret_bot_metadata(self):

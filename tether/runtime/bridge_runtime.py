@@ -76,7 +76,6 @@ SLACK_METHOD_PATHS = {
     "auth.test": "/api/auth.test",
     "chat.postMessage": "/api/chat.postMessage",
     "conversations.history": "/api/conversations.history",
-    "conversations.info": "/api/conversations.info",
     "conversations.join": "/api/conversations.join",
     "conversations.open": "/api/conversations.open",
     "conversations.replies": "/api/conversations.replies",
@@ -614,21 +613,18 @@ class Broker:
         if not channel.startswith("C") or channel in self._joined_channels:
             return
         try:
-            info = _slack_call(self.token, "conversations.info", {"channel": channel})
-            conversation = info.get("channel") if isinstance(info, dict) else None
-            if isinstance(conversation, dict) and any(
-                conversation.get(flag)
-                for flag in ("is_im", "is_mpim", "is_private", "is_member")
-            ):
-                self._joined_channels.add(channel)
-                return
-            _slack_call(self.token, "conversations.join", {"channel": channel})
+            _slack_call(self.token, "conversations.history", {"channel": channel, "limit": 1})
         except RuntimeError as exc:
-            raise RuntimeError(
-                "Tether could not join the public Slack destination. Grant the bot "
-                "channels:join or invite it to the channel before creating a resumable thread "
-                f"({exc})"
-            ) from exc
+            if "not_in_channel" not in str(exc):
+                raise
+            try:
+                _slack_call(self.token, "conversations.join", {"channel": channel})
+            except RuntimeError as join_exc:
+                raise RuntimeError(
+                    "Tether could not join the public Slack destination. Grant the bot "
+                    "channels:join or invite it to the channel before creating a resumable thread "
+                    f"({join_exc})"
+                ) from join_exc
         self._joined_channels.add(channel)
 
     def _status(self, config: Config, allowed_users: tuple[str, ...]) -> dict[str, Any]:
