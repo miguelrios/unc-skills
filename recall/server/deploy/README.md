@@ -80,7 +80,9 @@ without mutation.
 Hosted embeddings receive the redacted text projection selected for semantic
 indexing. The example uses `voyage-4` at 512 dimensions; operators who cannot
 send that projection to a provider should use the self-hosted TEI profile in
-the existing-host section instead.
+the existing-host section instead. The managed profile uses the validated
+2,000ms database-work ceiling because a remote database round trip cannot meet
+the 300ms loopback default reliably at multi-million-item scale.
 
 Inject credentials from the approved 1Password Environment at runtime. Never
 put their values in arguments, a manifest, an approval file, shell history, or
