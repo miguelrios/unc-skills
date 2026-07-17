@@ -818,6 +818,7 @@ class Broker:
             raise RuntimeError("Slack opened a DM without returning a valid channel")
         request = BridgeRequest(incoming)
         request["channel_id"] = str(channel["id"])
+        request["_skip_channel_join"] = True
         if not request.get("team_id"):
             request["team_id"] = str(self._identity().get("team_id") or config.team_id)
         return self._notify(request, config, allowed_users)
@@ -856,7 +857,8 @@ class Broker:
             }
         root_text = with_origin(text, bridge)
         requested_thread = request.get("thread_ts")
-        self._ensure_channel_membership(bridge.channel_id)
+        if not request.get("_skip_channel_join"):
+            self._ensure_channel_membership(bridge.channel_id)
         if request.get("file_path"):
             timestamp = slack_upload(
                 self.token,
