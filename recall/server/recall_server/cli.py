@@ -73,6 +73,10 @@ def main() -> None:
     create_token = sub.add_parser("token-create")
     create_token.add_argument("name")
     create_token.add_argument("--source")
+    create_token.add_argument(
+        "--principal",
+        help="read every source granted to this principal; writes stay source-bound",
+    )
     create_token.add_argument("--scopes", default="read,write")
     create_token.add_argument(
         "--output",
@@ -244,6 +248,7 @@ def main() -> None:
             args.name,
             args.source,
             [scope.strip() for scope in args.scopes.split(",") if scope.strip()],
+            principal_id=args.principal,
         )
         payload = (json.dumps(credential, sort_keys=True) + "\n").encode()
         descriptor = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

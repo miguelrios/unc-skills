@@ -150,7 +150,10 @@ def _reject_extra(arguments: dict, allowed: frozenset[str]) -> None:
 
 
 def _call_tool(store, principal: dict, name: str, arguments: dict) -> dict:
-    authorized_source = principal.get("source_id")
+    authorized_source = principal.get(
+        "authorized_sources",
+        principal.get("source_id"),
+    )
     if name == "recall_search":
         _reject_extra(arguments, frozenset({"query", "filters", "limit"}))
         query = _string(arguments.get("query"), "query")

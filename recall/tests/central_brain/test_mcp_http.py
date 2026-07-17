@@ -37,8 +37,14 @@ class FakeStore:
             return None
         return {
             "name": "synthetic-grep-agent",
-            "source_id": "synthetic:grep-scope",
+            "source_id": "synthetic:grep-capture",
+            "principal_id": "synthetic-owner",
+            "scopes": ["read"],
         }
+
+    def authorized_source_ids(self, principal_id: str) -> list[str]:
+        self.calls.append(("authorized_sources", principal_id))
+        return ["synthetic:codex", "synthetic:cowork"]
 
     def search(self, query, filters, limit, authorized_source):
         self.calls.append(("search", query, filters, limit, authorized_source))
@@ -46,7 +52,7 @@ class FakeStore:
             "query": query,
             "results": [
                 {
-                    "receipt": "recall://synthetic:grep-scope/item-1?rev=1",
+                    "receipt": "recall://synthetic:codex/item-1?rev=1",
                     "text": "Synthetic retrieval result",
                 }
             ],
@@ -99,6 +105,7 @@ class McpHttpServer:
         method: str,
         body: dict | None = None,
         *,
+        path: str = "/mcp",
         token: str | None = "synthetic-read-token",
         origin: str | None = None,
         protocol: str | None = None,
@@ -121,7 +128,7 @@ class McpHttpServer:
         connection = http.client.HTTPConnection(
             "127.0.0.1", self.server.server_port, timeout=2
         )
-        connection.request(method, "/mcp", body=payload, headers=headers)
+        connection.request(method, path, body=payload, headers=headers)
         response = connection.getresponse()
         raw = response.read()
         result_headers = {key.casefold(): value for key, value in response.getheaders()}
@@ -209,7 +216,7 @@ class RemoteMcpContractTest(unittest.TestCase):
         self.assertFalse(result.get("isError", False))
         self.assertEqual(
             result["structuredContent"]["results"][0]["receipt"],
-            "recall://synthetic:grep-scope/item-1?rev=1",
+            "recall://synthetic:codex/item-1?rev=1",
         )
         self.assertIn(
             (
@@ -217,10 +224,55 @@ class RemoteMcpContractTest(unittest.TestCase):
                 "What did we decide about the synthetic rollout?",
                 {},
                 5,
-                "synthetic:grep-scope",
+                ["synthetic:codex", "synthetic:cowork"],
             ),
             self.store.calls,
         )
+
+    def test_public_profile_hides_every_non_mcp_route_before_store_io(self) -> None:
+        self.environment.stop()
+        self.environment = mock.patch.dict(
+            os.environ,
+            {
+                "RECALL_AUTH_REQUIRED": "1",
+                "RECALL_HTTP_PROFILE": "public-mcp",
+                "RECALL_TRUST_TAILSCALE_HEADERS": "0",
+            },
+            clear=False,
+        )
+        self.environment.start()
+        with McpHttpServer(self.store) as server:
+            for method, path in (
+                ("GET", "/metrics"),
+                ("GET", "/v1/doctor"),
+                ("GET", "/v1/receipts/resolve?receipt=synthetic"),
+                ("POST", "/v1/search"),
+                ("POST", "/v1/ingest/batches"),
+                ("DELETE", "/mcp"),
+            ):
+                with self.subTest(method=method, path=path):
+                    self.store.calls.clear()
+                    status, _, _ = server.request(method, path=path)
+                    self.assertEqual(status, 404)
+                    self.assertEqual(self.store.calls, [])
+
+    def test_principal_without_grants_is_never_treated_as_unrestricted(self) -> None:
+        self.store.authorized_source_ids = mock.Mock(return_value=[])
+        with McpHttpServer(self.store) as server:
+            status, _, _ = server.request(
+                "POST",
+                request(
+                    "tools/call",
+                    params={
+                        "name": "recall_search",
+                        "arguments": {"query": "synthetic denied"},
+                    },
+                ),
+                protocol="2025-11-25",
+            )
+        self.assertEqual(status, 200)
+        search_call = next(call for call in self.store.calls if call[0] == "search")
+        self.assertEqual(search_call[-1], [])
 
     def test_remote_mcp_is_read_only_and_unknown_tools_do_not_touch_store(self) -> None:
         with McpHttpServer(self.store) as server:
