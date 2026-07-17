@@ -53,9 +53,9 @@ Grep/Codex/Claude/Mac collectors
   Render private Tailscale gateway
               |
       Render private network
-        |                 |
-  Recall Core :8788   TEI/Qwen embedding :80
-        |
+              |
+      Recall Core :8788 -------- HTTPS --------> managed embeddings
+              |
  PlanetScale Postgres (Virginia, HA, bounded autoscaling)
 ```
 
@@ -69,11 +69,18 @@ clients must match `RECALL_MCP_ALLOWED_ORIGINS`; server-side agents omit
 
 The live adapter profile pins PlanetScale `PS_80` with two replicas, 50 GiB
 initial storage, a 1 TiB autoscaling ceiling, PostgreSQL 17, and the current
-PlanetScale Virginia slug `us-east`. It creates only digest-pinned Render
-private services: Starter Core, Pro embedding, and a Starter Tailscale gateway
-with a 1 GiB identity disk. Existing service environment variables, secret
-files, image digests, commands, plans, disks, and regions must match exactly or
-reconciliation fails without mutation.
+PlanetScale Virginia slug `us-east`. It creates only two digest-pinned Render
+private services: Starter Core and a Starter Tailscale gateway with a 1 GiB
+identity disk. The manifest selects a managed `voyage` or OpenAI-compatible
+embedding endpoint over exact-match HTTPS; no dedicated embedding service is
+created. Existing service environment variables, secret files, image digests,
+commands, plans, disks, and regions must match exactly or reconciliation fails
+without mutation.
+
+Hosted embeddings receive the redacted text projection selected for semantic
+indexing. The example uses `voyage-4` at 512 dimensions; operators who cannot
+send that projection to a provider should use the self-hosted TEI profile in
+the existing-host section instead.
 
 Inject credentials from the approved 1Password Environment at runtime. Never
 put their values in arguments, a manifest, an approval file, shell history, or
@@ -84,6 +91,7 @@ PLANETSCALE_SERVICE_TOKEN_ID
 PLANETSCALE_SERVICE_TOKEN
 RENDER_API_KEY
 RECALL_DATABASE_URL
+RECALL_EMBEDDING_API_KEY
 TAILSCALE_OAUTH_CLIENT_ID
 TAILSCALE_OAUTH_CLIENT_SECRET
 ```
@@ -110,7 +118,6 @@ OP_CACHE=false op run --environment "$APPROVED_ENV_ID" -- \
   --database-name DATABASE \
   --render-owner-id WORKSPACE_ID \
   --core-name RECALL_CORE \
-  --embedding-name RECALL_EMBEDDING \
   --gateway-name RECALL_GATEWAY \
   --tailnet-hostname RECALL \
   --tailnet-tag tag:recall

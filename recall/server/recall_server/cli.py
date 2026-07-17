@@ -50,7 +50,6 @@ def main() -> None:
     apply.add_argument("--database-name", required=True)
     apply.add_argument("--render-owner-id", required=True)
     apply.add_argument("--core-name", required=True)
-    apply.add_argument("--embedding-name", required=True)
     apply.add_argument("--gateway-name", required=True)
     apply.add_argument("--tailnet-hostname", required=True)
     apply.add_argument("--tailnet-tag", required=True)
@@ -146,7 +145,6 @@ def main() -> None:
                 database_name=args.database_name,
                 render_owner_id=args.render_owner_id,
                 core_name=args.core_name,
-                embedding_name=args.embedding_name,
                 gateway_name=args.gateway_name,
                 tailnet_hostname=args.tailnet_hostname,
                 tailnet_tag=args.tailnet_tag,

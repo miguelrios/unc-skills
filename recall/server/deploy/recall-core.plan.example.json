@@ -10,7 +10,16 @@
   },
   "service": {
     "adapter": "render-private-service",
-    "embedding_image": "ghcr.io/huggingface/text-embeddings-inference@sha256:ad950d30878eceb72aaf32024d26fa2b1d04a75304fa0b4776b49aa1941fea07",
+    "embedding": {
+      "protocol": "voyage",
+      "url": "https://api.voyageai.com",
+      "approved_url": "https://api.voyageai.com",
+      "key_ref": "secret://runtime/RECALL_EMBEDDING_API_KEY",
+      "model": "voyage-4",
+      "revision": "voyage-4",
+      "dimensions": 512,
+      "batch_size": 64
+    },
     "region_ref": "approval://provider-region",
     "billing_ref": "approval://provider-billing",
     "public_ingress": false

@@ -7,11 +7,13 @@ import re
 import stat
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 
 MAX_MANIFEST_BYTES = 64 * 1024
 IMAGE_RE = re.compile(r"[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}\Z")
 NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{2,62}\Z")
+MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z")
 SECRET_REF_RE = re.compile(r"secret://[A-Za-z0-9][A-Za-z0-9._/-]{2,127}\Z")
 APPROVAL_REF_RE = re.compile(r"approval://[a-z][a-z-]{2,63}\Z")
 PENDING_GATES = [
@@ -97,7 +99,7 @@ def validate_manifest(value: object) -> dict[str, Any]:
         manifest["service"],
         {
             "adapter",
-            "embedding_image",
+            "embedding",
             "region_ref",
             "billing_ref",
             "public_ingress",
@@ -109,10 +111,55 @@ def validate_manifest(value: object) -> dict[str, Any]:
         or service["public_ingress"] is not False
     ):
         raise DeploymentManifestError("service must be private")
-    if not isinstance(service["embedding_image"], str) or not IMAGE_RE.fullmatch(
-        service["embedding_image"]
+    embedding = _keys(
+        service["embedding"],
+        {
+            "protocol",
+            "url",
+            "approved_url",
+            "key_ref",
+            "model",
+            "revision",
+            "dimensions",
+            "batch_size",
+        },
+        "embedding",
+    )
+    if embedding["protocol"] not in {"voyage", "openai"}:
+        raise DeploymentManifestError("unsupported managed embedding protocol")
+    for field in ("url", "approved_url"):
+        value = embedding[field]
+        if not isinstance(value, str):
+            raise DeploymentManifestError("invalid managed embedding URL")
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise DeploymentManifestError("invalid managed embedding URL")
+    if embedding["url"].rstrip("/") != embedding["approved_url"].rstrip("/"):
+        raise DeploymentManifestError("managed embedding approval mismatch")
+    if embedding["key_ref"] != "secret://runtime/RECALL_EMBEDDING_API_KEY":
+        raise DeploymentManifestError("invalid managed embedding key reference")
+    if not isinstance(embedding["model"], str) or not MODEL_RE.fullmatch(
+        embedding["model"]
     ):
-        raise DeploymentManifestError("embedding image must be pinned by sha256 digest")
+        raise DeploymentManifestError("invalid managed embedding model")
+    if not isinstance(embedding["revision"], str) or not MODEL_RE.fullmatch(
+        embedding["revision"]
+    ):
+        raise DeploymentManifestError("invalid managed embedding revision")
+    if embedding["dimensions"] != 512 or type(embedding["dimensions"]) is not int:
+        raise DeploymentManifestError("managed embedding dimensions must be 512")
+    if (
+        type(embedding["batch_size"]) is not int
+        or not 1 <= embedding["batch_size"] <= 128
+    ):
+        raise DeploymentManifestError("invalid managed embedding batch size")
     _approval(service["region_ref"], "provider-region")
     _approval(service["billing_ref"], "provider-billing")
 
@@ -184,7 +231,6 @@ def preview(manifest: dict[str, Any]) -> dict[str, Any]:
         "resources": [
             "postgres-database",
             "private-service",
-            "embedding-service",
             "tailscale-gateway",
         ],
         "pending_gates": list(PENDING_GATES),

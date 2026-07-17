@@ -69,9 +69,16 @@ def synthetic_manifest() -> dict:
         },
         "service": {
             "adapter": "render-private-service",
-            "embedding_image": (
-                "registry.example.invalid/recall-embedding@sha256:" + "b" * 64
-            ),
+            "embedding": {
+                "protocol": "voyage",
+                "url": "https://api.voyage.example",
+                "approved_url": "https://api.voyage.example",
+                "key_ref": "secret://runtime/RECALL_EMBEDDING_API_KEY",
+                "model": "voyage-synthetic",
+                "revision": "voyage-synthetic-v1",
+                "dimensions": 512,
+                "batch_size": 64,
+            },
             "region_ref": "approval://provider-region",
             "billing_ref": "approval://provider-billing",
             "public_ingress": False,
@@ -223,7 +230,6 @@ class DeploymentPreviewContractTest(unittest.TestCase):
             [
                 "postgres-database",
                 "private-service",
-                "embedding-service",
                 "tailscale-gateway",
             ],
         )
@@ -245,8 +251,14 @@ class DeploymentPreviewContractTest(unittest.TestCase):
             lambda value: value.update(
                 {"image": "registry.example.invalid/recall-core:latest"}
             ),
-            lambda value: value["service"].update(
-                {"embedding_image": "registry.example.invalid/embedding:latest"}
+            lambda value: value["service"]["embedding"].update(
+                {"url": "http://api.voyage.example"}
+            ),
+            lambda value: value["service"]["embedding"].update(
+                {"approved_url": "https://other.example"}
+            ),
+            lambda value: value["service"]["embedding"].update(
+                {"dimensions": 1536}
             ),
             lambda value: value["network"].update(
                 {"gateway_image": "registry.example.invalid/tailscale:latest"}

@@ -10,7 +10,7 @@ import urllib.request
 from urllib.parse import quote, urlencode, urlsplit
 
 from .capabilities import CapabilityError, validate_connection_policy
-from .deployment import IMAGE_RE
+from .deployment import IMAGE_RE, MODEL_RE
 
 
 MAX_PROVIDER_RESPONSE_BYTES = 1024 * 1024
@@ -453,9 +453,8 @@ class RenderPrivateStackAdapter:
         billing_selection: str,
         region: str,
         core_name: str,
-        embedding_name: str,
         core_plan: str,
-        embedding_plan: str,
+        embedding_api_key: str,
         database_url: str,
     ):
         self.services = _RenderPrivateServices(
@@ -465,72 +464,113 @@ class RenderPrivateStackAdapter:
         self.region_selection = region_selection
         self.billing_selection = billing_selection
         self.core_name = core_name
-        self.embedding_name = embedding_name
         self.core_plan = core_plan
-        self.embedding_plan = embedding_plan
+        if (
+            not embedding_api_key
+            or len(embedding_api_key) > 4096
+            or "\r" in embedding_api_key
+            or "\n" in embedding_api_key
+        ):
+            raise LiveProviderError("embedding_credentials_unavailable")
+        self.embedding_api_key = embedding_api_key
         try:
             validate_connection_policy(database_url, "production")
         except CapabilityError:
             raise LiveProviderError("database_url_policy_failed")
         self.database_url = database_url
 
-    def _ensure_embedding(self, image: str) -> tuple[dict[str, Any], bool]:
-        command = (
-            "--model-id Qwen/Qwen3-Embedding-0.6B "
-            "--revision 97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3 "
-            "--dtype float32 --tokenization-workers 4 "
-            "--max-client-batch-size 1 --max-concurrent-requests 1 "
-            "--max-batch-requests 1 --max-batch-tokens 4096"
+    @staticmethod
+    def _validate_embedding(value: object) -> dict[str, Any]:
+        expected = {
+            "protocol",
+            "url",
+            "approved_url",
+            "key_ref",
+            "model",
+            "revision",
+            "dimensions",
+            "batch_size",
+        }
+        if not isinstance(value, dict) or set(value) != expected:
+            raise LiveProviderError("render_stack_contract_invalid")
+        url = value["url"]
+        approved_url = value["approved_url"]
+        parsed = urlsplit(url) if isinstance(url, str) else None
+        approved = (
+            urlsplit(approved_url) if isinstance(approved_url, str) else None
         )
-        details = {"envSpecificDetails": {"dockerCommand": command}}
-        service = self.services.find(self.embedding_name)
-        if service is not None:
-            service = self.services.validate(
-                service,
-                name=self.embedding_name,
-                image=image,
-                plan=self.embedding_plan,
-                expected_details=details,
-            )
-            self.services.validate_configuration(service["id"])
-            return service, False
-        return (
-            self.services.create(
-                name=self.embedding_name,
-                image=image,
-                plan=self.embedding_plan,
-                details=details,
-            ),
-            True,
-        )
+        if (
+            value["protocol"] not in {"voyage", "openai"}
+            or parsed is None
+            or approved is None
+            or parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+            or approved.scheme != "https"
+            or not approved.hostname
+            or approved.username
+            or approved.password
+            or approved.query
+            or approved.fragment
+            or url.rstrip("/") != approved_url.rstrip("/")
+            or value["key_ref"] != "secret://runtime/RECALL_EMBEDDING_API_KEY"
+            or not isinstance(value["model"], str)
+            or not MODEL_RE.fullmatch(value["model"])
+            or not isinstance(value["revision"], str)
+            or not MODEL_RE.fullmatch(value["revision"])
+            or value["dimensions"] != 512
+            or type(value["dimensions"]) is not int
+            or type(value["batch_size"]) is not int
+            or not 1 <= value["batch_size"] <= 128
+        ):
+            raise LiveProviderError("render_stack_contract_invalid")
+        return value
 
-    def _core_env(self, embedding_url: str) -> list[dict[str, str]]:
+    def _core_env(self, embedding: dict[str, Any]) -> list[dict[str, str]]:
         return [
             {"key": "RECALL_DATABASE_URL", "value": self.database_url},
             {"key": "RECALL_AUTH_REQUIRED", "value": "1"},
             {"key": "RECALL_TRUST_TAILSCALE_HEADERS", "value": "0"},
-            {"key": "RECALL_EMBEDDING_URL", "value": embedding_url},
+            {
+                "key": "RECALL_EMBEDDING_PROTOCOL",
+                "value": embedding["protocol"],
+            },
+            {"key": "RECALL_EMBEDDING_URL", "value": embedding["url"]},
             {
                 "key": "RECALL_EMBEDDING_APPROVED_URL",
-                "value": embedding_url,
+                "value": embedding["approved_url"],
             },
             {
+                "key": "RECALL_EMBEDDING_KEY_ENV",
+                "value": "RECALL_EMBEDDING_API_KEY",
+            },
+            {"key": "RECALL_EMBEDDING_API_KEY", "value": self.embedding_api_key},
+            {
                 "key": "RECALL_EMBEDDING_MODEL",
-                "value": "Qwen/Qwen3-Embedding-0.6B",
+                "value": embedding["model"],
             },
             {
                 "key": "RECALL_EMBEDDING_REVISION",
-                "value": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3",
+                "value": embedding["revision"],
             },
-            {"key": "RECALL_EMBEDDING_DIMENSIONS", "value": "512"},
-            {"key": "RECALL_EMBEDDING_BATCH_SIZE", "value": "1"},
+            {
+                "key": "RECALL_EMBEDDING_DIMENSIONS",
+                "value": str(embedding["dimensions"]),
+            },
+            {
+                "key": "RECALL_EMBEDDING_BATCH_SIZE",
+                "value": str(embedding["batch_size"]),
+            },
             {"key": "LOG_LEVEL", "value": "INFO"},
         ]
 
     def _ensure_core(
-        self, image: str, embedding_url: str
+        self, image: str, embedding: dict[str, Any]
     ) -> tuple[dict[str, Any], bool]:
-        env_vars = self._core_env(embedding_url)
+        env_vars = self._core_env(embedding)
         service = self.services.find(self.core_name)
         if service is not None:
             service = self.services.validate(
@@ -558,26 +598,22 @@ class RenderPrivateStackAdapter:
             billing=self.billing_selection,
         )
         core_image = desired.get("image")
-        embedding_image = desired.get("embedding_image")
+        embedding = self._validate_embedding(desired.get("embedding"))
         if (
             desired.get("adapter") != "render-private-service"
             or desired.get("public_ingress") is not False
             or not isinstance(core_image, str)
             or not IMAGE_RE.fullmatch(core_image)
-            or not isinstance(embedding_image, str)
-            or not IMAGE_RE.fullmatch(embedding_image)
         ):
             raise LiveProviderError("render_stack_contract_invalid")
-        embedding, embedding_created = self._ensure_embedding(embedding_image)
-        embedding_url = embedding["serviceDetails"]["url"].rstrip("/")
-        core, core_created = self._ensure_core(core_image, embedding_url)
+        core, core_created = self._ensure_core(core_image, embedding)
         self.context["core_url"] = core["serviceDetails"]["url"].rstrip("/")
         return {
-            "action": ("created" if embedding_created or core_created else "unchanged"),
+            "action": ("created" if core_created else "unchanged"),
             "receipt_sha256": _receipt(
                 "render",
                 logical_id,
-                [embedding["id"], core["id"]],
+                [core["id"]],
             ),
         }
 
@@ -734,7 +770,6 @@ def build_live_adapters(
     database_name: str,
     render_owner_id: str,
     core_name: str,
-    embedding_name: str,
     gateway_name: str,
     tailnet_hostname: str,
     tailnet_tag: str,
@@ -747,6 +782,7 @@ def build_live_adapters(
             "PLANETSCALE_SERVICE_TOKEN",
             "RENDER_API_KEY",
             "RECALL_DATABASE_URL",
+            "RECALL_EMBEDDING_API_KEY",
             "TAILSCALE_OAUTH_CLIENT_ID",
             "TAILSCALE_OAUTH_CLIENT_SECRET",
         )
@@ -779,9 +815,8 @@ def build_live_adapters(
             billing_selection="balanced-ha",
             region="virginia",
             core_name=core_name,
-            embedding_name=embedding_name,
             core_plan="starter",
-            embedding_plan="pro",
+            embedding_api_key=secrets["RECALL_EMBEDDING_API_KEY"],
             database_url=secrets["RECALL_DATABASE_URL"],
         ),
         "network": RenderTailscaleGatewayAdapter(
