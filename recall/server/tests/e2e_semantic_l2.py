@@ -45,6 +45,7 @@ class FakeSemanticRuntime:
         return vector
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        assert all(text.strip() for text in texts), "blank projections are not embeddable"
         return [self.vector(text) for text in texts]
 
     def embed_query(self, query: str) -> list[float]:
@@ -119,6 +120,12 @@ def main() -> None:
         | {"kind": "tool_output"},
         envelope("source-b", "decoy", "Architecture decision: unrelated queue.", "session-b"),
     ])
+    # Historical projectors can leave content-free items behind. They are valid
+    # records, but embedding providers reject them and they must not create lag.
+    with store.connect() as connection:
+        connection.execute(
+            "UPDATE items SET text_redacted='   ' WHERE event_native_id='other-surface'"
+        )
     first = store.embed_pending(batch_size=10, source_id="source-a", surface="message")
     scoped_replay = store.embed_pending(batch_size=10, source_id="source-a", surface="message")
     remaining = store.embed_pending(batch_size=10)
@@ -153,7 +160,7 @@ def main() -> None:
     )
     assert first["processed"] == 1 and first["source_scoped"] is True
     assert first["surface_scoped"] is True
-    assert scoped_replay["processed"] == 0 and remaining["processed"] == 2
+    assert scoped_replay["processed"] == 0 and remaining["processed"] == 1
     assert second["processed"] == 0
     assert all(
         "semantic" not in row["legs"]
