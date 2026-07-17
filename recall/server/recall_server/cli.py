@@ -13,6 +13,7 @@ from .capabilities import CapabilityError, probe_database
 from .db import BrainStore
 from .deployment import DeploymentManifestError, load_manifest, preview
 from .federation import QUALITY_SCORES, SOURCE_FAMILIES
+from .managed_apply import ApprovalError, approval_status, load_approvals
 from .semantic import SemanticRuntime
 
 
@@ -26,6 +27,9 @@ def main() -> None:
     capability.add_argument("--profile", choices=("production", "local-fixture"), default="production")
     deployment = sub.add_parser("deployment-preview")
     deployment.add_argument("--manifest", type=Path, required=True)
+    approval = sub.add_parser("deployment-approval-check")
+    approval.add_argument("--manifest", type=Path, required=True)
+    approval.add_argument("--approvals", type=Path, required=True)
     sub.add_parser("rebuild")
     backfill_entities = sub.add_parser("backfill-entities")
     backfill_entities.add_argument("--batch-size", type=int, default=5000)
@@ -68,6 +72,18 @@ def main() -> None:
             print(json.dumps(preview(load_manifest(args.manifest)), sort_keys=True))
         except DeploymentManifestError:
             print(json.dumps({"status": "rejected", "code": "manifest_invalid"}), file=sys.stderr)
+            raise SystemExit(2) from None
+        return
+    if args.command == "deployment-approval-check":
+        try:
+            manifest = load_manifest(args.manifest)
+            plan_sha256 = preview(manifest)["plan_sha256"]
+            print(json.dumps(approval_status(
+                load_approvals(args.approvals, plan_sha256),
+            ), sort_keys=True))
+        except (ApprovalError, DeploymentManifestError) as error:
+            code = error.code if isinstance(error, ApprovalError) else "manifest_invalid"
+            print(json.dumps({"status": "rejected", "code": code}), file=sys.stderr)
             raise SystemExit(2) from None
         return
     if not args.dsn:
