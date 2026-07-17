@@ -246,7 +246,7 @@ class StoreTest(unittest.TestCase):
             {"SLACK_ALLOWED_USERS": "U12345678,U87654321"},
             clear=False,
         ), mock.patch.object(self.runtime, "_slack_call", side_effect=[
-            {"ok": True, "channel": {"id": "G12345678"}},
+            {"ok": True, "channel": {"id": "C12345678"}},
             {"ok": True, "team_id": "T12345678", "user_id": "U11111111", "user": "agent"},
         ]) as call, mock.patch.object(
             self.runtime, "slack_post", return_value="123.456",
@@ -257,9 +257,10 @@ class StoreTest(unittest.TestCase):
             "conversations.open",
             {"users": "U12345678,U87654321", "return_im": True},
         ))
+        self.assertEqual(len(call.call_args_list), 2)
         post.assert_called_once()
         bridge = self.store.get(result["bridge_id"])
-        self.assertEqual(bridge.channel_id, "G12345678")
+        self.assertEqual(bridge.channel_id, "C12345678")
         self.assertEqual(bridge.team_id, "T12345678")
         self.assertEqual(bridge.owner_user_id, "*")
 
