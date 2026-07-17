@@ -264,7 +264,12 @@ async def _poll_recent_replies(adapter) -> int:
             client = adapter._get_client(bridge.channel_id)
             channel_key = (bridge.team_id, bridge.channel_id)
             if bridge.channel_id.startswith("C") and channel_key not in state.joined_channels:
-                await client.conversations_join(channel=bridge.channel_id)
+                try:
+                    await client.conversations_history(channel=bridge.channel_id, limit=1)
+                except Exception as exc:
+                    if "not_in_channel" not in str(exc):
+                        raise
+                    await client.conversations_join(channel=bridge.channel_id)
                 state.joined_channels.add(channel_key)
             result = await client.conversations_replies(
                 channel=bridge.channel_id,

@@ -895,8 +895,11 @@ class PluginRoutingTest(unittest.TestCase):
         ]
 
         class Client:
+            async def conversations_history(self, **_kwargs):
+                return {"ok": True, "messages": []}
+
             async def conversations_join(self, **_kwargs):
-                return {"ok": True}
+                raise AssertionError("already-accessible DM must not be joined")
 
             async def conversations_replies(self, **_kwargs):
                 return {"messages": messages}
@@ -921,6 +924,33 @@ class PluginRoutingTest(unittest.TestCase):
         self.assertEqual(adapter.events[0]["text"], "continue")
         self.assertTrue(adapter.events[0]["_tether_polled"])
 
+    def test_reply_poller_joins_only_after_not_in_channel(self):
+        bridge = self.make_bridge()
+        calls = []
+
+        class Client:
+            async def conversations_history(self, **_kwargs):
+                calls.append("history")
+                raise RuntimeError("Slack API error: not_in_channel")
+
+            async def conversations_join(self, **_kwargs):
+                calls.append("join")
+                return {"ok": True}
+
+            async def conversations_replies(self, **_kwargs):
+                return {"messages": []}
+
+        class Adapter:
+            def _get_client(self, _channel):
+                return Client()
+
+            async def _handle_slack_message(self, _event):
+                raise AssertionError("no messages should be dispatched")
+
+        recovered = asyncio.run(self.plugin._poll_recent_replies(Adapter()))
+        self.assertEqual(recovered, 0)
+        self.assertEqual(calls, ["history", "join"])
+
     def test_reply_poller_recovers_peer_bot_thread_turns_when_enabled(self):
         bridge = self.make_bridge()
         messages = [
@@ -938,8 +968,11 @@ class PluginRoutingTest(unittest.TestCase):
         ]
 
         class Client:
+            async def conversations_history(self, **_kwargs):
+                return {"ok": True, "messages": []}
+
             async def conversations_join(self, **_kwargs):
-                return {"ok": True}
+                raise AssertionError("already-accessible thread must not be joined")
 
             async def conversations_replies(self, **_kwargs):
                 return {"messages": messages}
