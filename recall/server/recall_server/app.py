@@ -146,6 +146,7 @@ class Handler(BaseHTTPRequestHandler):
                 "name": credential["name"],
                 "source_id": credential["source_id"],
                 "principal_id": credential.get("principal_id"),
+                "capture_origin": credential.get("capture_origin"),
                 "scopes": list(credential.get("scopes", [])),
             }
             if credential.get("principal_id"):
