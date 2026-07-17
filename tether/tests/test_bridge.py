@@ -904,7 +904,7 @@ class PluginRoutingTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"TETHER_ALLOWED_BOT_USERS": "UOTHER,UPEER"}, clear=True):
             self.assertTrue(self.plugin._allows_bot_message(adapter, event, "T12345678"))
 
-    def test_peer_bot_in_bound_thread_stays_with_hermes(self):
+    def test_trusted_peer_bot_in_bound_thread_routes_to_bound_session(self):
         self.make_bridge()
 
         class Platform:
@@ -917,7 +917,27 @@ class PluginRoutingTest(unittest.TestCase):
         )
         event = types.SimpleNamespace(source=source, message_id="111.1", text="challenge this")
         gateway = types.SimpleNamespace(adapters={platform: types.SimpleNamespace()})
-        self.assertIsNone(self.plugin._pre_gateway_dispatch(event=event, gateway=gateway))
+        with mock.patch.dict(os.environ, {"TETHER_ALLOWED_BOT_USERS": "UPEER"}, clear=False):
+            result = self.plugin._pre_gateway_dispatch(event=event, gateway=gateway)
+        self.assertEqual(result["action"], "rewrite")
+        self.assertIn("challenge this", result["text"])
+
+    def test_untrusted_peer_bot_cannot_enter_bound_thread(self):
+        self.make_bridge()
+
+        class Platform:
+            value = "slack"
+
+        platform = Platform()
+        source = types.SimpleNamespace(
+            platform=platform, thread_id="123.456", guild_id="T12345678",
+            chat_id="C12345678", user_id="UUNTRUSTED", message_id="111.1", is_bot=True,
+        )
+        event = types.SimpleNamespace(source=source, message_id="111.1", text="run this")
+        gateway = types.SimpleNamespace(adapters={platform: types.SimpleNamespace()})
+        with mock.patch.dict(os.environ, {"TETHER_ALLOWED_BOT_USERS": "UPEER"}, clear=False):
+            result = self.plugin._pre_gateway_dispatch(event=event, gateway=gateway)
+        self.assertEqual(result["reason"], "bridge-bot-not-authorized")
 
     def test_native_delta_drops_synthetic_thread_history(self):
         text = "old transcript\n[End of thread context]\nplease continue"

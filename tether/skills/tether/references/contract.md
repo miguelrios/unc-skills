@@ -24,7 +24,7 @@ Hermes's processing or success reaction.
 
 Socket Mode is the primary inbound transport. Tether also polls a bounded batch of recently active threads through Hermes's existing Slack client. Polled events re-enter the normal adapter and gateway pipeline; a persistent ingress ledger prevents duplicate execution across live delivery, polling, and gateway restarts. Polling never weakens workspace, channel, allowlist, or bridge-owner checks.
 
-Peer-agent collaboration is agentic. Hermes may admit peer messages in threads where the agent is participating; Tether applies the same configured transport policy during reply recovery and routes those turns to the Hermes conversation, never into a captured native coding session. Code handles identity, self-echo prevention, and deduplication. The agent decides from conversation context whether a response is warranted and returns exactly `NO_REPLY` when it is not; Hermes suppresses that marker before Slack delivery.
+Peer-agent collaboration is agentic. Hermes may admit peer messages in threads where the agent is participating; Tether applies the same configured transport policy during reply recovery and routes trusted turns to the exact bound session when one exists. Hermes is not a second writer for a bound thread. Code handles identity, self-echo prevention, and deduplication. The agent decides from conversation context whether a response is warranted and returns exactly `NO_REPLY` when it is not; Hermes suppresses that marker before Slack delivery.
 
 Queue and serialize native replies per bridge. Strip synthetic Slack thread history before native resume because prior bridge turns already exist in the bound agent session. Terminate the whole continuation process group on cancellation or timeout.
 

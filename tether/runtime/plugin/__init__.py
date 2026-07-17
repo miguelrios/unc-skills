@@ -206,14 +206,6 @@ def _install_slack_bridge_prefilter():
                 if _is_bot_message(event) and not _allows_bot_message(self, event, bridge.team_id):
                     return None
                 self._bot_message_ts.add(bridge.thread_ts)
-                event_id = str(event.get("ts") or "")
-                if (
-                    not event.get("_tether_polled")
-                    and _is_bot_message(event)
-                    and event_id
-                    and not store.mark_ingress(event_id, bridge.bridge_id)
-                ):
-                    return None
         except Exception:
             log.exception("Could not evaluate a Slack bridge thread before the mention gate")
         return await original(self, event)
@@ -309,9 +301,12 @@ async def _poll_recent_replies(adapter) -> int:
                 "channel_type": "im" if bridge.channel_id.startswith("D") else "channel",
                 "_tether_polled": True,
             })
-            if _is_bot_message(message) and not store.mark_ingress(event_id, bridge.bridge_id):
-                continue
             await adapter._handle_slack_message(event)
+            # The real gateway dispatch records ingress. Test adapters and
+            # compatibility shims may stop earlier, so persist recovery
+            # deduplication only after giving Tether a chance to route it.
+            if not store.has_ingress(event_id):
+                store.mark_ingress(event_id, bridge.bridge_id)
             recovered += 1
     if batch and not succeeded:
         raise RuntimeError("every Slack thread poll failed")
@@ -494,16 +489,18 @@ def _pre_gateway_dispatch(*, event, gateway, **_kwargs):
     bridge = store.find(str(source.guild_id or ""), str(source.chat_id), str(source.thread_id))
     if bridge is None:
         return None
-    # Peer bots belong to the Hermes conversation, never a captured native
-    # coding session. The conversation agent decides whether to answer.
-    if getattr(source, "is_bot", False):
-        return None
-    # Once a thread resolves to Tether, Hermes must not leave its generic
+    # Once a thread resolves to Tether, the exact bound session is its sole
+    # writer for admitted human and trusted peer-agent turns. Hermes must not
+    # leave its generic processing/success reaction behind.
+    is_bot = bool(getattr(source, "is_bot", False))
+    user_id = str(source.user_id or "")
+    if is_bot and user_id not in _allowed_peer_bot_users():
+        return {"action": "skip", "reason": "bridge-bot-not-authorized"}
+    # Tether must not leave its generic
     # processing/success reaction behind. In particular, an authorization
     # rejection is not a successful handoff.
     _suppress_bridge_reaction(event, gateway)
-    user_id = str(source.user_id or "")
-    if not _authorized(bridge, user_id):
+    if not is_bot and not _authorized(bridge, user_id):
         return {"action": "skip", "reason": "bridge-user-not-authorized"}
     event_id = str(event.message_id or source.message_id or "")
     if not store.mark_ingress(event_id, bridge.bridge_id):
