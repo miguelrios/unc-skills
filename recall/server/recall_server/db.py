@@ -197,6 +197,25 @@ class BrainStore:
             raise RuntimeError("database readiness probe failed")
         return {"status": "ready"}
 
+    def operational_health(self) -> dict[str, str | int]:
+        """Return client health without scanning the corpus or exact metric totals."""
+        with self.connect() as conn:
+            row = conn.execute(
+                """SELECT GREATEST(
+                       0,
+                       COALESCE((
+                           SELECT id FROM source_events ORDER BY id DESC LIMIT 1
+                       ), 0) -
+                       COALESCE((
+                           SELECT last_event_id FROM projection_watermarks
+                           WHERE projector='items'
+                       ), 0)
+                   ) AS projection_lag"""
+            ).fetchone()
+        if not row:
+            raise RuntimeError("database operational health probe failed")
+        return {"status": "ok", "projection_lag": row["projection_lag"]}
+
     def service_metrics(self) -> dict:
         with self.connect() as conn:
             metrics = {
