@@ -141,11 +141,18 @@ class Handler(BaseHTTPRequestHandler):
             )
             if not credential:
                 return None
-            return {
+            principal = {
                 "kind": "collector",
                 "name": credential["name"],
                 "source_id": credential["source_id"],
+                "principal_id": credential.get("principal_id"),
+                "scopes": list(credential.get("scopes", [])),
             }
+            if credential.get("principal_id"):
+                principal["authorized_sources"] = self.store.authorized_source_ids(
+                    credential["principal_id"]
+                )
+            return principal
         if (
             os.environ.get("RECALL_TRUST_TAILSCALE_HEADERS", "0") == "1"
             and self.trusted_proxy_peer()
@@ -246,8 +253,27 @@ class Handler(BaseHTTPRequestHandler):
                 COUNTERS["http_duration_count"] += 1
                 COUNTERS["http_duration_sum"] += time.monotonic() - started
 
+    @staticmethod
+    def public_mcp_profile() -> bool:
+        return os.environ.get("RECALL_HTTP_PROFILE") == "public-mcp"
+
+    def hide_non_public_route(self, method: str, path: str) -> bool:
+        if not self.public_mcp_profile():
+            return False
+        allowed = (
+            method == "POST" and path == "/mcp"
+        ) or (
+            method == "GET" and path in {"/mcp", "/healthz", "/readyz"}
+        )
+        if allowed:
+            return False
+        self.send_json(404, {"error": "not found"})
+        return True
+
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
+        if self.hide_non_public_route("GET", parsed.path):
+            return
         if parsed.path == "/mcp":
             if not self.valid_mcp_origin():
                 return
@@ -300,6 +326,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlsplit(self.path).path
+        if self.hide_non_public_route("POST", path):
+            return
         if path == "/mcp":
             if not self.valid_mcp_origin():
                 return
@@ -472,8 +500,35 @@ class Handler(BaseHTTPRequestHandler):
                 LOG.error("dead-letter write failed after ingest error")
             self.send_json(500, {"error": "ingest failed"})
 
+    def do_DELETE(self) -> None:
+        self.send_json(404, {"error": "not found"})
+
+    def do_PATCH(self) -> None:
+        self.send_json(404, {"error": "not found"})
+
+    def do_PUT(self) -> None:
+        self.send_json(404, {"error": "not found"})
+
+    def do_OPTIONS(self) -> None:
+        self.send_json(404, {"error": "not found"})
+
+    def do_HEAD(self) -> None:
+        self.send_empty(404)
+
+
+def validate_http_profile() -> None:
+    profile = os.environ.get("RECALL_HTTP_PROFILE", "")
+    if profile not in {"", "public-mcp"}:
+        raise RuntimeError("unsupported HTTP profile")
+    if profile == "public-mcp":
+        if os.environ.get("RECALL_AUTH_REQUIRED", "0") != "1":
+            raise RuntimeError("public MCP profile requires authentication")
+        if os.environ.get("RECALL_TRUST_TAILSCALE_HEADERS", "0") == "1":
+            raise RuntimeError("public MCP profile forbids trusted identity headers")
+
 
 def serve(dsn: str, host: str = "127.0.0.1", port: int = 8788) -> None:
+    validate_http_profile()
     if os.environ.get("RECALL_AUTH_REQUIRED", "0") != "1" and host not in {
         "127.0.0.1",
         "localhost",
@@ -494,6 +549,7 @@ class ThreadingUnixHTTPServer(
 
 
 def serve_unix(dsn: str, path: str) -> None:
+    validate_http_profile()
     try:
         existing = os.lstat(path)
     except FileNotFoundError:

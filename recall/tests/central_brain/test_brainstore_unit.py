@@ -28,7 +28,7 @@ except ModuleNotFoundError:
 
 from recall_server import SCHEMA_VERSION
 from recall_server import cli as server_cli
-from recall_server.app import Handler, serve, serve_unix
+from recall_server.app import Handler, serve, serve_unix, validate_http_profile
 from recall_server.db import BrainStore, semantic_candidate_limit
 from recall_server.federation import SOURCE_FAMILIES, SourceProfile
 from recall_server.projectors import advisory_lock_key, canonical_json, effective_session_id, partial_lexical_probes, phrase_query_spec, preferred_phrase_probe, preferred_phrase_probes, project, redact_text, validate_envelope
@@ -115,6 +115,18 @@ class SchemaMigrationContractTest(unittest.TestCase):
         self.assertLess(
             implementation.index("cursor.executemany("),
             implementation.rindex("GREATEST(last_item_id,%s)"),
+        )
+
+    def test_remote_principal_credentials_are_migrated(self) -> None:
+        migration = SERVER / "schema" / "015_principal_credentials.sql"
+        rendered = " ".join(migration.read_text().split()).casefold()
+        self.assertIn(
+            "add column if not exists principal_id text",
+            rendered,
+        )
+        self.assertIn(
+            "source_grants(principal_id, permission, source_id)",
+            rendered,
         )
 
     def test_managed_upgrade_documents_split_role_grant_refresh(self) -> None:
@@ -314,6 +326,14 @@ class SourceScopedReadContractTest(unittest.TestCase):
         self.assertIn("i.source_id = ANY(%s)", where)
         self.assertEqual(params, ["source-a", "source-b", ["source-b", "source-c"]])
 
+    def test_authorized_source_set_is_closed_even_when_empty(self) -> None:
+        where, params = BrainStore._read_filters(
+            {},
+            authorized_source=[],
+        )
+        self.assertIn("i.source_id = ANY(%s)", where)
+        self.assertEqual(params, [[]])
+
     def test_resolve_filters_by_the_authenticated_collector_source(self) -> None:
         connection = mock.MagicMock()
         connection.execute.return_value.fetchone.return_value = None
@@ -428,6 +448,36 @@ class HttpBoundaryContractTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "authentication"):
                 serve("postgresql://synthetic.invalid/recall", "0.0.0.0", 8788)
 
+    def test_public_mcp_profile_requires_bearer_auth_and_forbids_proxy_headers(
+        self,
+    ) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "RECALL_HTTP_PROFILE": "public-mcp",
+                "RECALL_AUTH_REQUIRED": "0",
+                "RECALL_TRUST_TAILSCALE_HEADERS": "0",
+            },
+        ):
+            with self.assertRaisesRegex(RuntimeError, "requires authentication"):
+                serve("postgresql://synthetic.invalid/recall")
+        with mock.patch.dict(
+            os.environ,
+            {
+                "RECALL_HTTP_PROFILE": "public-mcp",
+                "RECALL_AUTH_REQUIRED": "1",
+                "RECALL_TRUST_TAILSCALE_HEADERS": "1",
+            },
+        ):
+            with self.assertRaisesRegex(RuntimeError, "forbids trusted"):
+                serve("postgresql://synthetic.invalid/recall")
+        with mock.patch.dict(
+            os.environ,
+            {"RECALL_HTTP_PROFILE": "public-mpc"},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "unsupported HTTP profile"):
+                validate_http_profile()
+
     def test_unix_server_refuses_to_replace_a_regular_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "recall.sock"
@@ -533,6 +583,18 @@ class AdminCliSafetyTest(unittest.TestCase):
         self.assertEqual(raised.exception.code, 2)
         self.assertIn("--output", errors.getvalue())
         self.assertNotIn("rcl_", errors.getvalue())
+
+    def test_write_credentials_must_be_bound_to_one_source(self) -> None:
+        store = BrainStore("postgresql://synthetic.invalid/recall")
+        store.connect = mock.MagicMock()
+        with self.assertRaisesRegex(ValueError, "write credential requires a source"):
+            store.create_collector_token(
+                "synthetic-unbound-writer",
+                None,
+                ["read", "write"],
+                principal_id="synthetic-owner",
+            )
+        store.connect.assert_not_called()
 
 
 class EnvelopeContractTest(unittest.TestCase):

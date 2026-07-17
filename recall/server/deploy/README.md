@@ -16,7 +16,7 @@ infrastructure. The example is synthetic; a live manifest belongs in a private m
 location and contains references, never credential values.
 
 The production database gate requires a standard PostgreSQL URL with
-`sslmode=verify-full` and an explicit trust root, schema migrations 1 through 14,
+`sslmode=verify-full` and an explicit trust root, schema migrations 1 through 15,
 pgvector 0.8.0 or newer, and a runtime role without superuser, database/role creation,
 replication, or RLS-bypass privilege:
 
@@ -185,6 +185,9 @@ Do not use Funnel. Preserve unrelated Serve listeners by configuring only the de
 listener. Collectors receive revocable tokens from `recall_server.cli token-create`; plaintext
 is emitted once and only its SHA-256 is stored. Use `--output /secure/mode-0600-file.json` so the
 plaintext never enters terminal or session logs; the command refuses to overwrite an existing file.
+A read token may use `--principal OWNER` to read exactly the sources granted to that principal.
+Any token with `write` scope must also use `--source SOURCE_ID`; write authority is never
+principal-wide.
 
 The pilot uses a five-minute logical-backup timer for a bounded RPO. Before multi-user scale or
 C10 production cutover, replace it with continuous WAL archival plus daily base backups; the

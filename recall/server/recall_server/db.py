@@ -77,24 +77,47 @@ class BrainStore:
             for schema in sorted(schema_dir.glob("*.sql")):
                 conn.execute(schema.read_text())
 
-    def create_collector_token(self, name: str, source_id: str | None, scopes: list[str]) -> dict:
+    def create_collector_token(
+        self,
+        name: str,
+        source_id: str | None,
+        scopes: list[str],
+        *,
+        principal_id: str | None = None,
+    ) -> dict:
         allowed = {"read", "write", "metrics"}
         if not name or not scopes or set(scopes) - allowed:
             raise ValueError("invalid collector credential")
+        if "write" in scopes and not source_id:
+            raise ValueError("write credential requires a source")
         plaintext = "rcl_" + secrets.token_urlsafe(32)
         digest = hashlib.sha256(plaintext.encode()).hexdigest()
         credential_id = uuid.uuid4()
         with self.connect() as conn:
             conn.execute(
-                """INSERT INTO collector_credentials(id,name,token_sha256,source_id,scopes)
-                   VALUES (%s,%s,%s,%s,%s)""",
-                (credential_id, name, digest, source_id, scopes),
+                """INSERT INTO collector_credentials(
+                       id,name,token_sha256,source_id,scopes,principal_id
+                   ) VALUES (%s,%s,%s,%s,%s,%s)""",
+                (credential_id, name, digest, source_id, scopes, principal_id),
             )
             conn.execute(
                 "INSERT INTO audit_events(operation,status,metadata) VALUES ('credential.create','success',%s)",
-                (json.dumps({"credential_id": str(credential_id), "name": name, "source_id": source_id, "scopes": scopes}),),
+                (json.dumps({
+                    "credential_id": str(credential_id),
+                    "name": name,
+                    "source_id": source_id,
+                    "principal_id": principal_id,
+                    "scopes": scopes,
+                }),),
             )
-        return {"id": str(credential_id), "name": name, "token": plaintext, "source_id": source_id, "scopes": scopes}
+        return {
+            "id": str(credential_id),
+            "name": name,
+            "token": plaintext,
+            "source_id": source_id,
+            "principal_id": principal_id,
+            "scopes": scopes,
+        }
 
     def revoke_collector_token(self, name: str) -> bool:
         with self.connect() as conn:
@@ -207,13 +230,27 @@ class BrainStore:
         digest = hashlib.sha256(plaintext.encode()).hexdigest()
         with self.connect() as conn:
             row = conn.execute(
-                """SELECT id,name,source_id,scopes FROM collector_credentials
+                """SELECT id,name,source_id,principal_id,scopes
+                   FROM collector_credentials
                    WHERE token_sha256=%s AND revoked_at IS NULL""",
                 (digest,),
             ).fetchone()
             if not row or required_scope not in row["scopes"]:
                 return None
             return row
+
+    def authorized_source_ids(self, principal_id: str) -> list[str]:
+        if not isinstance(principal_id, str) or not principal_id:
+            return []
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT DISTINCT source_id
+                   FROM source_grants
+                   WHERE principal_id=%s AND permission IN ('owner','read')
+                   ORDER BY source_id""",
+                (principal_id,),
+            ).fetchall()
+        return [row["source_id"] for row in rows]
 
     def readiness(self) -> dict[str, str]:
         """Prove the database is reachable without scanning runtime data."""
@@ -737,7 +774,7 @@ class BrainStore:
     @staticmethod
     def _read_filters(
         filters: dict,
-        authorized_source: str | None = None,
+        authorized_source: str | list[str] | tuple[str, ...] | None = None,
         routed_source_ids: list[str] | None = None,
     ) -> tuple[str, list[Any]]:
         allowed = {"since", "until", "cwd", "branch", "harness", "source_id", "source_family", "source_alias"}
@@ -745,8 +782,11 @@ class BrainStore:
             raise ValueError("unsupported search filter")
         clauses = ["i.deleted_at IS NULL"]
         params: list[Any] = []
-        if authorized_source:
+        if isinstance(authorized_source, str):
             clauses.append("i.source_id = %s"); params.append(authorized_source)
+        elif authorized_source is not None:
+            clauses.append("i.source_id = ANY(%s)")
+            params.append(list(authorized_source))
         if filters.get("source_id"):
             source_id = filters["source_id"]
             if (
@@ -1064,8 +1104,13 @@ class BrainStore:
             for row in rows
         ]
 
-    def search(self, query: str, filters: dict | None = None, limit: int = 10,
-               authorized_source: str | None = None) -> dict:
+    def search(
+        self,
+        query: str,
+        filters: dict | None = None,
+        limit: int = 10,
+        authorized_source: str | list[str] | tuple[str, ...] | None = None,
+    ) -> dict:
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query is required")
         if len(query) > 8192:
@@ -1408,13 +1453,29 @@ class BrainStore:
             "diagnostics": diagnostics,
         }
 
-    def show(self, target: str, *, around: str | None = None, tail: int = 0,
-             prompts: bool = False, authorized_source: str | None = None) -> dict | None:
+    def show(
+        self,
+        target: str,
+        *,
+        around: str | None = None,
+        tail: int = 0,
+        prompts: bool = False,
+        authorized_source: str | list[str] | tuple[str, ...] | None = None,
+    ) -> dict | None:
         if not target:
             raise ValueError("target is required")
         if tail < 0 or tail > 1000:
             raise ValueError("tail must be between 0 and 1000")
         with self.connect() as conn:
+            if isinstance(authorized_source, str):
+                source_scope_sql = "event.source_id=%s"
+                source_scope_params: list[Any] = [authorized_source]
+            elif authorized_source is not None:
+                source_scope_sql = "event.source_id=ANY(%s)"
+                source_scope_params = [list(authorized_source)]
+            else:
+                source_scope_sql = "TRUE"
+                source_scope_params = []
             if target.startswith("recall://"):
                 event_part = target.split("#", 1)[0]
                 try:
@@ -1424,23 +1485,23 @@ class BrainStore:
                 except (ValueError, TypeError):
                     raise ValueError("invalid receipt") from None
                 identity = conn.execute(
-                    """SELECT event.source_id,
+                    f"""SELECT event.source_id,
                               COALESCE(item.session_native_id,event.native_parent_id,event.native_id) AS session_native_id
                        FROM source_events event LEFT JOIN items item ON item.event_id=event.id
                        WHERE event.source_id=%s AND event.native_id=%s AND event.revision=%s
-                         AND (%s::text IS NULL OR event.source_id=%s)
+                         AND {source_scope_sql}
                        ORDER BY item.id LIMIT 1""",
-                    (source_id, native_id, int(revision), authorized_source, authorized_source),
+                    [source_id, native_id, int(revision), *source_scope_params],
                 ).fetchone()
             else:
                 identity = conn.execute(
-                    """SELECT event.source_id,
+                    f"""SELECT event.source_id,
                               COALESCE(item.session_native_id,event.native_parent_id,event.native_id) AS session_native_id
                        FROM source_events event LEFT JOIN items item ON item.event_id=event.id
-                       WHERE event.envelope #>> '{provenance,original_path}'=%s
-                         AND (%s::text IS NULL OR event.source_id=%s)
+                       WHERE event.envelope #>> '{{provenance,original_path}}'=%s
+                         AND {source_scope_sql}
                        ORDER BY event.id DESC,item.id LIMIT 1""",
-                    (target, authorized_source, authorized_source),
+                    [target, *source_scope_params],
                 ).fetchone()
             if not identity:
                 return None
@@ -1679,9 +1740,16 @@ class BrainStore:
                 },
             }
 
-    def related(self, *, cwd: str | None, branch: str | None, limit: int = 10,
-                mains_only: bool = False, fast: bool = False,
-                authorized_source: str | None = None) -> dict:
+    def related(
+        self,
+        *,
+        cwd: str | None,
+        branch: str | None,
+        limit: int = 10,
+        mains_only: bool = False,
+        fast: bool = False,
+        authorized_source: str | list[str] | tuple[str, ...] | None = None,
+    ) -> dict:
         if not 1 <= limit <= 20:
             raise ValueError("limit must be between 1 and 20")
         if not cwd and not branch:
@@ -1694,6 +1762,15 @@ class BrainStore:
             clauses.append("COALESCE(s.metadata->>'branch','') ILIKE %s"); params.append("%" + branch + "%")
             score_parts.append("(COALESCE(s.metadata->>'branch','') ILIKE %s)::int")
         score_params = list(params)
+        if isinstance(authorized_source, str):
+            source_scope_sql = "s.source_id=%s"
+            source_scope_params: list[Any] = [authorized_source]
+        elif authorized_source is not None:
+            source_scope_sql = "s.source_id=ANY(%s)"
+            source_scope_params = [list(authorized_source)]
+        else:
+            source_scope_sql = "TRUE"
+            source_scope_params = []
         with self.connect() as conn:
             rows = conn.execute(
                 f"""SELECT s.source_id,s.native_id,s.metadata,s.ended_at,path.value AS path,evidence.receipt,
@@ -1712,10 +1789,10 @@ class BrainStore:
                       ORDER BY i.occurred_at DESC NULLS LAST,i.id DESC LIMIT 1
                     ) evidence ON true
                     WHERE ({' OR '.join(clauses)})
-                      AND (%s::text IS NULL OR s.source_id=%s)
+                      AND {source_scope_sql}
                       {"AND path.value NOT LIKE '%%/subagents/%%'" if mains_only else ''}
                     ORDER BY overlap DESC,s.ended_at DESC NULLS LAST LIMIT %s""",
-                [*score_params, *params, authorized_source, authorized_source, limit],
+                [*score_params, *params, *source_scope_params, limit],
             ).fetchall()
         return {"results": [{
             "source_id": row["source_id"], "session_native_id": row["native_id"],
