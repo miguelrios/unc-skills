@@ -1,5 +1,27 @@
 # Tailnet-private pilot deployment
 
+## Public MCP deployment profile
+
+`RenderPublicMcpAdapter` creates one digest-pinned Render `web_service` with managed HTTPS,
+`/readyz` health checks, bearer authentication, and `RECALL_HTTP_PROFILE=public-mcp`. The
+application therefore exposes only `/mcp`, `/healthz`, and `/readyz`; no Tailscale gateway,
+OAuth credential, REST ingest route, metrics route, or doctor route is part of this profile.
+
+PlanetScale IP restrictions require stable egress. `RenderDedicatedIpAdapter` models Render's
+separate dedicated-IP resource and refuses to create it unless `purchase_approved` is explicitly
+true. The resource is asynchronous and is not ready for database allowlisting until Render
+reports `RUNNING` with exactly three IPv4 addresses. It is workspace-scoped to one region, so
+database credentials remain the second independent boundary. As of July 2026, Render requires
+a Pro-or-higher workspace and bills one dedicated IP set at $100/month:
+
+- <https://render.com/docs/dedicated-ips>
+- <https://api-docs.render.com/reference/create-dedicated-ip>
+
+Keep the prior database egress allowlist in place during cutover. Add all three dedicated
+addresses as `/32` entries, prove the hosted service can reach PlanetScale, then remove obsolete
+egress entries. Dedicated outbound IPs do not restrict inbound MCP traffic; bearer capabilities
+and the MCP-only application surface remain mandatory.
+
 ## Managed Core preview
 
 `recall-core` is the existing API, projection, and retrieval runtime packaged as one

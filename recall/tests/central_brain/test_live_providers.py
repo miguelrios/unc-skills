@@ -12,6 +12,8 @@ sys.path.insert(0, str(SERVER))
 from recall_server.live_providers import (  # noqa: E402
     LiveProviderError,
     PlanetScaleDatabaseAdapter,
+    RenderDedicatedIpAdapter,
+    RenderPublicMcpAdapter,
     RenderPrivateStackAdapter,
     RenderTailscaleGatewayAdapter,
 )
@@ -100,6 +102,63 @@ class FakeRender:
         raise AssertionError((method, path))
 
 
+class FakePublicRender(FakeRender):
+    def __init__(self) -> None:
+        super().__init__()
+        self.dedicated_ips: list[dict] = []
+
+    def request(self, method: str, path: str, body: dict | None = None):
+        self.calls.append((method, path, body))
+        if method == "GET" and path.startswith("/dedicated-ips?"):
+            return 200, list(self.dedicated_ips)
+        if method == "POST" and path == "/dedicated-ips":
+            value = {
+                "id": "dip-synthetic-1",
+                "name": body["name"],
+                "ownerId": body["ownerId"],
+                "region": body["region"],
+                "environmentIds": body.get("environmentIds", []),
+                "status": "CREATING",
+                "ips": [],
+            }
+            self.dedicated_ips.append(value)
+            return 201, value
+        if method == "GET":
+            if "/env-vars?" in path or "/secret-files?" in path:
+                return super().request(method, path, body)
+            name = path.split("name=", 1)[1].split("&", 1)[0]
+            service = self.services.get(name)
+            return 200, ([] if service is None else [{"service": service}])
+        if method == "POST" and path == "/services":
+            name = body["name"]
+            details = body["serviceDetails"]
+            service = {
+                "id": f"srv-public-{len(self.services) + 1}",
+                "name": name,
+                "ownerId": body["ownerId"],
+                "type": body["type"],
+                "imagePath": body["image"]["imagePath"],
+                "serviceDetails": {
+                    "runtime": details["runtime"],
+                    "region": details["region"],
+                    "plan": details["plan"],
+                    "url": f"https://{name}.onrender.com",
+                    **{
+                        key: value
+                        for key, value in details.items()
+                        if key not in {"runtime", "region", "plan"}
+                    },
+                },
+            }
+            self.services[name] = service
+            self.configuration[service["id"]] = {
+                "envVars": [dict(item) for item in body["envVars"]],
+                "secretFiles": [dict(item) for item in body["secretFiles"]],
+            }
+            return 201, {"service": service, "deployId": "dep-public-synthetic"}
+        raise AssertionError((method, path, body))
+
+
 def service_desired() -> dict:
     return {
         "adapter": "render-private-service",
@@ -134,6 +193,96 @@ def network_desired() -> dict:
 
 
 class LiveProviderAdapterTest(unittest.TestCase):
+    def test_public_mcp_service_is_one_digest_pinned_web_service(self):
+        provider = FakePublicRender()
+        adapter = RenderPublicMcpAdapter(
+            provider,
+            owner_id="owner-synthetic",
+            region_selection="virginia",
+            billing_selection="balanced-ha",
+            region="virginia",
+            name="synthetic-recall-mcp",
+            plan="starter",
+            embedding_api_key="synthetic-embedding-key",
+            database_url=(
+                "postgresql://synthetic:synthetic@db.invalid/recall"
+                "?sslmode=verify-full&sslrootcert=system"
+            ),
+        )
+        desired = service_desired()
+        desired["adapter"] = "render-public-mcp"
+        desired["public_ingress"] = True
+        first = adapter.ensure("recall-public-mcp", desired)
+        second = adapter.ensure("recall-public-mcp", desired)
+        self.assertEqual(first["action"], "created")
+        self.assertEqual(second["action"], "unchanged")
+        creates = [
+            body for method, path, body in provider.calls
+            if method == "POST" and path == "/services"
+        ]
+        self.assertEqual(len(creates), 1)
+        body = creates[0]
+        self.assertEqual(body["type"], "web_service")
+        self.assertEqual(body["image"]["imagePath"], CORE_IMAGE)
+        details = body["serviceDetails"]
+        self.assertEqual(details["healthCheckPath"], "/readyz")
+        self.assertEqual(
+            details["dockerCommand"],
+            "serve --host 0.0.0.0 --port 10000 --require-auth "
+            "--capability-profile production",
+        )
+        env = {item["key"]: item["value"] for item in body["envVars"]}
+        self.assertEqual(env["RECALL_HTTP_PROFILE"], "public-mcp")
+        self.assertEqual(env["RECALL_AUTH_REQUIRED"], "1")
+        self.assertEqual(env["RECALL_TRUST_TAILSCALE_HEADERS"], "0")
+        rendered = json.dumps(body)
+        self.assertNotIn("TAILSCALE_OAUTH", rendered)
+        self.assertNotIn("TS_AUTHKEY", rendered)
+        self.assertEqual(first["public_url"], "https://synthetic-recall-mcp.onrender.com")
+
+    def test_dedicated_egress_requires_purchase_approval_and_converges(self):
+        provider = FakePublicRender()
+        adapter = RenderDedicatedIpAdapter(
+            provider,
+            owner_id="owner-synthetic",
+            region="virginia",
+            name="synthetic-recall-egress",
+        )
+        with self.assertRaisesRegex(
+            LiveProviderError,
+            "dedicated_ip_purchase_approval_required",
+        ):
+            adapter.ensure(
+                "recall-public-egress",
+                {"purchase_approved": False},
+            )
+        self.assertFalse(any(
+            method == "POST" and path == "/dedicated-ips"
+            for method, path, _body in provider.calls
+        ))
+        created = adapter.ensure(
+            "recall-public-egress",
+            {"purchase_approved": True},
+        )
+        unchanged = adapter.ensure(
+            "recall-public-egress",
+            {"purchase_approved": True},
+        )
+        self.assertEqual(created["action"], "created")
+        self.assertFalse(created["ready"])
+        self.assertEqual(unchanged["action"], "unchanged")
+        self.assertEqual(len(provider.dedicated_ips), 1)
+        provider.dedicated_ips[0].update({
+            "status": "RUNNING",
+            "ips": ["192.0.2.1", "192.0.2.2", "192.0.2.3"],
+        })
+        ready = adapter.ensure(
+            "recall-public-egress",
+            {"purchase_approved": True},
+        )
+        self.assertTrue(ready["ready"])
+        self.assertEqual(ready["ips"], ["192.0.2.1", "192.0.2.2", "192.0.2.3"])
+
     def test_planetscale_create_then_unchanged_is_exact_and_autoscaling_bounded(self):
         provider = FakePlanetScale()
         adapter = PlanetScaleDatabaseAdapter(

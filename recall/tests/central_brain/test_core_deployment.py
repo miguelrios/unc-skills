@@ -297,6 +297,22 @@ class DeploymentPreviewContractTest(unittest.TestCase):
 
 
 class ContainerContractTest(unittest.TestCase):
+    def test_main_only_image_publication_uses_the_restricted_context(self) -> None:
+        workflow = (
+            RECALL.parent / ".github" / "workflows" / "recall-image.yml"
+        ).read_text()
+        self.assertIn("packages: write", workflow)
+        self.assertIn('branches: ["main"]', workflow)
+        self.assertNotIn("pull_request:", workflow)
+        self.assertIn("context: recall", workflow)
+        self.assertIn("file: recall/Dockerfile", workflow)
+        self.assertIn("push: true", workflow)
+        self.assertIn(
+            "ghcr.io/${{ github.repository_owner }}/recall-core:${{ github.sha }}",
+            workflow,
+        )
+        self.assertNotIn("context: .", workflow)
+
     def test_image_has_pinned_base_nonroot_runtime_and_content_free_healthcheck(
         self,
     ) -> None:
