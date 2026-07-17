@@ -82,6 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
     notify.add_argument("--file")
     reply = sub.add_parser("reply")
     reply.add_argument("--bridge-id", required=True)
+    reply.add_argument("--reply-key")
     reply.add_argument("--text", required=True)
     post = sub.add_parser("post")
     post.add_argument("--channel", required=True)
@@ -215,7 +216,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "setup":
         return run_setup(args)
     if args.command == "reply":
-        result = broker_call({"op": "reply", "bridge_id": args.bridge_id, "text": args.text})
+        result = broker_call({
+            "op": "reply", "bridge_id": args.bridge_id,
+            "reply_key": args.reply_key or "", "text": args.text,
+        })
     elif args.command == "post":
         result = broker_call({
             "op": "thread_reply", "channel_id": args.channel,

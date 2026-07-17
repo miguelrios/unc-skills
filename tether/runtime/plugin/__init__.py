@@ -38,6 +38,7 @@ deliver_zellij = runtime.deliver_zellij
 effective_allowed_users = runtime.effective_allowed_users
 load_config = runtime.load_config
 start_broker = runtime.start_broker
+validate_reply_text = runtime.validate_reply_text
 
 
 log = logging.getLogger(__name__)
@@ -356,23 +357,6 @@ def _suppress_bridge_reaction(event, gateway):
         )
 
 
-async def _progress(adapter, bridge):
-    delay = 5
-    elapsed = 0
-    while True:
-        await asyncio.sleep(delay)
-        elapsed += delay
-        text = "_Working in the bound agent session…_" if elapsed < 60 else f"_Still working in the bound agent session ({elapsed // 60}m)…_"
-        await adapter.send(bridge.channel_id, text, metadata={"thread_id": bridge.thread_ts})
-        delay = 300
-
-
-async def _stop_progress(task: asyncio.Task) -> None:
-    if not task.done():
-        task.cancel()
-    await asyncio.gather(task, return_exceptions=True)
-
-
 def _failure_reason(exc: Exception) -> str:
     text = str(exc).lower()
     if "credential" in text or "authentication" in text or "401" in text:
@@ -386,11 +370,34 @@ def _failure_reason(exc: Exception) -> str:
     return "the bound session could not be resumed"
 
 
-def _run_recovered_event(bridge, item):
+def _batch_prompt(items) -> str:
+    if len(items) == 1:
+        return items[0]["text"]
+    sections = [
+        f"[Slack follow-up {index} of {len(items)}]\n{item['text']}"
+        for index, item in enumerate(items, start=1)
+    ]
+    return (
+        "These follow-ups arrived while the bound session was busy. Handle them together, "
+        "using the latest message when requests overlap.\n\n" + "\n\n".join(sections)
+    )
+
+
+def _finish_batch(items, error: str | None = None) -> None:
+    for item in items:
+        store.finish_event(item["event_id"], error)
+
+
+def _run_recovered_event(bridge, items):
+    prompt = _batch_prompt(items)
     if _has_bound_zellij_pane(bridge):
-        deliver_zellij(bridge, item["text"])
+        deliver_zellij(bridge, prompt)
         return ""
-    return continue_native(bridge, item["text"])
+    return continue_native(
+        bridge,
+        prompt + "\n\nReturn one useful Slack update only, within 50 words and 3 sentences. "
+        "Return exactly NO_REPLY if the thread is already answered.",
+    )
 
 
 def _has_bound_zellij_pane(bridge) -> bool:
@@ -405,25 +412,22 @@ def _has_bound_zellij_pane(bridge) -> bool:
 def _recover_queued_events():
     for bridge_id in store.queued_bridge_ids():
         while True:
-            item = store.claim_next_event(bridge_id)
-            if item is None:
+            items = store.claim_event_batch(bridge_id)
+            if not items:
                 break
             bridge = store.get(bridge_id)
             if bridge is None or not bridge.thread_ts:
-                store.finish_event(item["event_id"], "bridge is no longer active")
+                _finish_batch(items, "bridge is no longer active")
                 continue
             try:
-                broker_call({
-                    "op": "reply", "bridge_id": bridge_id,
-                    "text": "_Resuming a queued continuation after a Hermes gateway restart…_",
-                })
-                response = _run_recovered_event(bridge, item)
-                if response:
+                response = _run_recovered_event(bridge, items)
+                if response and response.strip() != "NO_REPLY":
+                    response = validate_reply_text(response)
                     broker_call({"op": "reply", "bridge_id": bridge_id, "text": response})
-                store.finish_event(item["event_id"])
+                _finish_batch(items)
             except Exception as exc:
                 reason = _failure_reason(exc)
-                store.finish_event(item["event_id"], f"{type(exc).__name__}: {reason}")
+                _finish_batch(items, f"{type(exc).__name__}: {reason}")
                 log.error("Recovered bridge reply failed for %s: %s", bridge_id, reason)
                 try:
                     broker_call({"op": "reply", "bridge_id": bridge_id, "text": f"The recovered continuation failed because {reason}."})
@@ -435,29 +439,36 @@ async def _drain_bridge(bridge_id, gateway, platform):
     lock = state.bridge_locks.setdefault(bridge_id, asyncio.Lock())
     async with lock:
         while True:
-            item = store.claim_next_event(bridge_id)
-            if item is None:
+            items = store.claim_event_batch(bridge_id)
+            if not items:
                 return
             bridge = store.get(bridge_id)
             if bridge is None or not bridge.thread_ts:
-                store.finish_event(item["event_id"], "bridge is no longer active")
+                _finish_batch(items, "bridge is no longer active")
                 continue
             adapter = gateway.adapters[platform]
-            progress = asyncio.create_task(_progress(adapter, bridge))
             cancellation = threading.Event()
             state.active_cancellations[bridge_id] = cancellation
             try:
+                prompt = _batch_prompt(items)
                 if _has_bound_zellij_pane(bridge):
-                    await asyncio.to_thread(deliver_zellij, bridge, item["text"])
+                    await asyncio.to_thread(deliver_zellij, bridge, prompt)
                     response = ""
                 else:
-                    response = await asyncio.to_thread(continue_native, bridge, item["text"], cancellation)
-                if response:
+                    response = await asyncio.to_thread(
+                        continue_native,
+                        bridge,
+                        prompt + "\n\nReturn one useful Slack update only, within 50 words and 3 sentences. "
+                        "Return exactly NO_REPLY if the thread is already answered.",
+                        cancellation,
+                    )
+                if response and response.strip() != "NO_REPLY":
+                    response = validate_reply_text(response)
                     await adapter.send(bridge.channel_id, response, metadata={"thread_id": bridge.thread_ts})
-                store.finish_event(item["event_id"])
+                _finish_batch(items)
             except Exception as exc:
                 reason = _failure_reason(exc)
-                store.finish_event(item["event_id"], f"{type(exc).__name__}: {reason}")
+                _finish_batch(items, f"{type(exc).__name__}: {reason}")
                 log.error("Bridge reply failed for %s: %s", bridge.bridge_id, reason)
                 try:
                     await adapter.send(
@@ -469,7 +480,6 @@ async def _drain_bridge(bridge_id, gateway, platform):
                     log.exception("Could not report bridge failure in Slack for %s", bridge.bridge_id)
             finally:
                 state.active_cancellations.pop(bridge_id, None)
-                await _stop_progress(progress)
 
 
 def _authorized(bridge, user_id: str) -> bool:
@@ -530,14 +540,6 @@ def _pre_gateway_dispatch(*, event, gateway, **_kwargs):
         return {"action": "skip", "reason": "tether-cancel"}
     inserted = store.enqueue_event(event_id, bridge.bridge_id, delta)
     if inserted:
-        pending = store.pending_count(bridge.bridge_id)
-        if pending > 1:
-            asyncio.get_running_loop().create_task(
-                gateway.adapters[source.platform].send(
-                    bridge.channel_id, f"_Queued behind {pending - 1} active reply._",
-                    metadata={"thread_id": bridge.thread_ts},
-                )
-            )
         asyncio.get_running_loop().create_task(_drain_bridge(bridge.bridge_id, gateway, source.platform))
     return {"action": "skip", "reason": "tether-handled"}
 

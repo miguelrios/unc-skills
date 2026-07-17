@@ -52,6 +52,7 @@ MAX_TEXT = 35_000
 MAX_NATIVE_OUTPUT = 35_000
 MAX_SOURCE_VALUE = 4_096
 MAX_IDEMPOTENCY_KEY = 256
+REPLY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 SOURCE_FIELDS = {
     "zellij_pane": frozenset({
         "session_name", "pane_id", "zellij_session", "zellij_pane_id", "cwd",
@@ -86,6 +87,7 @@ class BridgeRequest(TypedDict, total=False):
     idempotency_key: str
     thread_ts: str
     bridge_id: str
+    reply_key: str
     file_path: str | None
     limit: int
 
@@ -98,6 +100,9 @@ class Config:
     team_id: str = ""
     allowed_users: tuple[str, ...] = ()
     native_timeout_seconds: int = 1800
+    max_reply_words: int = 50
+    max_reply_chars: int = 500
+    max_reply_sentences: int = 3
     codex_binary: str = "codex"
     claude_binary: str = "claude"
     codex_resume_args: tuple[str, ...] = ()
@@ -114,6 +119,15 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
     timeout = int(raw.get("native_timeout_seconds", 1800))
     if not 30 <= timeout <= 86_400:
         raise ValueError("native_timeout_seconds must be between 30 and 86400")
+    max_reply_words = int(raw.get("max_reply_words", 50))
+    max_reply_chars = int(raw.get("max_reply_chars", 500))
+    max_reply_sentences = int(raw.get("max_reply_sentences", 3))
+    if not 20 <= max_reply_words <= 500:
+        raise ValueError("max_reply_words must be between 20 and 500")
+    if not 100 <= max_reply_chars <= 4_000:
+        raise ValueError("max_reply_chars must be between 100 and 4000")
+    if not 1 <= max_reply_sentences <= 20:
+        raise ValueError("max_reply_sentences must be between 1 and 20")
     command = raw.get("credential_command") or []
     codex_args = raw.get("codex_resume_args") or []
     claude_args = raw.get("claude_resume_args") or []
@@ -148,6 +162,9 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
         team_id=team_id,
         allowed_users=tuple(users),
         native_timeout_seconds=timeout,
+        max_reply_words=max_reply_words,
+        max_reply_chars=max_reply_chars,
+        max_reply_sentences=max_reply_sentences,
         codex_binary=str(raw.get("codex_binary") or "codex"),
         claude_binary=str(raw.get("claude_binary") or "claude"),
         codex_resume_args=tuple(codex_args),
@@ -221,6 +238,11 @@ class Store:
                 );
                 CREATE TABLE IF NOT EXISTS bridge_ingress (
                   event_id TEXT PRIMARY KEY, bridge_id TEXT NOT NULL,
+                  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE IF NOT EXISTS bridge_replies (
+                  reply_key TEXT PRIMARY KEY, bridge_id TEXT NOT NULL,
+                  message_ts TEXT,
                   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
                 """
@@ -392,6 +414,40 @@ class Store:
             payload = json.loads(row["payload_json"] or "{}")
             return {"event_id": str(row["event_id"]), "text": str(payload.get("text") or "")}
 
+    def claim_event_batch(self, bridge_id: str, limit: int = 20) -> list[dict[str, str]]:
+        """Claim the currently queued follow-ups as one agent turn."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute(
+                "SELECT 1 FROM bridge_events WHERE bridge_id=? AND state='processing'",
+                (bridge_id,),
+            ).fetchone():
+                return []
+            rows = db.execute(
+                """
+                SELECT event_id,payload_json FROM bridge_events
+                WHERE bridge_id=? AND state='queued'
+                ORDER BY created_at,event_id LIMIT ?
+                """,
+                (bridge_id, max(1, min(limit, 100))),
+            ).fetchall()
+            if not rows:
+                return []
+            event_ids = [str(row["event_id"]) for row in rows]
+            placeholders = ",".join("?" for _ in event_ids)
+            db.execute(
+                f"UPDATE bridge_events SET state='processing',updated_at=CURRENT_TIMESTAMP "
+                f"WHERE event_id IN ({placeholders})",
+                event_ids,
+            )
+            return [
+                {
+                    "event_id": str(row["event_id"]),
+                    "text": str(json.loads(row["payload_json"] or "{}").get("text") or ""),
+                }
+                for row in rows
+            ]
+
     def pending_count(self, bridge_id: str) -> int:
         with self.connect() as db:
             return int(db.execute(
@@ -420,6 +476,37 @@ class Store:
             db.execute(
                 "UPDATE bridge_events SET state=?,error=?,updated_at=CURRENT_TIMESTAMP WHERE event_id=?",
                 ("failed" if safe_error else "delivered", safe_error, event_id),
+            )
+
+    def reserve_reply(self, reply_key: str, bridge_id: str) -> tuple[bool, str]:
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT bridge_id,message_ts FROM bridge_replies WHERE reply_key=?",
+                (reply_key,),
+            ).fetchone()
+            if row is not None:
+                if str(row["bridge_id"]) != bridge_id:
+                    raise ValueError("reply key belongs to a different bridge")
+                return False, str(row["message_ts"] or "")
+            db.execute(
+                "INSERT INTO bridge_replies(reply_key,bridge_id) VALUES(?,?)",
+                (reply_key, bridge_id),
+            )
+            return True, ""
+
+    def complete_reply(self, reply_key: str, message_ts: str) -> None:
+        with self.connect() as db:
+            db.execute(
+                "UPDATE bridge_replies SET message_ts=? WHERE reply_key=?",
+                (message_ts, reply_key),
+            )
+
+    def release_reply(self, reply_key: str) -> None:
+        with self.connect() as db:
+            db.execute(
+                "DELETE FROM bridge_replies WHERE reply_key=? AND message_ts IS NULL",
+                (reply_key,),
             )
 
 
@@ -455,6 +542,28 @@ def redact_text(text: str) -> str:
     for pattern, replacement in SECRET_PATTERNS:
         text = pattern.sub(replacement, text)
     return text
+
+
+def validate_reply_text(text: str, config: Config | None = None) -> str:
+    config = config or load_config()
+    cleaned = text.strip()
+    if cleaned == "NO_REPLY":
+        return cleaned
+    if not cleaned:
+        raise ValueError("reply text is empty")
+    words = cleaned.split()
+    sentence_count = len(re.findall(r"[.!?](?:\s|$)", cleaned))
+    if (
+        len(cleaned) > config.max_reply_chars
+        or len(words) > config.max_reply_words
+        or sentence_count > config.max_reply_sentences
+    ):
+        raise ValueError(
+            "Slack reply is too long; rewrite it as one useful update within "
+            f"{config.max_reply_words} words, {config.max_reply_chars} characters, "
+            f"and {config.max_reply_sentences} sentences"
+        )
+    return cleaned
 
 
 def slack_post(token: str, channel: str, text: str, thread_ts: str | None = None) -> str:
@@ -595,13 +704,42 @@ class Broker:
         bridge = self.store.get(str(request.get("bridge_id") or ""))
         if not bridge or not bridge.thread_ts:
             raise ValueError("active bridge not found")
+        text = validate_reply_text(str(request.get("text") or ""))
+        if text == "NO_REPLY":
+            return {
+                "ok": True,
+                "bridge_id": bridge.bridge_id,
+                "thread_ts": bridge.thread_ts,
+                "suppressed": True,
+            }
+        reply_key = str(request.get("reply_key") or "")
+        if reply_key and not REPLY_KEY_PATTERN.fullmatch(reply_key):
+            raise ValueError("invalid reply key")
+        if reply_key:
+            reserved, existing = self.store.reserve_reply(reply_key, bridge.bridge_id)
+            if not reserved:
+                return {
+                    "ok": True,
+                    "bridge_id": bridge.bridge_id,
+                    "thread_ts": bridge.thread_ts,
+                    "message_ts": existing,
+                    "deduplicated": True,
+                }
         self._ensure_channel_membership(bridge.channel_id)
-        timestamp = slack_post(self.token, bridge.channel_id, str(request.get("text") or ""), bridge.thread_ts)
+        try:
+            timestamp = slack_post(self.token, bridge.channel_id, text, bridge.thread_ts)
+        except Exception:
+            if reply_key:
+                self.store.release_reply(reply_key)
+            raise
+        if reply_key:
+            self.store.complete_reply(reply_key, timestamp)
         return {
             "ok": True,
             "bridge_id": bridge.bridge_id,
             "thread_ts": bridge.thread_ts,
             "message_ts": timestamp,
+            "deduplicated": False,
         }
 
     def _history(self, request: BridgeRequest, config: Config) -> dict[str, Any]:
@@ -968,8 +1106,13 @@ def deliver_zellij(bridge: Bridge, text: str) -> None:
         f"{bridge.bridge_id}\0{text}".encode()
     ).hexdigest()[:12]
     instruction = (
-        f"[Hermes Slack reply; {marker}] " + text + "\n\nAfter handling this, reply in the same Slack thread with: "
-        f"python3 {notifier} reply --bridge-id {bridge.bridge_id} --text '<your response>'"
+        f"[Hermes Slack follow-up batch; {marker}]\n{text}\n\n"
+        "Handle the requests above as one turn. Check the current thread/task state before responding. "
+        "Post at most one Slack message for this entire batch, only when a useful response is needed; "
+        "do not post a second status summary or courtesy acknowledgment. Keep it within 50 words and "
+        "3 sentences. If no new response is needed, run the command with NO_REPLY. Reply with: "
+        f"python3 {notifier} reply --bridge-id {bridge.bridge_id} --reply-key {marker} "
+        "--text '<your response or NO_REPLY>'"
     )
     target = pane if pane.startswith(("terminal_", "plugin_")) else "terminal_" + pane
     zellij = _resolve_executable("zellij")

@@ -7,6 +7,11 @@ team_id = ""
 allowed_users = []
 
 native_timeout_seconds = 1800
+# Slack is a coordination surface, not a run log. Tether rejects longer
+# bound-session replies so agents must rewrite instead of flooding a thread.
+max_reply_words = 50
+max_reply_chars = 500
+max_reply_sentences = 3
 codex_binary = "codex"
 claude_binary = "claude"
 codex_resume_args = []

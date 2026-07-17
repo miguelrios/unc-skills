@@ -78,6 +78,17 @@ class StoreTest(unittest.TestCase):
         self.store.finish_event(first["event_id"])
         self.assertEqual(self.store.claim_next_event(bridge.bridge_id)["text"], "second")
 
+    def test_queued_followups_are_claimed_as_one_batch(self):
+        bridge = self.store.bind(self.store.create(self.request()).bridge_id, "123.456")
+        self.assertTrue(self.store.enqueue_event("111.1", bridge.bridge_id, "first follow-up"))
+        self.assertTrue(self.store.enqueue_event("111.2", bridge.bridge_id, "second follow-up"))
+        batch = self.store.claim_event_batch(bridge.bridge_id)
+        self.assertEqual(
+            [(item["event_id"], item["text"]) for item in batch],
+            [("111.1", "first follow-up"), ("111.2", "second follow-up")],
+        )
+        self.assertEqual(self.store.claim_event_batch(bridge.bridge_id), [])
+
     def test_processing_events_are_requeued_after_restart(self):
         bridge = self.store.create(self.request())
         self.assertTrue(self.store.enqueue_event("111.1", bridge.bridge_id, "resume me"))
@@ -187,6 +198,40 @@ class StoreTest(unittest.TestCase):
             os.environ, {"SLACK_ALLOWED_USERS": "U12345678,U87654321"}, clear=False
         ), self.assertRaisesRegex(ValueError, "owner-restricted shared-channel"):
             broker.handle(request)
+
+    def test_bound_reply_is_brief_and_idempotent_per_agent_turn(self):
+        bridge = self.store.bind(self.store.create(self.request()).bridge_id, "123.456")
+        broker = self.runtime.Broker("test-token", self.store)
+        request = {
+            "op": "reply", "bridge_id": bridge.bridge_id,
+            "reply_key": "tether-123456789abc", "text": "Fixed and verified.",
+        }
+        with mock.patch.object(broker, "_ensure_channel_membership"), mock.patch.object(
+            self.runtime, "slack_post", return_value="123.457",
+        ) as post:
+            first = broker.handle(request)
+            second = broker.handle(request)
+        self.assertFalse(first["deduplicated"])
+        self.assertTrue(second["deduplicated"])
+        self.assertEqual(post.call_count, 1)
+
+        too_long = " ".join(["detail"] * 51)
+        with self.assertRaisesRegex(ValueError, "Slack reply is too long"):
+            broker.handle({
+                "op": "reply", "bridge_id": bridge.bridge_id,
+                "reply_key": "tether-abcdef123456", "text": too_long,
+            })
+
+    def test_no_reply_control_token_is_suppressed(self):
+        bridge = self.store.bind(self.store.create(self.request()).bridge_id, "123.456")
+        broker = self.runtime.Broker("test-token", self.store)
+        with mock.patch.object(self.runtime, "slack_post") as post:
+            result = broker.handle({
+                "op": "reply", "bridge_id": bridge.bridge_id,
+                "reply_key": "tether-abcdef123456", "text": "NO_REPLY",
+            })
+        self.assertTrue(result["suppressed"])
+        post.assert_not_called()
 
     def test_thread_history_stays_behind_broker_and_returns_sanitized_messages(self):
         broker = self.runtime.Broker("test-token", self.store)
@@ -459,6 +504,13 @@ class CredentialBoundaryTest(unittest.TestCase):
         self.assertTrue(any("send-keys" in command and "Enter" in command for command in commands))
         self.assertEqual(sum("dump-screen" in command for command in commands), 2)
         self.assertGreaterEqual(identity.call_count, 2)
+        written = next(
+            command[-1] for command in commands
+            if "write-chars" in command
+        )
+        self.assertIn("--reply-key " + marker, written)
+        self.assertIn("at most one Slack message", written)
+        self.assertIn("50 words", written)
 
 
 class NotifierTest(unittest.TestCase):
@@ -908,6 +960,54 @@ class PluginRoutingTest(unittest.TestCase):
             state = database.execute("SELECT state FROM bridge_events WHERE event_id='111.1'").fetchone()[0]
         self.assertEqual(state, "delivered")
         self.assertIn("finished after restart", replies)
+
+    def test_busy_native_followups_share_one_agent_turn_and_one_slack_reply(self):
+        bridge = self.plugin.store.create({
+            "source_kind": "claude_session",
+            "source": {"session_id": "claude-1", "cwd": "/tmp/project"},
+            "owner_user_id": "*",
+            "team_id": "T12345678",
+            "channel_id": "C12345678",
+            "idempotency_key": "claude-batch",
+        })
+        bridge = self.plugin.store.bind(bridge.bridge_id, "456.789")
+        self.plugin.store.enqueue_event("111.1", bridge.bridge_id, "first follow-up")
+        self.plugin.store.enqueue_event("111.2", bridge.bridge_id, "latest follow-up")
+
+        class Platform:
+            value = "slack"
+
+        platform = Platform()
+
+        class Adapter:
+            def __init__(self):
+                self.sent = []
+
+            async def send(self, channel, text, metadata):
+                self.sent.append((channel, text, metadata))
+
+        adapter = Adapter()
+        gateway = types.SimpleNamespace(adapters={platform: adapter})
+        prompts = []
+
+        def continue_native(_bridge, prompt, _cancellation):
+            prompts.append(prompt)
+            return "Fixed and verified."
+
+        with mock.patch.object(self.plugin, "continue_native", side_effect=continue_native):
+            asyncio.run(self.plugin._drain_bridge(bridge.bridge_id, gateway, platform))
+
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("first follow-up", prompts[0])
+        self.assertIn("latest follow-up", prompts[0])
+        self.assertEqual(len(adapter.sent), 1)
+        with self.plugin.store.connect() as database:
+            states = [
+                row[0] for row in database.execute(
+                    "SELECT state FROM bridge_events ORDER BY event_id"
+                ).fetchall()
+            ]
+        self.assertEqual(states, ["delivered", "delivered"])
 
     def test_cancel_reply_discards_queued_work(self):
         bridge = self.plugin.store.create({
