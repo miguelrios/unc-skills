@@ -16,7 +16,7 @@ infrastructure. The example is synthetic; a live manifest belongs in a private m
 location and contains references, never credential values.
 
 The production database gate requires a standard PostgreSQL URL with
-`sslmode=verify-full` and an explicit trust root, schema migrations 1 through 12,
+`sslmode=verify-full` and an explicit trust root, schema migrations 1 through 14,
 pgvector 0.8.0 or newer, and a runtime role without superuser, database/role creation,
 replication, or RLS-bypass privilege:
 
@@ -108,6 +108,21 @@ runtime URL in the injected environment. The provider token needs only database
 read/create permissions; the Tailscale OAuth client must be restricted to the
 dedicated gateway tag.
 
+When migration and runtime use separate PostgreSQL roles, refresh runtime grants
+after every migration and before deleting a short-lived migration role. Replace
+`recall_runtime` with the actual runtime role identifier:
+
+```sql
+GRANT USAGE ON SCHEMA public TO recall_runtime;
+GRANT SELECT, INSERT, UPDATE, DELETE
+  ON ALL TABLES IN SCHEMA public TO recall_runtime;
+GRANT USAGE, SELECT
+  ON ALL SEQUENCES IN SCHEMA public TO recall_runtime;
+```
+
+Apply only the grants the enabled runtime operations need. Reassign objects to the
+durable owner before deleting a temporary migration role.
+
 After reviewing the zero-network preview and mode-0600 approval document, run
 the exact approved apply under 1Password injection:
 
@@ -180,7 +195,11 @@ Searches have a 300ms database-work budget by default. Override it only within t
 content-free per-leg timings, result counts, and the deadline outcome.
 
 Semantic retrieval requires PostgreSQL with pgvector and one explicitly selected embedding
-profile. Recall supports three protocols:
+profile. Cosine score distributions vary by model, so
+`RECALL_SEMANTIC_MINIMUM_SIMILARITY` is an explicit validated deployment setting in the
+0–1 range and defaults to `0.35`. Calibrate it with a private retrieval eval when changing
+models; the bounded top-K candidate pool prevents a lower floor from creating an unbounded
+scan. Recall supports three protocols:
 
 - `voyage` is the recommended hosted profile. `voyage-4` supports 512-dimensional output and
   distinct `document`/`query` retrieval modes.

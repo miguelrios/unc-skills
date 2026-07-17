@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import contextlib
+import inspect
 import io
 import json
 import os
@@ -28,7 +29,7 @@ except ModuleNotFoundError:
 from recall_server import SCHEMA_VERSION
 from recall_server import cli as server_cli
 from recall_server.app import Handler, serve, serve_unix
-from recall_server.db import BrainStore
+from recall_server.db import BrainStore, semantic_candidate_limit
 from recall_server.federation import SOURCE_FAMILIES, SourceProfile
 from recall_server.projectors import advisory_lock_key, canonical_json, effective_session_id, partial_lexical_probes, phrase_query_spec, preferred_phrase_probe, preferred_phrase_probes, project, redact_text, validate_envelope
 from recall_server.ranking import DEFAULT_SEARCH_DEADLINE_MS, evidence_rank_components, retrieval_leg_order, should_run_partial
@@ -90,6 +91,148 @@ class SchemaMigrationContractTest(unittest.TestCase):
             "where deleted_at is null and btrim(text_redacted) <> ''",
             rendered,
         )
+
+    def test_global_embedding_backfill_has_a_runtime_scoped_watermark(self) -> None:
+        migration = SERVER / "schema" / "014_embedding_projection_watermark.sql"
+        rendered = " ".join(migration.read_text().split()).casefold()
+        self.assertIn(
+            "runtime_fingerprint char(64) primary key",
+            rendered,
+        )
+        self.assertIn(
+            "last_item_id bigint not null default 0",
+            rendered,
+        )
+
+        implementation = inspect.getsource(BrainStore.embed_pending)
+        self.assertIn("use_watermark = source_id is None and surface is None", implementation)
+        self.assertIn("WHERE item.id>%s", implementation)
+        self.assertIn("WHERE id>%s", implementation)
+        self.assertIn("SELECT min(item_id) AS item_id", implementation)
+        self.assertIn("WHERE runtime_fingerprint<>%s", implementation)
+        self.assertIn("SET last_item_id=LEAST(last_item_id,%s)", implementation)
+        self.assertIn("GREATEST(last_item_id,%s)", implementation)
+        self.assertLess(
+            implementation.index("cursor.executemany("),
+            implementation.rindex("GREATEST(last_item_id,%s)"),
+        )
+
+    def test_managed_upgrade_documents_split_role_grant_refresh(self) -> None:
+        guide = " ".join(
+            (SERVER / "deploy" / "README.md").read_text().split()
+        ).casefold()
+        self.assertIn(f"schema migrations 1 through {SCHEMA_VERSION}", guide)
+        self.assertIn("refresh runtime grants after every migration", guide)
+        self.assertIn("on all tables in schema public", guide)
+        self.assertIn("on all sequences in schema public", guide)
+
+
+class EmbeddingBackfillWatermarkTest(unittest.TestCase):
+    def test_global_backfill_advances_cursor_only_after_embedding_write(self) -> None:
+        class Runtime:
+            model = "voyage-4-lite"
+            fingerprint = "a" * 64
+            dimensions = 512
+
+            @staticmethod
+            def embed_documents(_texts):
+                return [[0.0] * 512]
+
+        class Result:
+            def __init__(self, *, one=None, all_rows=None):
+                self.one = one
+                self.all_rows = all_rows
+
+            def fetchone(self):
+                return self.one
+
+            def fetchall(self):
+                return self.all_rows
+
+        class Cursor:
+            def __init__(self, connection):
+                self.connection = connection
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def executemany(self, _sql, values):
+                self.connection.embedded = True
+                self.connection.embedding_values = values
+
+            def execute(self, sql, params):
+                self.connection.cursor_updates.append((sql, params))
+                if "embedding_projection_watermarks" in sql:
+                    self.connection.watermark_advanced_after_write = (
+                        self.connection.embedded
+                    )
+
+        class Connection:
+            def __init__(self):
+                self.embedded = False
+                self.embedding_values = []
+                self.cursor_updates = []
+                self.watermark_advanced_after_write = False
+                self.selection_params = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def transaction(self):
+                return contextlib.nullcontext()
+
+            def cursor(self):
+                return Cursor(self)
+
+            def execute(self, sql, params=None):
+                normalized = " ".join(sql.split())
+                if "pg_try_advisory_lock(" in normalized:
+                    return Result(one={"value": True})
+                if normalized.startswith(
+                    "INSERT INTO embedding_projection_watermarks"
+                ):
+                    return Result()
+                if normalized.startswith("SELECT last_item_id"):
+                    return Result(one={"last_item_id": 7})
+                if normalized.startswith("SELECT min(item_id) AS item_id"):
+                    return Result(one={"item_id": None})
+                if normalized.startswith("SELECT item.id") and "item.id>%s" in normalized:
+                    self.selection_params = params
+                    return Result(
+                        all_rows=[
+                            {
+                                "id": 8,
+                                "source_id": "synthetic:source",
+                                "text_redacted": "synthetic safe text",
+                                "projector_version": 1,
+                            }
+                        ]
+                    )
+                if "pg_advisory_unlock(" in normalized:
+                    return Result(one={"value": True})
+                raise AssertionError(f"unexpected SQL: {normalized}")
+
+        connection = Connection()
+        store = BrainStore("postgresql://synthetic.invalid/db", semantic_runtime=Runtime())
+        with mock.patch.object(store, "connect", return_value=connection):
+            result = store.embed_pending(batch_size=1, max_batches=1)
+
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(connection.selection_params[0], 7)
+        self.assertEqual(connection.embedding_values[0][0], 8)
+        self.assertTrue(connection.watermark_advanced_after_write)
+        watermark_update = next(
+            params
+            for sql, params in connection.cursor_updates
+            if "embedding_projection_watermarks" in sql
+        )
+        self.assertEqual(watermark_update, (8, Runtime.fingerprint))
 
 
 class TypedConnectorProjectionTest(unittest.TestCase):
@@ -317,6 +460,66 @@ class IngestTransactionContractTest(unittest.TestCase):
             ],
         )
         store._advance_projector.assert_called_once_with(connection, 43)
+
+
+class SemanticRetrievalContractTest(unittest.TestCase):
+    def test_similarity_floor_is_explicit_validated_deployment_config(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"RECALL_SEMANTIC_MINIMUM_SIMILARITY": "0.25"},
+        ):
+            store = BrainStore("postgresql://synthetic.invalid/recall")
+        self.assertEqual(store.semantic_minimum_similarity, 0.25)
+        with self.assertRaisesRegex(ValueError, "semantic minimum similarity"):
+            BrainStore(
+                "postgresql://synthetic.invalid/recall",
+                semantic_minimum_similarity=1.01,
+            )
+
+    def test_dense_candidate_pool_is_bounded_and_keeps_anchor_headroom(self) -> None:
+        self.assertEqual(semantic_candidate_limit(1), 20)
+        self.assertEqual(semantic_candidate_limit(5), 20)
+        self.assertEqual(semantic_candidate_limit(10), 40)
+        self.assertEqual(semantic_candidate_limit(50), 100)
+
+    def test_similarity_threshold_is_applied_after_bounded_hnsw_retrieval(self) -> None:
+        runtime = mock.Mock(
+            model="voyage-4",
+            fingerprint="voyage:synthetic",
+            dimensions=512,
+        )
+        store = BrainStore(
+            "postgresql://synthetic.invalid/recall",
+            semantic_runtime=runtime,
+        )
+        cursor = mock.MagicMock()
+        cursor.fetchall.return_value = [
+            {"id": 1, "lexical_rank": 0.81},
+            {"id": 2, "lexical_rank": 0.22},
+        ]
+        store._execute_bounded = mock.MagicMock(return_value=cursor)
+        connection = mock.MagicMock()
+
+        rows = store._semantic_leg(
+            connection,
+            [0.1] * 512,
+            {},
+            limit=5,
+            minimum_similarity=0.35,
+        )
+
+        _connection, sql, values, _deadline = (
+            store._execute_bounded.call_args.args
+        )
+        self.assertNotIn(
+            "AND 1-(embedding.embedding <=> %s::halfvec) >=",
+            sql,
+        )
+        self.assertNotIn(0.35, values)
+        self.assertEqual(
+            rows,
+            [{"id": 1, "lexical_rank": 0.81, "leg": "semantic", "tier": 2}],
+        )
 
 
 class AdminCliSafetyTest(unittest.TestCase):

@@ -30,14 +30,40 @@ class SearchDeadlineExceeded(Exception):
     pass
 
 
+def semantic_candidate_limit(result_limit: int) -> int:
+    """Keep enough dense anchors for deduplication without broad payload reads."""
+    return min(100, max(20, result_limit * 4))
+
+
 class BrainStore:
     def __init__(self, dsn: str, search_deadline_ms: int | None = None,
-                 semantic_runtime: SemanticRuntime | None = None):
+                 semantic_runtime: SemanticRuntime | None = None,
+                 semantic_minimum_similarity: float | None = None):
         self.dsn = dsn
         configured = search_deadline_ms if search_deadline_ms is not None else int(os.environ.get("RECALL_SEARCH_DEADLINE_MS", str(DEFAULT_SEARCH_DEADLINE_MS)))
         if not 10 <= configured <= 5000:
             raise ValueError("search deadline must be between 10 and 5000 milliseconds")
         self.search_deadline_ms = configured
+        try:
+            similarity = (
+                semantic_minimum_similarity
+                if semantic_minimum_similarity is not None
+                else float(
+                    os.environ.get(
+                        "RECALL_SEMANTIC_MINIMUM_SIMILARITY",
+                        "0.35",
+                    )
+                )
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "semantic minimum similarity must be between 0 and 1"
+            ) from exc
+        if not 0 <= similarity <= 1:
+            raise ValueError(
+                "semantic minimum similarity must be between 0 and 1"
+            )
+        self.semantic_minimum_similarity = similarity
         if semantic_runtime is not None and semantic_runtime.dimensions != 512:
             raise ValueError("BrainStore semantic runtime requires 512 dimensions")
         self.semantic_runtime = semantic_runtime
@@ -282,6 +308,7 @@ class BrainStore:
         with self.connect() as conn:
             global_lock = "recall:item-embeddings"
             source_scoped = source_id is not None
+            use_watermark = source_id is None and surface is None
             if source_scoped:
                 global_locked = conn.execute(
                     "SELECT pg_try_advisory_lock_shared(hashtextextended(%s,0)) AS value",
@@ -295,37 +322,122 @@ class BrainStore:
             if not global_locked:
                 return {"status": "busy", "processed": 0, "batches": 0}
             try:
-                while max_batches is None or batches < max_batches:
-                    rows = conn.execute(
-                        """SELECT item.id,item.source_id,item.text_redacted,item.projector_version
-                           FROM items item
-                           LEFT JOIN item_embeddings embedding ON embedding.item_id=item.id
-                           WHERE item.deleted_at IS NULL
-                             AND btrim(item.text_redacted) <> ''
-                             AND (%s::text IS NULL OR item.source_id=%s)
-                             AND (%s::text IS NULL OR item.surface=%s)
-                             AND (
-                             embedding.item_id IS NULL OR embedding.model<>%s
-                             OR embedding.runtime_fingerprint<>%s
-                             OR embedding.dimensions<>%s
-                             OR embedding.projector_version<>item.projector_version
-                             OR embedding.content_sha256<>
-                                encode(sha256(convert_to(item.text_redacted,'UTF8')),'hex')
-                           )
-                           ORDER BY item.id LIMIT %s
-                           FOR UPDATE OF item SKIP LOCKED""",
+                watermark = 0
+                if use_watermark:
+                    conn.execute(
+                        """INSERT INTO embedding_projection_watermarks(
+                             runtime_fingerprint,model,dimensions,last_item_id
+                           ) VALUES (%s,%s,%s,0)
+                           ON CONFLICT(runtime_fingerprint) DO NOTHING""",
                         (
-                            source_id,
-                            source_id,
-                            surface,
-                            surface,
-                            self.semantic_runtime.model,
                             self.semantic_runtime.fingerprint,
+                            self.semantic_runtime.model,
                             self.semantic_runtime.dimensions,
-                            batch_size,
                         ),
-                    ).fetchall()
+                    )
+                    watermark = conn.execute(
+                        """SELECT last_item_id
+                           FROM embedding_projection_watermarks
+                           WHERE runtime_fingerprint=%s
+                           FOR UPDATE""",
+                        (self.semantic_runtime.fingerprint,),
+                    ).fetchone()["last_item_id"]
+                    stale_runtime_item = conn.execute(
+                        """SELECT min(item_id) AS item_id
+                           FROM item_embeddings
+                           WHERE runtime_fingerprint<>%s""",
+                        (self.semantic_runtime.fingerprint,),
+                    ).fetchone()["item_id"]
+                    if (
+                        stale_runtime_item is not None
+                        and stale_runtime_item <= watermark
+                    ):
+                        watermark = max(0, stale_runtime_item - 1)
+                        conn.execute(
+                            """UPDATE embedding_projection_watermarks
+                               SET last_item_id=LEAST(last_item_id,%s),
+                                   updated_at=now()
+                               WHERE runtime_fingerprint=%s""",
+                            (watermark, self.semantic_runtime.fingerprint),
+                        )
+                while max_batches is None or batches < max_batches:
+                    if use_watermark:
+                        rows = conn.execute(
+                            """SELECT item.id,item.source_id,item.text_redacted,
+                                      item.projector_version
+                               FROM items item
+                               LEFT JOIN item_embeddings embedding
+                                 ON embedding.item_id=item.id
+                               WHERE item.id>%s
+                                 AND item.deleted_at IS NULL
+                                 AND btrim(item.text_redacted) <> ''
+                                 AND (
+                                   embedding.item_id IS NULL OR embedding.model<>%s
+                                   OR embedding.runtime_fingerprint<>%s
+                                   OR embedding.dimensions<>%s
+                                   OR embedding.projector_version<>item.projector_version
+                                   OR embedding.content_sha256<>
+                                      encode(sha256(convert_to(item.text_redacted,'UTF8')),'hex')
+                                 )
+                               ORDER BY item.id LIMIT %s
+                               FOR UPDATE OF item SKIP LOCKED""",
+                            (
+                                watermark,
+                                self.semantic_runtime.model,
+                                self.semantic_runtime.fingerprint,
+                                self.semantic_runtime.dimensions,
+                                batch_size,
+                            ),
+                        ).fetchall()
+                    else:
+                        rows = conn.execute(
+                            """SELECT item.id,item.source_id,item.text_redacted,
+                                      item.projector_version
+                               FROM items item
+                               LEFT JOIN item_embeddings embedding
+                                 ON embedding.item_id=item.id
+                               WHERE item.deleted_at IS NULL
+                                 AND btrim(item.text_redacted) <> ''
+                                 AND (%s::text IS NULL OR item.source_id=%s)
+                                 AND (%s::text IS NULL OR item.surface=%s)
+                                 AND (
+                                   embedding.item_id IS NULL OR embedding.model<>%s
+                                   OR embedding.runtime_fingerprint<>%s
+                                   OR embedding.dimensions<>%s
+                                   OR embedding.projector_version<>item.projector_version
+                                   OR embedding.content_sha256<>
+                                      encode(sha256(convert_to(item.text_redacted,'UTF8')),'hex')
+                                 )
+                               ORDER BY item.id LIMIT %s
+                               FOR UPDATE OF item SKIP LOCKED""",
+                            (
+                                source_id,
+                                source_id,
+                                surface,
+                                surface,
+                                self.semantic_runtime.model,
+                                self.semantic_runtime.fingerprint,
+                                self.semantic_runtime.dimensions,
+                                batch_size,
+                            ),
+                        ).fetchall()
                     if not rows:
+                        if use_watermark:
+                            watermark = conn.execute(
+                                """SELECT COALESCE(max(id),%s) AS value
+                                   FROM items
+                                   WHERE id>%s
+                                     AND deleted_at IS NULL
+                                     AND btrim(text_redacted) <> ''""",
+                                (watermark, watermark),
+                            ).fetchone()["value"]
+                            conn.execute(
+                                """UPDATE embedding_projection_watermarks
+                                   SET last_item_id=GREATEST(last_item_id,%s),
+                                       updated_at=now()
+                                   WHERE runtime_fingerprint=%s""",
+                                (watermark, self.semantic_runtime.fingerprint),
+                            )
                         break
                     vectors = self.semantic_runtime.embed_documents(
                         [row["text_redacted"] for row in rows],
@@ -355,6 +467,18 @@ class BrainStore:
                                      embedding=excluded.embedding,embedded_at=now()""",
                                 values,
                             )
+                            if use_watermark:
+                                watermark = max(row["id"] for row in rows)
+                                cursor.execute(
+                                    """UPDATE embedding_projection_watermarks
+                                       SET last_item_id=GREATEST(last_item_id,%s),
+                                           updated_at=now()
+                                       WHERE runtime_fingerprint=%s""",
+                                    (
+                                        watermark,
+                                        self.semantic_runtime.fingerprint,
+                                    ),
+                                )
                     processed += len(rows)
                     batches += 1
             finally:
@@ -835,7 +959,6 @@ class BrainStore:
               AND embedding.projector_version=i.projector_version
               AND embedding.content_sha256=
                   encode(sha256(convert_to(i.text_redacted,'UTF8')),'hex')
-              AND 1-(embedding.embedding <=> %s::halfvec) >= %s
               AND {where}
             ORDER BY embedding.embedding <=> %s::halfvec,i.id DESC
             LIMIT %s
@@ -845,15 +968,17 @@ class BrainStore:
                 self.semantic_runtime.model,
                 self.semantic_runtime.fingerprint,
                 self.semantic_runtime.dimensions,
-                encoded,
-                minimum_similarity,
                 *params,
                 encoded,
                 limit,
             ],
             deadline_at,
         ).fetchall()
-        return [{**dict(row), "leg": "semantic", "tier": 2} for row in rows]
+        return [
+            {**dict(row), "leg": "semantic", "tier": 2}
+            for row in rows
+            if float(row["lexical_rank"]) >= minimum_similarity
+        ]
 
     def _answer_leg(self, conn, anchors: list[dict], filters: dict, *,
                     deadline_at: float | None = None) -> list[dict]:
@@ -1069,7 +1194,8 @@ class BrainStore:
                         semantic_rows = run_leg(f"semantic-{vector_index}", lambda semantic_vector=semantic_vector: self._semantic_leg(
                             conn, semantic_vector, filters, authorized_source=authorized_source,
                             routed_source_ids=routed_source_ids, deadline_at=deadline_at,
-                            limit=max(100, limit * 10), minimum_similarity=0.35,
+                            limit=semantic_candidate_limit(limit),
+                            minimum_similarity=self.semantic_minimum_similarity,
                         ))
                         if vector_index == 0:
                             for semantic_row in semantic_rows:
