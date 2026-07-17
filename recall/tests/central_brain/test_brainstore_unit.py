@@ -129,6 +129,14 @@ class SchemaMigrationContractTest(unittest.TestCase):
             rendered,
         )
 
+    def test_capture_origin_is_host_owned_credential_state(self) -> None:
+        migration = SERVER / "schema" / "016_capture_credentials.sql"
+        rendered = " ".join(migration.read_text().split()).casefold()
+        self.assertIn(
+            "add column if not exists capture_origin text",
+            rendered,
+        )
+
     def test_managed_upgrade_documents_split_role_grant_refresh(self) -> None:
         guide = " ".join(
             (SERVER / "deploy" / "README.md").read_text().split()

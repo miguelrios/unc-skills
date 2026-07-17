@@ -106,8 +106,9 @@ def main() -> None:
     credential = store.create_collector_token(
         "synthetic-owner-one-mcp",
         "synthetic:owner:capture",
-        ["read"],
+        ["read", "write"],
         principal_id="owner-one",
+        capture_origin="grep-agent",
     )
     no_grants = store.create_collector_token(
         "synthetic-no-grants-mcp",
@@ -168,6 +169,70 @@ def main() -> None:
         )
         assert denied["result"]["structuredContent"]["results"] == []
 
+        capture_arguments = {
+            "schema_version": 1,
+            "title": "Synthetic hosted memory",
+            "body": (
+                "keep the bounded amethyst queue\n"
+                "api_key=synthetic-public-mcp-secret-canary"
+            ),
+            "occurred_at": "2026-07-17T21:00:00Z",
+            "tags": ["synthetic", "decision"],
+            "provenance": {"uri": "manual://grep-agent"},
+        }
+        captured = tool(
+            server,
+            credential["token"],
+            "recall_capture",
+            capture_arguments,
+        )
+        capture_result = captured["result"]["structuredContent"]
+        assert "synthetic-public-mcp-secret-canary" not in json.dumps(captured)
+        receipt = capture_result["receipt"]
+        replayed = tool(
+            server,
+            credential["token"],
+            "recall_capture",
+            capture_arguments,
+        )["result"]["structuredContent"]
+        assert replayed["receipt"] == receipt
+        assert replayed["replay"] is True
+        with store.connect() as connection:
+            capture_events = connection.execute(
+                """SELECT kind,principal_id,envelope
+                   FROM source_events WHERE source_id=%s ORDER BY revision""",
+                ("synthetic:owner:capture",),
+            ).fetchall()
+        assert len(capture_events) == 1
+        assert capture_events[0]["kind"] == "capture"
+        assert capture_events[0]["principal_id"] == "owner-one"
+        rendered_envelope = json.dumps(capture_events[0]["envelope"])
+        assert "synthetic-public-mcp-secret-canary" not in rendered_envelope
+        assert capture_events[0]["envelope"]["content"]["origin"] == "grep-agent"
+        assert store.search(
+            "bounded amethyst queue",
+            authorized_source="synthetic:owner:capture",
+        )["results"]
+
+        wrong_forget = tool(
+            server,
+            credential["token"],
+            "recall_forget",
+            {"receipt": outsider_receipt},
+        )
+        assert "error" in wrong_forget
+        forgotten = tool(
+            server,
+            credential["token"],
+            "recall_forget",
+            {"receipt": receipt},
+        )["result"]["structuredContent"]
+        assert forgotten["receipt"].endswith("?rev=2")
+        assert store.search(
+            "bounded amethyst queue",
+            authorized_source="synthetic:owner:capture",
+        )["results"] == []
+
         connection = http.client.HTTPConnection(
             "127.0.0.1", server.server_port, timeout=5,
         )
@@ -187,6 +252,10 @@ def main() -> None:
             "cross_principal_search_hits": 0,
             "cross_principal_show_hits": 0,
             "empty_grant_search_hits": 0,
+            "capture_events_after_replay": 1,
+            "capture_secret_canary_rows": 0,
+            "cross_source_forget_events": 0,
+            "live_capture_hits_after_forget": 0,
             "hidden_rest_status": hidden.status,
         }, sort_keys=True))
     finally:

@@ -57,7 +57,7 @@ def _boolean(value: Any, name: str, *, default: bool = False) -> bool:
     return value
 
 
-TOOLS = (
+READ_TOOLS = (
     {
         "name": "recall_related",
         "description": (
@@ -140,7 +140,80 @@ TOOLS = (
         "annotations": {"readOnlyHint": True},
     },
 )
-TOOL_NAMES = frozenset(tool["name"] for tool in TOOLS)
+WRITE_TOOLS = (
+    {
+        "name": "recall_capture",
+        "description": (
+            "Deliberately save one user-selected memory. Its source and origin "
+            "are bound by the host credential, not by model arguments."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
+                "schema_version",
+                "title",
+                "body",
+                "occurred_at",
+                "provenance",
+            ],
+            "properties": {
+                "schema_version": {"const": 1},
+                "title": {"type": "string", "minLength": 1, "maxLength": 500},
+                "body": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1000000,
+                },
+                "occurred_at": {"type": "string", "format": "date-time"},
+                "tags": {
+                    "type": "array",
+                    "maxItems": 20,
+                    "uniqueItems": True,
+                    "items": {"type": "string"},
+                },
+                "provenance": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["uri"],
+                    "properties": {"uri": {"type": "string"}},
+                },
+            },
+        },
+        "outputSchema": {"type": "object"},
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+    },
+    {
+        "name": "recall_forget",
+        "description": (
+            "Forget one prior deliberate capture from this credential's exact "
+            "capture source."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["receipt"],
+            "properties": {
+                "receipt": {"type": "string", "minLength": 1},
+            },
+        },
+        "outputSchema": {"type": "object"},
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+    },
+)
+
+
+def _write_enabled(principal: dict) -> bool:
+    return (
+        "write" in principal.get("scopes", ())
+        and isinstance(principal.get("source_id"), str)
+        and isinstance(principal.get("principal_id"), str)
+        and isinstance(principal.get("capture_origin"), str)
+    )
+
+
+def _tools_for(principal: dict) -> tuple[dict, ...]:
+    return READ_TOOLS + (WRITE_TOOLS if _write_enabled(principal) else ())
 
 
 def _reject_extra(arguments: dict, allowed: frozenset[str]) -> None:
@@ -194,6 +267,27 @@ def _call_tool(store, principal: dict, name: str, arguments: dict) -> dict:
             fast=fast,
             authorized_source=authorized_source,
         )
+    if name == "recall_capture":
+        if not _write_enabled(principal):
+            raise McpProtocolError(-32602, "unknown tool")
+        _reject_extra(
+            arguments,
+            frozenset({
+                "schema_version",
+                "title",
+                "body",
+                "occurred_at",
+                "tags",
+                "provenance",
+            }),
+        )
+        return store.capture(principal, arguments)
+    if name == "recall_forget":
+        if not _write_enabled(principal):
+            raise McpProtocolError(-32602, "unknown tool")
+        _reject_extra(arguments, frozenset({"receipt"}))
+        receipt = _string(arguments.get("receipt"), "receipt")
+        return store.forget_capture(principal, receipt)
     raise McpProtocolError(-32602, "unknown tool")
 
 
@@ -242,10 +336,10 @@ def dispatch(store, principal: dict, message: Any) -> dict | None:
     elif method == "ping":
         result = {}
     elif method == "tools/list":
-        result = {"tools": list(TOOLS)}
+        result = {"tools": list(_tools_for(principal))}
     elif method == "tools/call":
         name = _string(params.get("name"), "name")
-        if name not in TOOL_NAMES:
+        if name not in {tool["name"] for tool in _tools_for(principal)}:
             raise McpProtocolError(-32602, "unknown tool")
         arguments = _object(params.get("arguments", {}), "arguments")
         result = _tool_result(_call_tool(store, principal, name, arguments))

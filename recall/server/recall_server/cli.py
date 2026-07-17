@@ -77,6 +77,10 @@ def main() -> None:
         "--principal",
         help="read every source granted to this principal; writes stay source-bound",
     )
+    create_token.add_argument(
+        "--capture-origin",
+        help="host-bound origin for deliberate MCP capture tools",
+    )
     create_token.add_argument("--scopes", default="read,write")
     create_token.add_argument(
         "--output",
@@ -249,6 +253,7 @@ def main() -> None:
             args.source,
             [scope.strip() for scope in args.scopes.split(",") if scope.strip()],
             principal_id=args.principal,
+            capture_origin=args.capture_origin,
         )
         payload = (json.dumps(credential, sort_keys=True) + "\n").encode()
         descriptor = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

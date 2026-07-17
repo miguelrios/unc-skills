@@ -28,8 +28,9 @@ from recall_server.app import Handler  # noqa: E402
 
 
 class FakeStore:
-    def __init__(self) -> None:
+    def __init__(self, *, write: bool = True) -> None:
         self.calls: list[tuple] = []
+        self.write = write
 
     def authenticate_bearer(self, token: str, scope: str) -> dict | None:
         self.calls.append(("authenticate", token, scope))
@@ -39,7 +40,8 @@ class FakeStore:
             "name": "synthetic-grep-agent",
             "source_id": "synthetic:grep-capture",
             "principal_id": "synthetic-owner",
-            "scopes": ["read"],
+            "capture_origin": "grep-agent",
+            "scopes": ["read", "write"] if self.write else ["read"],
         }
 
     def authorized_source_ids(self, principal_id: str) -> list[str]:
@@ -78,6 +80,23 @@ class FakeStore:
             )
         )
         return {"results": []}
+
+    def capture(self, principal, arguments):
+        self.calls.append(("capture", principal, arguments))
+        return {
+            "status": "committed",
+            "receipt": "recall://synthetic:grep-capture/capture_abc?rev=1",
+            "replay": False,
+            "privacy": {"mode": "scrub", "changed_fields": 0},
+        }
+
+    def forget_capture(self, principal, receipt):
+        self.calls.append(("forget", principal, receipt))
+        return {
+            "status": "committed",
+            "receipt": "recall://synthetic:grep-capture/capture_abc?rev=2",
+            "replay": False,
+        }
 
 
 class FailingStore(FakeStore):
@@ -192,8 +211,108 @@ class RemoteMcpContractTest(unittest.TestCase):
             names = [tool["name"] for tool in json.loads(raw)["result"]["tools"]]
             self.assertEqual(
                 names,
-                ["recall_related", "recall_search", "recall_show"],
+                [
+                    "recall_related",
+                    "recall_search",
+                    "recall_show",
+                    "recall_capture",
+                    "recall_forget",
+                ],
             )
+
+    def test_capture_and_forget_are_capability_gated_and_host_bound(self) -> None:
+        body = "Synthetic bounded memory selected by the user"
+        capture = {
+            "schema_version": 1,
+            "title": "Synthetic decision",
+            "body": body,
+            "occurred_at": "2026-07-17T20:00:00Z",
+            "tags": ["synthetic"],
+            "provenance": {"uri": "manual://grep-agent"},
+        }
+        with McpHttpServer(self.store) as server:
+            status, _, raw = server.request(
+                "POST",
+                request(
+                    "tools/call",
+                    params={"name": "recall_capture", "arguments": capture},
+                ),
+                protocol="2025-11-25",
+            )
+            self.assertEqual(status, 200)
+            response = json.loads(raw)
+            self.assertNotIn(body, json.dumps(response))
+            capture_call = next(call for call in self.store.calls if call[0] == "capture")
+            self.assertEqual(capture_call[1]["source_id"], "synthetic:grep-capture")
+            self.assertEqual(capture_call[1]["capture_origin"], "grep-agent")
+            self.assertEqual(capture_call[2], capture)
+
+            receipt = response["result"]["structuredContent"]["receipt"]
+            _, _, raw = server.request(
+                "POST",
+                request(
+                    "tools/call",
+                    params={
+                        "name": "recall_forget",
+                        "arguments": {"receipt": receipt},
+                    },
+                ),
+                protocol="2025-11-25",
+            )
+            self.assertEqual(
+                json.loads(raw)["result"]["structuredContent"]["receipt"],
+                "recall://synthetic:grep-capture/capture_abc?rev=2",
+            )
+
+    def test_capture_origin_cannot_be_supplied_by_the_model(self) -> None:
+        with McpHttpServer(self.store) as server:
+            _, _, raw = server.request(
+                "POST",
+                request(
+                    "tools/call",
+                    params={
+                        "name": "recall_capture",
+                        "arguments": {
+                            "schema_version": 1,
+                            "title": "Synthetic",
+                            "body": "Synthetic",
+                            "origin": "spoofed",
+                            "occurred_at": "2026-07-17T20:00:00Z",
+                            "provenance": {"uri": "manual://synthetic"},
+                        },
+                    },
+                ),
+                protocol="2025-11-25",
+            )
+        self.assertEqual(json.loads(raw)["error"]["code"], -32602)
+        self.assertNotIn("capture", {call[0] for call in self.store.calls})
+
+    def test_read_only_principal_never_discovers_or_calls_write_tools(self) -> None:
+        store = FakeStore(write=False)
+        with McpHttpServer(store) as server:
+            _, _, listed = server.request(
+                "POST",
+                request("tools/list"),
+                protocol="2025-11-25",
+            )
+            names = {
+                tool["name"]
+                for tool in json.loads(listed)["result"]["tools"]
+            }
+            self.assertNotIn("recall_capture", names)
+            _, _, called = server.request(
+                "POST",
+                request(
+                    "tools/call",
+                    params={
+                        "name": "recall_capture",
+                        "arguments": {},
+                    },
+                ),
+                protocol="2025-11-25",
+            )
+        self.assertEqual(json.loads(called)["error"]["code"], -32602)
+        self.assertNotIn("capture", {call[0] for call in store.calls})
 
     def test_search_is_natural_language_and_source_scoped(self) -> None:
         with McpHttpServer(self.store) as server:

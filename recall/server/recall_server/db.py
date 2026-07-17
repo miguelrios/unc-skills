@@ -16,6 +16,12 @@ import psycopg
 from psycopg.rows import dict_row
 
 from . import PROJECTOR_VERSION
+from .capture import (
+    CAPTURE_ORIGIN_RE,
+    build_capture_event,
+    build_forget_event,
+    parse_capture_receipt,
+)
 from .federation import SOURCE_FAMILIES, SourceProfile, freshness_score, normalized_evidence
 from .projectors import KIND_RE, SOURCE_ID_RE, advisory_lock_key, canonical_json, effective_session_id, event_receipt, legacy_engine, partial_lexical_probes, phrase_query_spec, preferred_phrase_probes, project, redact_text, validate_envelope
 from .ranking import DEFAULT_SEARCH_DEADLINE_MS, evidence_rank_components, should_run_partial
@@ -84,21 +90,38 @@ class BrainStore:
         scopes: list[str],
         *,
         principal_id: str | None = None,
+        capture_origin: str | None = None,
     ) -> dict:
         allowed = {"read", "write", "metrics"}
         if not name or not scopes or set(scopes) - allowed:
             raise ValueError("invalid collector credential")
         if "write" in scopes and not source_id:
             raise ValueError("write credential requires a source")
+        if capture_origin is not None and (
+            "write" not in scopes
+            or not source_id
+            or not principal_id
+            or not CAPTURE_ORIGIN_RE.fullmatch(capture_origin)
+        ):
+            raise ValueError("invalid capture credential")
         plaintext = "rcl_" + secrets.token_urlsafe(32)
         digest = hashlib.sha256(plaintext.encode()).hexdigest()
         credential_id = uuid.uuid4()
         with self.connect() as conn:
             conn.execute(
                 """INSERT INTO collector_credentials(
-                       id,name,token_sha256,source_id,scopes,principal_id
-                   ) VALUES (%s,%s,%s,%s,%s,%s)""",
-                (credential_id, name, digest, source_id, scopes, principal_id),
+                       id,name,token_sha256,source_id,scopes,principal_id,
+                       capture_origin
+                   ) VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+                (
+                    credential_id,
+                    name,
+                    digest,
+                    source_id,
+                    scopes,
+                    principal_id,
+                    capture_origin,
+                ),
             )
             conn.execute(
                 "INSERT INTO audit_events(operation,status,metadata) VALUES ('credential.create','success',%s)",
@@ -107,6 +130,7 @@ class BrainStore:
                     "name": name,
                     "source_id": source_id,
                     "principal_id": principal_id,
+                    "capture_origin": capture_origin,
                     "scopes": scopes,
                 }),),
             )
@@ -116,6 +140,7 @@ class BrainStore:
             "token": plaintext,
             "source_id": source_id,
             "principal_id": principal_id,
+            "capture_origin": capture_origin,
             "scopes": scopes,
         }
 
@@ -230,7 +255,7 @@ class BrainStore:
         digest = hashlib.sha256(plaintext.encode()).hexdigest()
         with self.connect() as conn:
             row = conn.execute(
-                """SELECT id,name,source_id,principal_id,scopes
+                """SELECT id,name,source_id,principal_id,capture_origin,scopes
                    FROM collector_credentials
                    WHERE token_sha256=%s AND revoked_at IS NULL""",
                 (digest,),
@@ -251,6 +276,55 @@ class BrainStore:
                 (principal_id,),
             ).fetchall()
         return [row["source_id"] for row in rows]
+
+    def capture(self, principal: dict, arguments: dict) -> dict:
+        event, privacy = build_capture_event(arguments, principal)
+        idempotency_key = (
+            "mcp-capture-v1-" + hashlib.sha256(canonical_json(event)).hexdigest()
+        )
+        acknowledgement, replay = self.ingest(idempotency_key, [event])
+        result = {
+            "status": acknowledgement.get("status", "committed"),
+            "native_id": event["native_id"],
+            "replay": replay,
+            "privacy": privacy,
+        }
+        if acknowledgement.get("receipts"):
+            result["receipt"] = acknowledgement["receipts"][0]
+        return result
+
+    def forget_capture(self, principal: dict, receipt: str) -> dict:
+        source_id = principal.get("source_id")
+        principal_id = principal.get("principal_id")
+        if not isinstance(source_id, str) or not isinstance(principal_id, str):
+            raise ValueError("capture authority is invalid")
+        native_id, revision, event_part = parse_capture_receipt(receipt, source_id)
+        with self.connect() as conn:
+            captured = conn.execute(
+                """SELECT occurred_at FROM source_events
+                   WHERE source_id=%s AND native_id=%s AND revision=%s
+                     AND kind='capture' AND principal_id=%s""",
+                (source_id, native_id, revision, principal_id),
+            ).fetchone()
+        if not captured:
+            raise ValueError("capture receipt not found")
+        event = build_forget_event(
+            source_id=source_id,
+            principal_id=principal_id,
+            native_id=native_id,
+            deleted_receipt=event_part,
+            captured_at=captured["occurred_at"],
+        )
+        idempotency_key = (
+            "mcp-forget-v1-" + hashlib.sha256(canonical_json(event)).hexdigest()
+        )
+        acknowledgement, replay = self.ingest(idempotency_key, [event])
+        return {
+            "status": acknowledgement.get("status", "committed"),
+            "native_id": native_id,
+            "receipt": acknowledgement["receipts"][0],
+            "replay": replay,
+        }
 
     def readiness(self) -> dict[str, str]:
         """Prove the database is reachable without scanning runtime data."""
