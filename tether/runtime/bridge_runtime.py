@@ -614,9 +614,7 @@ class Broker:
         if not channel.startswith("C") or channel in self._joined_channels:
             return
         try:
-            info = _slack_call(
-                self.token, "conversations.info", {"channel": channel, "include_num_members": False},
-            )
+            info = _slack_call(self.token, "conversations.info", {"channel": channel})
             conversation = info.get("channel") if isinstance(info, dict) else None
             if isinstance(conversation, dict) and any(
                 conversation.get(flag)

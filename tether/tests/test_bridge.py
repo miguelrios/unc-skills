@@ -205,7 +205,7 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(call.call_args_list, [
             mock.call(
                 "test-token", "conversations.info",
-                {"channel": "C12345678", "include_num_members": False},
+                {"channel": "C12345678"},
             ),
             mock.call(
                 "test-token", "conversations.replies",
@@ -225,7 +225,7 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(call.call_args_list, [
             mock.call(
                 "test-token", "conversations.info",
-                {"channel": "C12345678", "include_num_members": False},
+                {"channel": "C12345678"},
             ),
             mock.call("test-token", "conversations.join", {"channel": "C12345678"}),
         ])
@@ -239,7 +239,7 @@ class StoreTest(unittest.TestCase):
             broker._ensure_channel_membership("C12345678")
         call.assert_called_once_with(
             "test-token", "conversations.info",
-            {"channel": "C12345678", "include_num_members": False},
+            {"channel": "C12345678"},
         )
 
     def test_identity_returns_only_nonsecret_bot_metadata(self):
