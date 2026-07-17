@@ -1,6 +1,35 @@
 # Tailnet-private pilot deployment
 
-The application listens on a Unix socket, not TCP. Tailscale Serve is the only network proxy.
+## Managed Core preview
+
+`recall-core` is the existing API, projection, and retrieval runtime packaged as one
+non-root container. The deployment preview is intentionally offline and non-mutating:
+
+```bash
+python -m recall_server.cli deployment-preview \
+  --manifest server/deploy/recall-core.plan.example.json
+```
+
+It emits only a content-free plan hash, resource kinds, and the five approvals still
+required. It does not contact a provider, read a source, render a reference, or apply
+infrastructure. The example is synthetic; a live manifest belongs in a private mode-0600
+location and contains references, never credential values.
+
+The production database gate requires a standard PostgreSQL URL with
+`sslmode=verify-full` and an explicit trust root, schema migrations 1 through 12,
+pgvector 0.8.0 or newer, and a runtime role without superuser, database/role creation,
+replication, or RLS-bypass privilege:
+
+```bash
+python -m recall_server.cli capability-check
+```
+
+`--profile local-fixture` is a visibly non-production exception restricted to a
+loopback PostgreSQL fixture. It never reports production readiness.
+
+## Existing host pilot
+
+The existing host pilot listens on a Unix socket, not TCP. Tailscale Serve is its only network proxy.
 On Linux, the server verifies `SO_PEERCRED` and trusts Tailscale identity headers only when the
 Unix-socket peer UID is explicitly allowlisted. Ubuntu's sandboxed `tailscaled` uses UID 65534;
 root is UID 0. Neither identity is assumable by the interactive user, so a same-user process that
