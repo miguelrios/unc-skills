@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import contextlib
+import inspect
 import io
 import json
 import os
@@ -90,6 +91,134 @@ class SchemaMigrationContractTest(unittest.TestCase):
             "where deleted_at is null and btrim(text_redacted) <> ''",
             rendered,
         )
+
+    def test_global_embedding_backfill_has_a_runtime_scoped_watermark(self) -> None:
+        migration = SERVER / "schema" / "014_embedding_projection_watermark.sql"
+        rendered = " ".join(migration.read_text().split()).casefold()
+        self.assertIn(
+            "runtime_fingerprint char(64) primary key",
+            rendered,
+        )
+        self.assertIn(
+            "last_item_id bigint not null default 0",
+            rendered,
+        )
+
+        implementation = inspect.getsource(BrainStore.embed_pending)
+        self.assertIn("use_watermark = source_id is None and surface is None", implementation)
+        self.assertIn("WHERE item.id>%s", implementation)
+        self.assertIn("WHERE id>%s", implementation)
+        self.assertIn("GREATEST(last_item_id,%s)", implementation)
+        self.assertLess(
+            implementation.index("cursor.executemany("),
+            implementation.rindex("GREATEST(last_item_id,%s)"),
+        )
+
+
+class EmbeddingBackfillWatermarkTest(unittest.TestCase):
+    def test_global_backfill_advances_cursor_only_after_embedding_write(self) -> None:
+        class Runtime:
+            model = "voyage-4-lite"
+            fingerprint = "a" * 64
+            dimensions = 512
+
+            @staticmethod
+            def embed_documents(_texts):
+                return [[0.0] * 512]
+
+        class Result:
+            def __init__(self, *, one=None, all_rows=None):
+                self.one = one
+                self.all_rows = all_rows
+
+            def fetchone(self):
+                return self.one
+
+            def fetchall(self):
+                return self.all_rows
+
+        class Cursor:
+            def __init__(self, connection):
+                self.connection = connection
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def executemany(self, _sql, values):
+                self.connection.embedded = True
+                self.connection.embedding_values = values
+
+            def execute(self, sql, params):
+                self.connection.cursor_updates.append((sql, params))
+                if "embedding_projection_watermarks" in sql:
+                    self.connection.watermark_advanced_after_write = (
+                        self.connection.embedded
+                    )
+
+        class Connection:
+            def __init__(self):
+                self.embedded = False
+                self.embedding_values = []
+                self.cursor_updates = []
+                self.watermark_advanced_after_write = False
+                self.selection_params = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def transaction(self):
+                return contextlib.nullcontext()
+
+            def cursor(self):
+                return Cursor(self)
+
+            def execute(self, sql, params=None):
+                normalized = " ".join(sql.split())
+                if "pg_try_advisory_lock(" in normalized:
+                    return Result(one={"value": True})
+                if normalized.startswith(
+                    "INSERT INTO embedding_projection_watermarks"
+                ):
+                    return Result()
+                if normalized.startswith("SELECT last_item_id"):
+                    return Result(one={"last_item_id": 7})
+                if normalized.startswith("SELECT item.id") and "item.id>%s" in normalized:
+                    self.selection_params = params
+                    return Result(
+                        all_rows=[
+                            {
+                                "id": 8,
+                                "source_id": "synthetic:source",
+                                "text_redacted": "synthetic safe text",
+                                "projector_version": 1,
+                            }
+                        ]
+                    )
+                if "pg_advisory_unlock(" in normalized:
+                    return Result(one={"value": True})
+                raise AssertionError(f"unexpected SQL: {normalized}")
+
+        connection = Connection()
+        store = BrainStore("postgresql://synthetic.invalid/db", semantic_runtime=Runtime())
+        with mock.patch.object(store, "connect", return_value=connection):
+            result = store.embed_pending(batch_size=1, max_batches=1)
+
+        self.assertEqual(result["processed"], 1)
+        self.assertEqual(connection.selection_params[0], 7)
+        self.assertEqual(connection.embedding_values[0][0], 8)
+        self.assertTrue(connection.watermark_advanced_after_write)
+        watermark_update = next(
+            params
+            for sql, params in connection.cursor_updates
+            if "embedding_projection_watermarks" in sql
+        )
+        self.assertEqual(watermark_update, (8, Runtime.fingerprint))
 
 
 class TypedConnectorProjectionTest(unittest.TestCase):
