@@ -108,6 +108,9 @@ class SchemaMigrationContractTest(unittest.TestCase):
         self.assertIn("use_watermark = source_id is None and surface is None", implementation)
         self.assertIn("WHERE item.id>%s", implementation)
         self.assertIn("WHERE id>%s", implementation)
+        self.assertIn("SELECT min(item_id) AS item_id", implementation)
+        self.assertIn("WHERE runtime_fingerprint<>%s", implementation)
+        self.assertIn("SET last_item_id=LEAST(last_item_id,%s)", implementation)
         self.assertIn("GREATEST(last_item_id,%s)", implementation)
         self.assertLess(
             implementation.index("cursor.executemany("),
@@ -197,6 +200,8 @@ class EmbeddingBackfillWatermarkTest(unittest.TestCase):
                     return Result()
                 if normalized.startswith("SELECT last_item_id"):
                     return Result(one={"last_item_id": 7})
+                if normalized.startswith("SELECT min(item_id) AS item_id"):
+                    return Result(one={"item_id": None})
                 if normalized.startswith("SELECT item.id") and "item.id>%s" in normalized:
                     self.selection_params = params
                     return Result(

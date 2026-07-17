@@ -342,6 +342,24 @@ class BrainStore:
                            FOR UPDATE""",
                         (self.semantic_runtime.fingerprint,),
                     ).fetchone()["last_item_id"]
+                    stale_runtime_item = conn.execute(
+                        """SELECT min(item_id) AS item_id
+                           FROM item_embeddings
+                           WHERE runtime_fingerprint<>%s""",
+                        (self.semantic_runtime.fingerprint,),
+                    ).fetchone()["item_id"]
+                    if (
+                        stale_runtime_item is not None
+                        and stale_runtime_item <= watermark
+                    ):
+                        watermark = max(0, stale_runtime_item - 1)
+                        conn.execute(
+                            """UPDATE embedding_projection_watermarks
+                               SET last_item_id=LEAST(last_item_id,%s),
+                                   updated_at=now()
+                               WHERE runtime_fingerprint=%s""",
+                            (watermark, self.semantic_runtime.fingerprint),
+                        )
                 while max_batches is None or batches < max_batches:
                     if use_watermark:
                         rows = conn.execute(

@@ -8,6 +8,9 @@ CREATE TABLE IF NOT EXISTS embedding_projection_watermarks (
     updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE INDEX IF NOT EXISTS item_embeddings_runtime_item_idx
+    ON item_embeddings(runtime_fingerprint, item_id);
+
 INSERT INTO schema_migrations(version) VALUES (14) ON CONFLICT DO NOTHING;
 
 COMMIT;
