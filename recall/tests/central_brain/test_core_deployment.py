@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -19,6 +20,7 @@ from recall_server import SCHEMA_VERSION  # noqa: E402
 from recall_server.capabilities import (  # noqa: E402
     CAPABILITY_SQL,
     CapabilityError,
+    _client_tls_in_use,
     assess_snapshot,
     validate_connection_policy,
 )
@@ -96,6 +98,15 @@ class DatabaseCapabilityContractTest(unittest.TestCase):
         self.assertEqual(
             validate_connection_policy(secure, "production")["tls"], "verify-full"
         )
+        explicit_system_bundle = (
+            "postgresql://synthetic:synthetic@db.example.invalid/recall"
+            "?sslmode=verify-full"
+            "&sslrootcert=/etc/ssl/certs/ca-certificates.crt"
+        )
+        self.assertEqual(
+            validate_connection_policy(explicit_system_bundle, "production")["tls"],
+            "verify-full",
+        )
         for unsafe in (
             "postgresql://synthetic:synthetic@db.example.invalid/recall?sslmode=require",
             "postgresql://synthetic:synthetic@db.example.invalid/recall?sslmode=verify-full",
@@ -169,6 +180,11 @@ class DatabaseCapabilityContractTest(unittest.TestCase):
         self.assertIn("pg_stat_ssl", lowered)
         for provider in ("planetscale", "render", "supabase", "neon"):
             self.assertNotIn(provider, lowered)
+
+    def test_client_tls_observation_can_survive_proxy_backend_hop(self) -> None:
+        connection = SimpleNamespace(pgconn=SimpleNamespace(ssl_in_use=True))
+        self.assertTrue(_client_tls_in_use(connection))
+        self.assertFalse(_client_tls_in_use(SimpleNamespace()))
 
 
 class DeploymentPreviewContractTest(unittest.TestCase):

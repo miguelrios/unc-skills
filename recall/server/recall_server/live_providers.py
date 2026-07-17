@@ -9,6 +9,7 @@ import urllib.error
 import urllib.request
 from urllib.parse import quote, urlencode, urlsplit
 
+from .capabilities import CapabilityError, validate_connection_policy
 from .deployment import IMAGE_RE
 
 
@@ -467,13 +468,9 @@ class RenderPrivateStackAdapter:
         self.embedding_name = embedding_name
         self.core_plan = core_plan
         self.embedding_plan = embedding_plan
-        parsed = urlsplit(database_url)
-        if (
-            parsed.scheme not in {"postgres", "postgresql"}
-            or not parsed.hostname
-            or "sslmode=verify-full" not in parsed.query
-            or "sslrootcert=system" not in parsed.query
-        ):
+        try:
+            validate_connection_policy(database_url, "production")
+        except CapabilityError:
             raise LiveProviderError("database_url_policy_failed")
         self.database_url = database_url
 

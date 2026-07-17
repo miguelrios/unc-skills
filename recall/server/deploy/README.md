@@ -89,11 +89,14 @@ TAILSCALE_OAUTH_CLIENT_SECRET
 ```
 
 `RECALL_DATABASE_URL` must be a PlanetScale application role URL with
-`sslmode=verify-full&sslrootcert=system`. Bootstrap and migrate the database
-with a separate administrative credential, then retain only this
-least-privilege runtime URL in the injected environment. The provider token
-needs only database read/create permissions; the Tailscale OAuth client must be
-restricted to the dedicated gateway tag.
+`sslmode=verify-full` and an explicit trust root. Prefer
+`sslrootcert=/etc/ssl/certs/ca-certificates.crt` in the pinned Linux container;
+`sslrootcert=system` is also accepted where the runtime's libpq/OpenSSL build
+resolves the OS trust store correctly. Bootstrap and migrate the database with
+a separate administrative credential, then retain only this least-privilege
+runtime URL in the injected environment. The provider token needs only database
+read/create permissions; the Tailscale OAuth client must be restricted to the
+dedicated gateway tag.
 
 After reviewing the zero-network preview and mode-0600 approval document, run
 the exact approved apply under 1Password injection:

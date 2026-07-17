@@ -223,7 +223,8 @@ class LiveProviderAdapterTest(unittest.TestCase):
             embedding_plan="pro",
             database_url=(
                 "postgresql://synthetic:synthetic@db.invalid/recall"
-                "?sslmode=verify-full&sslrootcert=system"
+                "?sslmode=verify-full"
+                "&sslrootcert=/etc/ssl/certs/ca-certificates.crt"
             ),
         )
         first = adapter.ensure("recall-core-service", service_desired())

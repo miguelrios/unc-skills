@@ -172,6 +172,13 @@ def assess_snapshot(snapshot: dict[str, Any], profile: str = "production") -> di
     }
 
 
+def _client_tls_in_use(connection: Any) -> bool:
+    try:
+        return bool(connection.pgconn.ssl_in_use)
+    except (AttributeError, TypeError):
+        return False
+
+
 def probe_database(dsn: str, profile: str = "production") -> dict[str, Any]:
     validate_connection_policy(dsn, profile)
     try:
@@ -180,6 +187,7 @@ def probe_database(dsn: str, profile: str = "production") -> dict[str, Any]:
 
         with psycopg.connect(dsn, row_factory=dict_row) as connection:
             row = connection.execute(CAPABILITY_SQL).fetchone()
+            client_ssl_in_use = _client_tls_in_use(connection)
     except CapabilityError:
         raise
     except Exception as error:
@@ -190,7 +198,10 @@ def probe_database(dsn: str, profile: str = "production") -> dict[str, Any]:
         "server_version_num": row["server_version_num"],
         "vector_version": row["vector_version"],
         "migration_versions": row["migration_versions"],
-        "ssl_in_use": row["ssl_in_use"],
+        # Managed Postgres proxies can terminate verified client TLS before the
+        # backend, so pg_stat_ssl may truthfully report false on the server-side
+        # hop. libpq is authoritative for the connection Recall actually opened.
+        "ssl_in_use": client_ssl_in_use,
         "role": {
             "superuser": row["superuser"],
             "create_database": row["create_database"],
