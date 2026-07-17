@@ -108,7 +108,12 @@ def _import_native_slack_participation(adapter) -> int:
         except ValueError:
             continue
         team_id = str(getattr(adapter, "_channel_team", {}).get(channel_id, "") or "")
-        store.mark_participation(team_id, channel_id, thread_ts)
+        store.mark_participation(
+            team_id,
+            channel_id,
+            thread_ts,
+            observed_at=updated.astimezone(datetime.timezone.utc).isoformat(),
+        )
         imported += 1
     return imported
 

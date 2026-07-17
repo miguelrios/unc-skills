@@ -820,6 +820,10 @@ class PluginRoutingTest(unittest.TestCase):
         self.assertTrue(self.plugin.store.participates(
             "T12345678", "C0BHSK52GP5", "1784319237.201969",
         ))
+        participation = self.plugin.store.recent_participating_threads(
+            hours=24 * 365, limit=10,
+        )
+        self.assertLess(participation[0][3], datetime.datetime.now().timestamp() + 1)
 
     def test_authorization_fails_closed_and_honors_owner(self):
         bridge = self.make_bridge()

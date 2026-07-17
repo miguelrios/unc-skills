@@ -393,18 +393,25 @@ class Store:
             raise ValueError("active bridge not found")
         return bridge
 
-    def mark_participation(self, team_id: str, channel_id: str, thread_ts: str) -> None:
+    def mark_participation(
+        self,
+        team_id: str,
+        channel_id: str,
+        thread_ts: str,
+        observed_at: str | None = None,
+    ) -> None:
         if not channel_id or not thread_ts:
             raise ValueError("channel and thread timestamp are required")
+        timestamp = observed_at or datetime.datetime.now(datetime.timezone.utc).isoformat()
         with self.connect() as db:
             db.execute(
                 """
-                INSERT INTO thread_participation(team_id,channel_id,thread_ts)
-                VALUES(?,?,?)
+                INSERT INTO thread_participation(team_id,channel_id,thread_ts,updated_at)
+                VALUES(?,?,?,datetime(?))
                 ON CONFLICT(team_id,channel_id,thread_ts)
-                DO UPDATE SET updated_at=CURRENT_TIMESTAMP
+                DO UPDATE SET updated_at=MAX(thread_participation.updated_at,excluded.updated_at)
                 """,
-                (team_id, channel_id, thread_ts),
+                (team_id, channel_id, thread_ts, timestamp),
             )
 
     def participates(self, team_id: str, channel_id: str, thread_ts: str) -> bool:
