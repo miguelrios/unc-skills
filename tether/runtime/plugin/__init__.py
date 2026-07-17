@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import functools
 import importlib
 import importlib.util
+import json
 import logging
 import os
 import sys
@@ -74,6 +76,41 @@ def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int
 
 def _reply_poll_interval() -> int:
     return _bounded_env_int("TETHER_REPLY_POLL_SECONDS", 30, 10, 300)
+
+
+def _import_native_slack_participation(adapter) -> int:
+    """Seed restart recovery from Hermes's recent native Slack sessions."""
+    sessions_path = runtime.HERMES_HOME / "sessions" / "sessions.json"
+    try:
+        payload = json.loads(sessions_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return 0
+    sessions = payload.values() if isinstance(payload, dict) else ()
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=7)
+    imported = 0
+    for session in list(sessions)[:2000]:
+        if not isinstance(session, dict):
+            continue
+        origin = session.get("origin")
+        if not isinstance(origin, dict) or origin.get("platform") != "slack":
+            continue
+        channel_id = str(origin.get("chat_id") or "")
+        thread_ts = str(origin.get("thread_id") or "")
+        if not channel_id or not thread_ts:
+            continue
+        updated_at = str(session.get("updated_at") or "")
+        try:
+            updated = datetime.datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+            if updated.tzinfo is None:
+                updated = updated.replace(tzinfo=datetime.timezone.utc)
+            if updated < cutoff:
+                continue
+        except ValueError:
+            continue
+        team_id = str(getattr(adapter, "_channel_team", {}).get(channel_id, "") or "")
+        store.mark_participation(team_id, channel_id, thread_ts)
+        imported += 1
+    return imported
 
 
 def _health_status() -> dict[str, Any]:
@@ -285,6 +322,9 @@ def _install_slack_bridge_prefilter():
         connected = await original_connect(self, *args, **kwargs)
         state.slack_transport_connected = bool(connected)
         if connected:
+            imported = _import_native_slack_participation(self)
+            if imported:
+                log.info("Tether imported %d recent native Slack thread(s)", imported)
             _ensure_reply_poller(self)
         return connected
 

@@ -1,5 +1,6 @@
 import asyncio
 import concurrent.futures
+import datetime
 import hashlib
 import importlib.util
 import json
@@ -789,6 +790,36 @@ class PluginRoutingTest(unittest.TestCase):
             "idempotency_key": "cron-1",
         })
         return self.plugin.store.bind(bridge.bridge_id, "123.456")
+
+    def test_imports_recent_native_slack_sessions_for_restart_recovery(self):
+        sessions = self.runtime.HERMES_HOME / "sessions" / "sessions.json"
+        sessions.parent.mkdir(parents=True)
+        sessions.write_text(json.dumps({
+            "agent:main:slack:dm:C0BHSK52GP5:1784319237.201969": {
+                "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "origin": {
+                    "platform": "slack",
+                    "chat_id": "C0BHSK52GP5",
+                    "thread_id": "1784319237.201969",
+                },
+            },
+            "old": {
+                "updated_at": "2020-01-01T00:00:00+00:00",
+                "origin": {
+                    "platform": "slack",
+                    "chat_id": "COLD00000",
+                    "thread_id": "100.000",
+                },
+            },
+        }))
+        adapter = types.SimpleNamespace(
+            _channel_team={"C0BHSK52GP5": "T12345678"},
+        )
+        imported = self.plugin._import_native_slack_participation(adapter)
+        self.assertEqual(imported, 1)
+        self.assertTrue(self.plugin.store.participates(
+            "T12345678", "C0BHSK52GP5", "1784319237.201969",
+        ))
 
     def test_authorization_fails_closed_and_honors_owner(self):
         bridge = self.make_bridge()
