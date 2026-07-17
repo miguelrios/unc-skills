@@ -78,8 +78,6 @@ class LiveApplyCliTest(unittest.TestCase):
             "owner-synthetic",
             "--core-name",
             "synthetic-recall-core",
-            "--embedding-name",
-            "synthetic-recall-embedding",
             "--gateway-name",
             "synthetic-recall-gateway",
             "--tailnet-hostname",
@@ -124,6 +122,7 @@ class LiveApplyCliTest(unittest.TestCase):
                 "postgresql://synthetic:synthetic@db.invalid/recall"
                 "?sslmode=verify-full&sslrootcert=system"
             ),
+            "RECALL_EMBEDDING_API_KEY": "synthetic-embedding-key",
             "TAILSCALE_OAUTH_CLIENT_ID": "synthetic-ts-id",
             "TAILSCALE_OAUTH_CLIENT_SECRET": "synthetic-ts-secret",
         }
@@ -132,7 +131,6 @@ class LiveApplyCliTest(unittest.TestCase):
             "database_name": "synthetic-recall",
             "render_owner_id": "owner-synthetic",
             "core_name": "synthetic-recall-core",
-            "embedding_name": "synthetic-recall-embedding",
             "gateway_name": "synthetic-recall-gateway",
             "tailnet_hostname": "synthetic-recall",
             "tailnet_tag": "tag:synthetic-recall",

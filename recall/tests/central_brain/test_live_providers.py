@@ -18,7 +18,6 @@ from recall_server.live_providers import (  # noqa: E402
 
 
 CORE_IMAGE = "ghcr.io/synthetic/recall@sha256:" + "a" * 64
-EMBEDDING_IMAGE = "ghcr.io/synthetic/embedding@sha256:" + "b" * 64
 GATEWAY_IMAGE = "docker.io/synthetic/tailscale@sha256:" + "c" * 64
 
 
@@ -104,7 +103,16 @@ class FakeRender:
 def service_desired() -> dict:
     return {
         "adapter": "render-private-service",
-        "embedding_image": EMBEDDING_IMAGE,
+        "embedding": {
+            "protocol": "voyage",
+            "url": "https://api.voyage.example",
+            "approved_url": "https://api.voyage.example",
+            "key_ref": "secret://runtime/RECALL_EMBEDDING_API_KEY",
+            "model": "voyage-synthetic",
+            "revision": "voyage-synthetic-v1",
+            "dimensions": 512,
+            "batch_size": 64,
+        },
         "region_ref": "approval://provider-region",
         "billing_ref": "approval://provider-billing",
         "public_ingress": False,
@@ -218,9 +226,8 @@ class LiveProviderAdapterTest(unittest.TestCase):
             billing_selection="balanced-ha",
             region="virginia",
             core_name="synthetic-recall-core",
-            embedding_name="synthetic-recall-embedding",
             core_plan="starter",
-            embedding_plan="pro",
+            embedding_api_key="synthetic-embedding-key",
             database_url=(
                 "postgresql://synthetic:synthetic@db.invalid/recall"
                 "?sslmode=verify-full"
@@ -234,21 +241,21 @@ class LiveProviderAdapterTest(unittest.TestCase):
         creates = [call[2] for call in provider.calls if call[0] == "POST"]
         self.assertEqual(
             [body["type"] for body in creates],
-            [
-                "private_service",
-                "private_service",
-            ],
+            ["private_service"],
         )
         self.assertEqual(
             [body["image"]["imagePath"] for body in creates],
-            [EMBEDDING_IMAGE, CORE_IMAGE],
+            [CORE_IMAGE],
         )
-        core = creates[1]
+        core = creates[0]
         env = {item["key"]: item["value"] for item in core["envVars"]}
         self.assertEqual(env["RECALL_AUTH_REQUIRED"], "1")
         self.assertEqual(
             env["RECALL_EMBEDDING_URL"], env["RECALL_EMBEDDING_APPROVED_URL"]
         )
+        self.assertEqual(env["RECALL_EMBEDDING_PROTOCOL"], "voyage")
+        self.assertEqual(env["RECALL_EMBEDDING_KEY_ENV"], "RECALL_EMBEDDING_API_KEY")
+        self.assertEqual(env["RECALL_EMBEDDING_API_KEY"], "synthetic-embedding-key")
         self.assertNotIn("public", json.dumps(creates).casefold())
         self.assertIn("core_url", context)
 
@@ -302,9 +309,8 @@ class LiveProviderAdapterTest(unittest.TestCase):
             billing_selection="balanced-ha",
             region="virginia",
             core_name="synthetic-recall-core",
-            embedding_name="synthetic-recall-embedding",
             core_plan="starter",
-            embedding_plan="pro",
+            embedding_api_key="synthetic-embedding-key",
             database_url=(
                 "postgresql://synthetic:synthetic@db.invalid/recall"
                 "?sslmode=verify-full&sslrootcert=system"
@@ -323,6 +329,42 @@ class LiveProviderAdapterTest(unittest.TestCase):
             len([call for call in provider.calls if call[0] == "POST"]),
             creates_before,
         )
+
+    def test_managed_embedding_approval_must_be_a_plain_matching_https_url(self):
+        provider = FakeRender()
+        adapter = RenderPrivateStackAdapter(
+            provider,
+            {},
+            owner_id="owner-synthetic",
+            region_selection="virginia",
+            billing_selection="balanced-ha",
+            region="virginia",
+            core_name="synthetic-recall-core",
+            core_plan="starter",
+            embedding_api_key="synthetic-embedding-key",
+            database_url=(
+                "postgresql://synthetic:synthetic@db.invalid/recall"
+                "?sslmode=verify-full&sslrootcert=system"
+            ),
+        )
+        invalid_approvals: tuple[object, ...] = (
+            None,
+            1,
+            "http://api.voyage.example",
+            "https://api.voyage.example?route=other",
+            "https://other.example",
+        )
+        for approved_url in invalid_approvals:
+            desired = service_desired()
+            desired["embedding"]["approved_url"] = approved_url
+            with (
+                self.subTest(approved_url=approved_url),
+                self.assertRaisesRegex(
+                    LiveProviderError, "render_stack_contract_invalid"
+                ),
+            ):
+                adapter.ensure("recall-core-service", desired)
+        self.assertFalse(any(call[0] == "POST" for call in provider.calls))
 
 
 if __name__ == "__main__":
