@@ -54,6 +54,7 @@ class SemanticRuntime:
         self,
         *,
         embedding_url: str,
+        embedding_approved_url: str | None = None,
         model: str,
         revision: str,
         dimensions: int,
@@ -68,8 +69,25 @@ class SemanticRuntime:
         cache_ttl_seconds: float = 900.0,
     ):
         parsed = urlsplit(embedding_url)
-        if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
-            raise ValueError("embedding endpoint must be loopback HTTP")
+        if (
+            parsed.scheme != "http"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("embedding endpoint must be plain HTTP")
+        loopback = parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+        if not loopback:
+            if not embedding_approved_url:
+                raise ValueError(
+                    "remote embedding endpoint requires an approved private endpoint"
+                )
+            if embedding_url.rstrip("/") != embedding_approved_url.rstrip("/"):
+                raise ValueError(
+                    "embedding endpoint does not match the approved private endpoint"
+                )
         if not 64 <= dimensions <= 2000:
             raise ValueError("embedding dimensions must be between 64 and 2000")
         if not re.fullmatch(r"[0-9a-f]{40}", revision):
@@ -78,7 +96,12 @@ class SemanticRuntime:
             raise ValueError("embedding batch size must be between 1 and 128")
         if not 1 <= planner_samples <= 3:
             raise ValueError("planner samples must be between 1 and 3")
-        planner_values = (planner_url, planner_approved_url, planner_model, planner_key_file)
+        planner_values = (
+            planner_url,
+            planner_approved_url,
+            planner_model,
+            planner_key_file,
+        )
         if any(planner_values) and not all(planner_values):
             raise ValueError(
                 "planner URL, approved URL, model, and key file must be configured together"
@@ -86,9 +109,12 @@ class SemanticRuntime:
         if planner_url:
             planner_parsed = urlsplit(planner_url)
             if (
-                planner_parsed.scheme != "https" or not planner_parsed.hostname
-                or planner_parsed.username or planner_parsed.password
-                or planner_parsed.query or planner_parsed.fragment
+                planner_parsed.scheme != "https"
+                or not planner_parsed.hostname
+                or planner_parsed.username
+                or planner_parsed.password
+                or planner_parsed.query
+                or planner_parsed.fragment
             ):
                 raise ValueError("planner endpoint must be a plain HTTPS base URL")
             if planner_url.rstrip("/") != planner_approved_url.rstrip("/"):
@@ -111,7 +137,9 @@ class SemanticRuntime:
         # query concurrency into immediate sidecar 429s and lexical fallbacks.
         self._embedding_lock = threading.Lock()
         self._plan_cache: OrderedDict[str, tuple[float, SearchPlan]] = OrderedDict()
-        self._query_embedding_cache: OrderedDict[str, tuple[float, tuple[float, ...]]] = OrderedDict()
+        self._query_embedding_cache: OrderedDict[
+            str, tuple[float, tuple[float, ...]]
+        ] = OrderedDict()
         self._embedding_identity_checked = False
 
     @classmethod
@@ -121,25 +149,34 @@ class SemanticRuntime:
             return None
         return cls(
             embedding_url=embedding_url,
+            embedding_approved_url=(
+                os.environ.get("RECALL_EMBEDDING_APPROVED_URL") or None
+            ),
             model=os.environ.get("RECALL_EMBEDDING_MODEL", "Qwen/Qwen3-Embedding-0.6B"),
-            revision=os.environ.get("RECALL_EMBEDDING_REVISION", DEFAULT_EMBEDDING_REVISION),
+            revision=os.environ.get(
+                "RECALL_EMBEDDING_REVISION", DEFAULT_EMBEDDING_REVISION
+            ),
             dimensions=int(os.environ.get("RECALL_EMBEDDING_DIMENSIONS", "512")),
             planner_url=os.environ.get("RECALL_LITELLM_URL") or None,
             planner_approved_url=os.environ.get("RECALL_LITELLM_APPROVED_URL") or None,
             planner_model=os.environ.get("RECALL_LITELLM_MODEL") or None,
             planner_key_file=os.environ.get("RECALL_LITELLM_KEY_FILE") or None,
-            timeout_seconds=float(os.environ.get("RECALL_SEMANTIC_TIMEOUT_SECONDS", "15")),
-            embedding_batch_size=int(os.environ.get("RECALL_EMBEDDING_BATCH_SIZE", "1")),
+            timeout_seconds=float(
+                os.environ.get("RECALL_SEMANTIC_TIMEOUT_SECONDS", "15")
+            ),
+            embedding_batch_size=int(
+                os.environ.get("RECALL_EMBEDDING_BATCH_SIZE", "1")
+            ),
             planner_samples=int(os.environ.get("RECALL_PLANNER_SAMPLES", "2")),
             cache_size=int(os.environ.get("RECALL_SEMANTIC_CACHE_SIZE", "256")),
-            cache_ttl_seconds=float(os.environ.get("RECALL_SEMANTIC_CACHE_TTL_SECONDS", "900")),
+            cache_ttl_seconds=float(
+                os.environ.get("RECALL_SEMANTIC_CACHE_TTL_SECONDS", "900")
+            ),
         )
 
     @property
     def fingerprint(self) -> str:
-        value = (
-            f"{DOCUMENT_EMBEDDING_CONTRACT}\0{self.model}\0{self.revision}\0{self.dimensions}"
-        )
+        value = f"{DOCUMENT_EMBEDDING_CONTRACT}\0{self.model}\0{self.revision}\0{self.dimensions}"
         return hashlib.sha256(value.encode()).hexdigest()
 
     @staticmethod
@@ -203,7 +240,9 @@ class SemanticRuntime:
                 or info.get("model_sha") != self.revision
                 or info.get("model_dtype") != "float32"
             ):
-                raise ValueError("embedding sidecar identity does not match the pinned runtime")
+                raise ValueError(
+                    "embedding sidecar identity does not match the pinned runtime"
+                )
             self._embedding_identity_checked = True
 
     def _validate_vectors(self, values: object, expected: int) -> list[list[float]]:
@@ -226,9 +265,10 @@ class SemanticRuntime:
             self._ensure_embedding_identity()
             result = []
             for start in range(0, len(texts), self.embedding_batch_size):
-                batch = [self._document_text(value) for value in texts[
-                    start:start + self.embedding_batch_size
-                ]]
+                batch = [
+                    self._document_text(value)
+                    for value in texts[start : start + self.embedding_batch_size]
+                ]
                 values = self._post(
                     self.embedding_url + "/embed",
                     {"inputs": batch, "truncate": True, "dimensions": self.dimensions},
@@ -258,12 +298,18 @@ class SemanticRuntime:
                 missing.setdefault(query, []).append(index)
         if missing:
             values = list(missing)
-            vectors = self.embed_documents([QUERY_INSTRUCTION + value for value in values])
+            vectors = self.embed_documents(
+                [QUERY_INSTRUCTION + value for value in values]
+            )
             for value, vector in zip(values, vectors, strict=True):
-                self._cache_put(self._query_embedding_cache, self._cache_key(value), tuple(vector))
+                self._cache_put(
+                    self._query_embedding_cache, self._cache_key(value), tuple(vector)
+                )
                 for index in missing[value]:
                     results[index] = list(vector)
-        if any(value is None for value in results):  # Defensive invariant; never return partial batches.
+        if any(
+            value is None for value in results
+        ):  # Defensive invariant; never return partial batches.
             raise ValueError("query embedding batch is incomplete")
         return [value for value in results if value is not None]
 
@@ -273,7 +319,9 @@ class SemanticRuntime:
     def _read_planner_key(self) -> str:
         if self.planner_key_file is None:
             raise ValueError("planner key file is not configured")
-        descriptor = os.open(self.planner_key_file, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        descriptor = os.open(
+            self.planner_key_file, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        )
         try:
             metadata = os.fstat(descriptor)
             if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) & 0o077:
@@ -328,14 +376,18 @@ class SemanticRuntime:
             if searchable and isinstance(parsed.get("phrases"), list):
                 for raw in parsed["phrases"][:8]:
                     phrase = " ".join(re.findall(r"[A-Za-z0-9_./#-]+", str(raw)))[:80]
-                    if phrase and phrase.casefold() not in {value.casefold() for value in phrases}:
+                    if phrase and phrase.casefold() not in {
+                        value.casefold() for value in phrases
+                    }:
                         phrases.append(phrase)
             return SearchPlan(searchable=searchable, phrases=tuple(phrases))
 
         plans: list[SearchPlan] = []
         errors: list[Exception] = []
         with ThreadPoolExecutor(max_workers=self.planner_samples) as executor:
-            futures = [executor.submit(sample, seed) for seed in range(self.planner_samples)]
+            futures = [
+                executor.submit(sample, seed) for seed in range(self.planner_samples)
+            ]
             for future in futures:
                 try:
                     plans.append(future.result())
@@ -349,7 +401,9 @@ class SemanticRuntime:
             if not value.searchable:
                 continue
             for phrase in value.phrases:
-                if phrase.casefold() not in {existing.casefold() for existing in phrases}:
+                if phrase.casefold() not in {
+                    existing.casefold() for existing in phrases
+                }:
                     phrases.append(phrase)
                 if len(phrases) >= 12:
                     break

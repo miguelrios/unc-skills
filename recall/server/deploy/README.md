@@ -43,6 +43,80 @@ approval and is never inferred from infrastructure approval. Provider adapters r
 only the closed desired state and return content-free receipts; repeated reconciliation
 must converge to `unchanged` without duplicate resources.
 
+The managed pilot profile is deliberately one stack:
+
+```text
+Grep/Codex/Claude/Mac collectors
+              |
+       Tailnet HTTPS :9443
+              |
+  Render private Tailscale gateway
+              |
+      Render private network
+        |                 |
+  Recall Core :8788   TEI/Qwen embedding :80
+        |
+ PlanetScale Postgres (Virginia, HA, bounded autoscaling)
+```
+
+There is no Render public web service and no Tailscale Funnel. Core requires a
+revocable bearer credential even after the Tailnet boundary. Grep agents use the
+stable MCP Streamable HTTP endpoint at `https://<tailnet-host>:9443/mcp`; the
+same bearer token and source scope apply to both MCP tools and REST reads.
+`recall_search`, `recall_related`, and `recall_show` are read-only. Browser
+clients must match `RECALL_MCP_ALLOWED_ORIGINS`; server-side agents omit
+`Origin`.
+
+The live adapter profile pins PlanetScale `PS_80` with two replicas, 50 GiB
+initial storage, a 1 TiB autoscaling ceiling, PostgreSQL 17, and the current
+PlanetScale Virginia slug `us-east`. It creates only digest-pinned Render
+private services: Starter Core, Pro embedding, and a Starter Tailscale gateway
+with a 1 GiB identity disk. Existing service environment variables, secret
+files, image digests, commands, plans, disks, and regions must match exactly or
+reconciliation fails without mutation.
+
+Inject credentials from the approved 1Password Environment at runtime. Never
+put their values in arguments, a manifest, an approval file, shell history, or
+the repository:
+
+```text
+PLANETSCALE_SERVICE_TOKEN_ID
+PLANETSCALE_SERVICE_TOKEN
+RENDER_API_KEY
+RECALL_DATABASE_URL
+TAILSCALE_OAUTH_CLIENT_ID
+TAILSCALE_OAUTH_CLIENT_SECRET
+```
+
+`RECALL_DATABASE_URL` must be a PlanetScale application role URL with
+`sslmode=verify-full&sslrootcert=system`. Bootstrap and migrate the database
+with a separate administrative credential, then retain only this
+least-privilege runtime URL in the injected environment. The provider token
+needs only database read/create permissions; the Tailscale OAuth client must be
+restricted to the dedicated gateway tag.
+
+After reviewing the zero-network preview and mode-0600 approval document, run
+the exact approved apply under 1Password injection:
+
+```bash
+OP_CACHE=false op run --environment "$APPROVED_ENV_ID" -- \
+  python -m recall_server.cli deployment-apply \
+  --manifest /private/recall-core.plan.json \
+  --approvals /private/approvals.json \
+  --planetscale-organization ORGANIZATION \
+  --database-name DATABASE \
+  --render-owner-id WORKSPACE_ID \
+  --core-name RECALL_CORE \
+  --embedding-name RECALL_EMBEDDING \
+  --gateway-name RECALL_GATEWAY \
+  --tailnet-hostname RECALL \
+  --tailnet-tag tag:recall
+```
+
+The command checks infrastructure approvals before reading any credential. Its
+stdout is content-free: actions, plan hash, and non-reversible resource
+receipts only. Writer cutover remains a separate approval.
+
 ## Existing host pilot
 
 The existing host pilot listens on a Unix socket, not TCP. Tailscale Serve is its only network proxy.

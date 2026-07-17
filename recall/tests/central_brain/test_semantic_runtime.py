@@ -38,12 +38,30 @@ class SemanticRuntimeContractTest(unittest.TestCase):
             planner_samples=1,
         )
 
-    def test_embedding_endpoint_is_local_only(self) -> None:
-        with self.assertRaisesRegex(ValueError, "loopback"):
+    def test_remote_embedding_endpoint_requires_exact_separate_approval(self) -> None:
+        with self.assertRaisesRegex(ValueError, "approved private endpoint"):
             SemanticRuntime(
-                embedding_url="https://provider.example", model="unsafe",
-                revision=DEFAULT_EMBEDDING_REVISION, dimensions=512,
+                embedding_url="http://embedding.internal:80",
+                model="unsafe",
+                revision=DEFAULT_EMBEDDING_REVISION,
+                dimensions=512,
             )
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            SemanticRuntime(
+                embedding_url="http://embedding.internal:80",
+                embedding_approved_url="http://other.internal:80",
+                model="unsafe",
+                revision=DEFAULT_EMBEDDING_REVISION,
+                dimensions=512,
+            )
+        runtime = SemanticRuntime(
+            embedding_url="http://embedding.internal:80",
+            embedding_approved_url="http://embedding.internal:80",
+            model="synthetic-embedding",
+            revision=DEFAULT_EMBEDDING_REVISION,
+            dimensions=512,
+        )
+        self.assertEqual(runtime.embedding_url, "http://embedding.internal:80")
 
     def test_planner_must_match_the_approved_router(self) -> None:
         with self.assertRaisesRegex(ValueError, "approved router"):
@@ -61,10 +79,12 @@ class SemanticRuntimeContractTest(unittest.TestCase):
     def test_transport_rejects_redirects(self) -> None:
         runtime = self.runtime()
         response = mock.MagicMock()
-        response.__enter__.return_value.read.return_value = b'{}'
+        response.__enter__.return_value.read.return_value = b"{}"
         opener = mock.MagicMock()
         opener.open.return_value = response
-        with mock.patch("recall_server.semantic.urllib.request.build_opener", return_value=opener) as build:
+        with mock.patch(
+            "recall_server.semantic.urllib.request.build_opener", return_value=opener
+        ) as build:
             self.assertEqual(runtime._post("http://127.0.0.1:8081/embed", {}), {})
         self.assertIsInstance(build.call_args.args[0], _RejectRedirect)
 
@@ -80,7 +100,9 @@ class SemanticRuntimeContractTest(unittest.TestCase):
         vector = [0.0] * 512
         with mock.patch.object(runtime, "_post", return_value=[vector]) as post:
             self.assertEqual(runtime.embed_query("find the rollout"), vector)
-        self.assertTrue(post.call_args.args[1]["inputs"][0].startswith(QUERY_INSTRUCTION))
+        self.assertTrue(
+            post.call_args.args[1]["inputs"][0].startswith(QUERY_INSTRUCTION)
+        )
         with mock.patch.object(runtime, "_post", return_value=[[0.0] * 8]):
             with self.assertRaisesRegex(ValueError, "dimensions"):
                 runtime.embed_documents(["bad"])
@@ -95,14 +117,24 @@ class SemanticRuntimeContractTest(unittest.TestCase):
         )
         runtime._embedding_identity_checked = True
         vector = [0.0] * 512
-        with mock.patch.object(runtime, "_post", side_effect=[
-            [vector, vector], [vector, vector], [vector],
-        ]) as post:
+        with mock.patch.object(
+            runtime,
+            "_post",
+            side_effect=[
+                [vector, vector],
+                [vector, vector],
+                [vector],
+            ],
+        ) as post:
             self.assertEqual(len(runtime.embed_documents(["a", "b", "c", "d", "e"])), 5)
-        self.assertEqual([len(call.args[1]["inputs"]) for call in post.call_args_list], [2, 2, 1])
+        self.assertEqual(
+            [len(call.args[1]["inputs"]) for call in post.call_args_list], [2, 2, 1]
+        )
         self.assertRegex(runtime.fingerprint, r"^[0-9a-f]{64}$")
 
-    def test_concurrent_embedding_calls_queue_through_the_single_local_sidecar(self) -> None:
+    def test_concurrent_embedding_calls_queue_through_the_single_local_sidecar(
+        self,
+    ) -> None:
         runtime = self.runtime()
         runtime._embedding_identity_checked = True
         vector = [0.0] * 512
@@ -136,7 +168,10 @@ class SemanticRuntimeContractTest(unittest.TestCase):
                 self.assertTrue(first_entered.wait(timeout=1))
                 time.sleep(0.05)
                 release_first.set()
-                self.assertEqual([future.result(timeout=1) for future in futures], [[vector], [vector]])
+                self.assertEqual(
+                    [future.result(timeout=1) for future in futures],
+                    [[vector], [vector]],
+                )
 
         self.assertEqual(maximum_active, 1)
 
@@ -161,14 +196,20 @@ class SemanticRuntimeContractTest(unittest.TestCase):
             "model_sha": DEFAULT_EMBEDDING_REVISION,
             "model_dtype": "float32",
         }
-        with mock.patch.object(runtime, "_get", return_value=info) as get, \
-                mock.patch.object(runtime, "_post", return_value=[vector]):
+        with (
+            mock.patch.object(runtime, "_get", return_value=info) as get,
+            mock.patch.object(runtime, "_post", return_value=[vector]),
+        ):
             self.assertEqual(runtime.embed_documents(["safe"]), [vector])
             self.assertEqual(runtime.embed_documents(["safe again"]), [vector])
         self.assertEqual(get.call_count, 1)
         mismatch = self.runtime()
-        with mock.patch.object(mismatch, "_get", return_value={**info, "model_sha": "0" * 40}), \
-                mock.patch.object(mismatch, "_post") as post:
+        with (
+            mock.patch.object(
+                mismatch, "_get", return_value={**info, "model_sha": "0" * 40}
+            ),
+            mock.patch.object(mismatch, "_post") as post,
+        ):
             with self.assertRaisesRegex(ValueError, "pinned runtime"):
                 mismatch.embed_documents(["must stay local"])
         post.assert_not_called()
@@ -179,16 +220,27 @@ class SemanticRuntimeContractTest(unittest.TestCase):
             key.write_text("short-lived-synthetic-key")
             os.chmod(key, 0o600)
             runtime = self.runtime(str(key))
-            response = {"choices": [{"message": {"content": (
-                '```json\n{"searchable":true,"phrases":["retry budget",'
-                '"retry budget","event replay"]}\n```'
-            )}}]}
+            response = {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '```json\n{"searchable":true,"phrases":["retry budget",'
+                                '"retry budget","event replay"]}\n```'
+                            )
+                        }
+                    }
+                ]
+            }
             with mock.patch.object(runtime, "_post", return_value=response) as post:
                 self.assertEqual(
                     runtime.plan("bounded attempts"),
                     SearchPlan(True, ("retry budget", "event replay")),
                 )
-            self.assertEqual(post.call_args.args[2]["Authorization"], "Bearer short-lived-synthetic-key")
+            self.assertEqual(
+                post.call_args.args[2]["Authorization"],
+                "Bearer short-lived-synthetic-key",
+            )
             os.chmod(key, 0o644)
             with self.assertRaisesRegex(PermissionError, "owner-only"):
                 runtime.plan("a different query")
@@ -210,14 +262,29 @@ class SemanticRuntimeContractTest(unittest.TestCase):
                 planner_samples=1,
                 cache_size=1,
             )
-            response = {"choices": [{"message": {"content": (
-                '{"searchable":true,"phrases":["advisory lock"]}'
-            )}}]}
+            response = {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"searchable":true,"phrases":["advisory lock"]}'
+                            )
+                        }
+                    }
+                ]
+            }
             vector = [0.0] * 512
             runtime._embedding_identity_checked = True
-            with mock.patch.object(runtime, "_post", side_effect=[response, [vector]]) as post:
-                self.assertEqual(runtime.plan("duplicate work"), runtime.plan("duplicate work"))
-                self.assertEqual(runtime.embed_query("duplicate work"), runtime.embed_query("duplicate work"))
+            with mock.patch.object(
+                runtime, "_post", side_effect=[response, [vector]]
+            ) as post:
+                self.assertEqual(
+                    runtime.plan("duplicate work"), runtime.plan("duplicate work")
+                )
+                self.assertEqual(
+                    runtime.embed_query("duplicate work"),
+                    runtime.embed_query("duplicate work"),
+                )
             self.assertEqual(post.call_count, 2)
             self.assertNotIn("duplicate work", runtime._plan_cache)
             self.assertNotIn("duplicate work", runtime._query_embedding_cache)
@@ -238,10 +305,20 @@ class SemanticRuntimeContractTest(unittest.TestCase):
                 planner_key_file=str(key),
                 planner_samples=2,
             )
-            response = {"choices": [{"message": {"content": (
-                '{"searchable":true,"phrases":["token refresh","credential renewal"]}'
-            )}}]}
-            with mock.patch.object(runtime, "_post", side_effect=[response, TimeoutError("synthetic")]):
+            response = {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"searchable":true,"phrases":["token refresh","credential renewal"]}'
+                            )
+                        }
+                    }
+                ]
+            }
+            with mock.patch.object(
+                runtime, "_post", side_effect=[response, TimeoutError("synthetic")]
+            ):
                 self.assertEqual(
                     runtime.plan("renew credentials"),
                     SearchPlan(True, ("token refresh", "credential renewal")),

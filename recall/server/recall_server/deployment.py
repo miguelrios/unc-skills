@@ -53,8 +53,13 @@ def validate_manifest(value: object) -> dict[str, Any]:
     manifest = _keys(
         value,
         {
-            "schema_version", "deployment_name", "image", "database",
-            "service", "network", "authorization",
+            "schema_version",
+            "deployment_name",
+            "image",
+            "database",
+            "service",
+            "network",
+            "authorization",
         },
         "manifest",
     )
@@ -64,33 +69,57 @@ def validate_manifest(value: object) -> dict[str, Any]:
         manifest["deployment_name"],
     ):
         raise DeploymentManifestError("invalid deployment name")
-    if not isinstance(manifest["image"], str) or not IMAGE_RE.fullmatch(manifest["image"]):
+    if not isinstance(manifest["image"], str) or not IMAGE_RE.fullmatch(
+        manifest["image"]
+    ):
         raise DeploymentManifestError("image must be pinned by sha256 digest")
 
     database = _keys(
-        manifest["database"], {"adapter", "provider", "url_ref", "tls_mode"}, "database",
+        manifest["database"],
+        {"adapter", "provider", "url_ref", "tls_mode"},
+        "database",
     )
     if database["adapter"] != "postgres" or database["provider"] not in {
-        "planetscale", "supabase", "neon", "standard-postgres",
+        "planetscale",
+        "supabase",
+        "neon",
+        "standard-postgres",
     }:
         raise DeploymentManifestError("unsupported database adapter")
-    if not isinstance(database["url_ref"], str) or not SECRET_REF_RE.fullmatch(database["url_ref"]):
+    if not isinstance(database["url_ref"], str) or not SECRET_REF_RE.fullmatch(
+        database["url_ref"]
+    ):
         raise DeploymentManifestError("database URL must be a secret reference")
     if database["tls_mode"] != "verify-full":
         raise DeploymentManifestError("database TLS must verify server identity")
 
     service = _keys(
         manifest["service"],
-        {"adapter", "region_ref", "billing_ref", "public_ingress"},
+        {
+            "adapter",
+            "embedding_image",
+            "region_ref",
+            "billing_ref",
+            "public_ingress",
+        },
         "service",
     )
-    if service["adapter"] != "render-private-service" or service["public_ingress"] is not False:
+    if (
+        service["adapter"] != "render-private-service"
+        or service["public_ingress"] is not False
+    ):
         raise DeploymentManifestError("service must be private")
+    if not isinstance(service["embedding_image"], str) or not IMAGE_RE.fullmatch(
+        service["embedding_image"]
+    ):
+        raise DeploymentManifestError("embedding image must be pinned by sha256 digest")
     _approval(service["region_ref"], "provider-region")
     _approval(service["billing_ref"], "provider-billing")
 
     network = _keys(
-        manifest["network"], {"adapter", "route_ref", "listen_port"}, "network",
+        manifest["network"],
+        {"adapter", "gateway_image", "route_ref", "listen_port"},
+        "network",
     )
     port = network["listen_port"]
     if (
@@ -100,10 +129,16 @@ def validate_manifest(value: object) -> dict[str, Any]:
         or port == 443
     ):
         raise DeploymentManifestError("unsupported private network profile")
+    if not isinstance(network["gateway_image"], str) or not IMAGE_RE.fullmatch(
+        network["gateway_image"]
+    ):
+        raise DeploymentManifestError("gateway image must be pinned by sha256 digest")
     _approval(network["route_ref"], "tailnet-route")
 
     authorization = _keys(
-        manifest["authorization"], {"provider_ref", "cutover_ref"}, "authorization",
+        manifest["authorization"],
+        {"provider_ref", "cutover_ref"},
+        "authorization",
     )
     _approval(authorization["provider_ref"], "provider-authorization")
     _approval(authorization["cutover_ref"], "writer-cutover")
@@ -137,13 +172,21 @@ def load_manifest(path: Path) -> dict[str, Any]:
 def preview(manifest: dict[str, Any]) -> dict[str, Any]:
     validated = validate_manifest(manifest)
     canonical = json.dumps(
-        validated, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        validated,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
     ).encode()
     return {
         "schema_version": 1,
         "status": "approval_required",
         "plan_sha256": hashlib.sha256(canonical).hexdigest(),
-        "resources": ["postgres-database", "private-service", "tailscale-gateway"],
+        "resources": [
+            "postgres-database",
+            "private-service",
+            "embedding-service",
+            "tailscale-gateway",
+        ],
         "pending_gates": list(PENDING_GATES),
         "runtime_contract": {
             "image": "digest-pinned",

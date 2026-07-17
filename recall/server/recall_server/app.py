@@ -13,6 +13,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 from .db import BrainStore, IdempotencyConflict
+from .mcp import (
+    SUPPORTED_PROTOCOL_VERSIONS,
+    McpProtocolError,
+    dispatch as dispatch_mcp,
+    error_response as mcp_error_response,
+)
 from .semantic import SemanticRuntime
 
 LOG = logging.getLogger("recall.brainstore")
@@ -33,7 +39,12 @@ class Handler(BaseHTTPRequestHandler):
     store: BrainStore
 
     def log_message(self, fmt: str, *args) -> None:
-        LOG.info("http method=%s path=%s status=%s", self.command, self.path.split("?", 1)[0], args[1] if len(args) > 1 else "unknown")
+        LOG.info(
+            "http method=%s path=%s status=%s",
+            self.command,
+            self.path.split("?", 1)[0],
+            args[1] if len(args) > 1 else "unknown",
+        )
 
     def send_json(self, status: int, body: object) -> None:
         if status >= 400:
@@ -50,6 +61,62 @@ class Handler(BaseHTTPRequestHandler):
             # The database work may have completed after a bounded client left.
             # Never turn that ordinary transport event into a content-bearing traceback.
             return
+
+    def send_empty(self, status: int, headers: dict[str, str] | None = None) -> None:
+        if status >= 400:
+            with COUNTER_LOCK:
+                COUNTERS["http_errors"] += 1
+        self.send_response(status)
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def valid_mcp_origin(self) -> bool:
+        origin = self.headers.get("Origin")
+        if origin is None:
+            return True
+        allowed = {
+            value.strip()
+            for value in os.environ.get("RECALL_MCP_ALLOWED_ORIGINS", "").split(",")
+            if value.strip()
+        }
+        if origin in allowed:
+            return True
+        self.send_json(
+            403,
+            mcp_error_response(McpProtocolError(-32000, "invalid origin")),
+        )
+        return False
+
+    def valid_mcp_accept(self, *, get: bool = False) -> bool:
+        accepted = {
+            value.split(";", 1)[0].strip().casefold()
+            for value in self.headers.get("Accept", "").split(",")
+            if value.strip()
+        }
+        required = (
+            {"text/event-stream"} if get else {"application/json", "text/event-stream"}
+        )
+        if required.issubset(accepted):
+            return True
+        self.send_json(
+            406,
+            mcp_error_response(McpProtocolError(-32000, "unsupported accept types")),
+        )
+        return False
+
+    def valid_mcp_protocol(self) -> bool:
+        version = self.headers.get("MCP-Protocol-Version")
+        if version is None or version in SUPPORTED_PROTOCOL_VERSIONS:
+            return True
+        self.send_json(
+            400,
+            mcp_error_response(
+                McpProtocolError(-32600, "unsupported MCP protocol version")
+            ),
+        )
+        return False
 
     def body_length(self, maximum: int) -> int | None:
         try:
@@ -69,13 +136,28 @@ class Handler(BaseHTTPRequestHandler):
         if authorization is not None:
             if not authorization.startswith("Bearer "):
                 return None
-            credential = self.store.authenticate_bearer(authorization.removeprefix("Bearer ").strip(), scope)
+            credential = self.store.authenticate_bearer(
+                authorization.removeprefix("Bearer ").strip(), scope
+            )
             if not credential:
                 return None
-            return {"kind": "collector", "name": credential["name"], "source_id": credential["source_id"]}
-        if os.environ.get("RECALL_TRUST_TAILSCALE_HEADERS", "0") == "1" and self.trusted_proxy_peer():
+            return {
+                "kind": "collector",
+                "name": credential["name"],
+                "source_id": credential["source_id"],
+            }
+        if (
+            os.environ.get("RECALL_TRUST_TAILSCALE_HEADERS", "0") == "1"
+            and self.trusted_proxy_peer()
+        ):
             login = self.headers.get("Tailscale-User-Login")
-            allowed = {value.strip().casefold() for value in os.environ.get("RECALL_ALLOWED_TAILSCALE_USERS", "").split(",") if value.strip()}
+            allowed = {
+                value.strip().casefold()
+                for value in os.environ.get("RECALL_ALLOWED_TAILSCALE_USERS", "").split(
+                    ","
+                )
+                if value.strip()
+            }
             if login and login.casefold() in allowed:
                 return {"kind": "tailscale-user", "name": login}
         return None
@@ -86,14 +168,25 @@ class Handler(BaseHTTPRequestHandler):
             LOG.warning("tailscale identity rejected transport=tcp")
             return False
         try:
-            pid, uid, _gid = struct.unpack("3i", self.connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+            pid, uid, _gid = struct.unpack(
+                "3i",
+                self.connection.getsockopt(
+                    socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
+                ),
+            )
             trusted_uids = {
                 int(value.strip())
                 for value in os.environ.get("RECALL_TRUSTED_PROXY_UIDS", "0").split(",")
                 if value.strip().isdigit()
             }
             trusted = uid in trusted_uids
-            LOG.info("tailscale proxy peer trusted=%s uid=%s pid=%s identity_header_present=%s", trusted, uid, pid, bool(self.headers.get("Tailscale-User-Login")))
+            LOG.info(
+                "tailscale proxy peer trusted=%s uid=%s pid=%s identity_header_present=%s",
+                trusted,
+                uid,
+                pid,
+                bool(self.headers.get("Tailscale-User-Login")),
+            )
             return trusted
         except (AttributeError, OSError, struct.error):
             LOG.exception("tailscale identity rejected reason=peer_credential_error")
@@ -155,6 +248,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
+        if parsed.path == "/mcp":
+            if not self.valid_mcp_origin():
+                return
+            if not self.valid_mcp_accept(get=True):
+                return
+            if not self.require("read"):
+                return
+            self.send_empty(405, {"Allow": "POST"})
+            return
         if parsed.path == "/healthz":
             self.send_json(200, {"status": "ok"})
             return
@@ -169,7 +271,11 @@ class Handler(BaseHTTPRequestHandler):
             if not self.require("metrics"):
                 return
             data = self.metrics()
-            self.send_response(200); self.send_header("Content-Type", "text/plain; version=0.0.4"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; version=0.0.4")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
             return
         if parsed.path == "/v1/receipts/resolve":
             principal = self.require("read")
@@ -178,20 +284,89 @@ class Handler(BaseHTTPRequestHandler):
             receipt = parse_qs(parsed.query).get("receipt", [""])[0]
             try:
                 result = self.store.resolve(
-                    receipt, authorized_source=principal.get("source_id"),
+                    receipt,
+                    authorized_source=principal.get("source_id"),
                 )
             except ValueError as exc:
-                self.send_json(400, {"error": str(exc)}); return
-            self.send_json(200 if result else 404, result or {"error": "not found"}); return
+                self.send_json(400, {"error": str(exc)})
+                return
+            self.send_json(200 if result else 404, result or {"error": "not found"})
+            return
         if parsed.path == "/v1/doctor":
             principal = self.require("read")
             if not principal:
                 return
-            self.send_json(200, self.store.doctor(principal.get("source_id"))); return
+            self.send_json(200, self.store.doctor(principal.get("source_id")))
+            return
         self.send_json(404, {"error": "not found"})
 
     def do_POST(self) -> None:
         path = urlsplit(self.path).path
+        if path == "/mcp":
+            if not self.valid_mcp_origin():
+                return
+            if not self.valid_mcp_accept():
+                return
+            if not self.valid_mcp_protocol():
+                return
+            principal = self.require("read")
+            if not principal:
+                return
+            content_type = (
+                self.headers.get("Content-Type", "").split(";", 1)[0].strip().casefold()
+            )
+            if content_type != "application/json":
+                self.send_json(
+                    415,
+                    mcp_error_response(
+                        McpProtocolError(
+                            -32700, "content type must be application/json"
+                        )
+                    ),
+                )
+                return
+            length = self.body_length(256 * 1024)
+            if length is None:
+                return
+            request_id = None
+            try:
+                body = json.loads(self.rfile.read(length))
+                if isinstance(body, dict):
+                    request_id = body.get("id")
+                response = dispatch_mcp(self.store, principal, body)
+            except json.JSONDecodeError:
+                self.send_json(
+                    400,
+                    mcp_error_response(McpProtocolError(-32700, "invalid JSON")),
+                )
+                return
+            except McpProtocolError as exc:
+                self.send_json(200, mcp_error_response(exc, request_id))
+                return
+            except (ValueError, TypeError):
+                self.send_json(
+                    200,
+                    mcp_error_response(
+                        McpProtocolError(-32602, "tool arguments rejected"),
+                        request_id,
+                    ),
+                )
+                return
+            except Exception as exc:
+                LOG.error("mcp tool failed type=%s", type(exc).__name__)
+                self.send_json(
+                    200,
+                    mcp_error_response(
+                        McpProtocolError(-32603, "tool execution failed"),
+                        request_id,
+                    ),
+                )
+                return
+            if response is None:
+                self.send_empty(202)
+            else:
+                self.send_json(200, response)
+            return
         if path in {"/v1/search", "/v1/show", "/v1/related", "/v1/session-export"}:
             principal = self.require("read")
             if not principal:
@@ -203,40 +378,59 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 body = json.loads(self.rfile.read(length))
                 if path == "/v1/search":
-                    result = self.store.search(body.get("query"), body.get("filters", {}), body.get("limit", 10), authorized_source)
+                    result = self.store.search(
+                        body.get("query"),
+                        body.get("filters", {}),
+                        body.get("limit", 10),
+                        authorized_source,
+                    )
                     timing = result.get("diagnostics", {})
                     LOG.info(
                         "search timing elapsed_ms=%s deadline_ms=%s deadline_exceeded=%s legs=%s",
-                        timing.get("elapsed_ms"), timing.get("deadline_ms"), timing.get("deadline_exceeded"),
-                        ",".join(str(item.get("leg")) for item in timing.get("legs", [])),
+                        timing.get("elapsed_ms"),
+                        timing.get("deadline_ms"),
+                        timing.get("deadline_exceeded"),
+                        ",".join(
+                            str(item.get("leg")) for item in timing.get("legs", [])
+                        ),
                     )
                 elif path == "/v1/show":
                     result = self.store.show(
-                        body.get("target", ""), around=body.get("around"),
-                        tail=body.get("tail", 0), prompts=bool(body.get("prompts", False)),
+                        body.get("target", ""),
+                        around=body.get("around"),
+                        tail=body.get("tail", 0),
+                        prompts=bool(body.get("prompts", False)),
                         authorized_source=authorized_source,
                     )
                     if result is None:
-                        self.send_json(404, {"error": "not found"}); return
+                        self.send_json(404, {"error": "not found"})
+                        return
                 elif path == "/v1/related":
                     result = self.store.related(
-                        cwd=body.get("cwd"), branch=body.get("branch"), limit=body.get("limit", 10),
-                        mains_only=bool(body.get("mains_only", False)), fast=bool(body.get("fast", False)),
+                        cwd=body.get("cwd"),
+                        branch=body.get("branch"),
+                        limit=body.get("limit", 10),
+                        mains_only=bool(body.get("mains_only", False)),
+                        fast=bool(body.get("fast", False)),
                         authorized_source=authorized_source,
                     )
                 else:
                     result = self.store.session_export(
-                        target=body.get("target"), cursor=body.get("cursor"),
-                        limit=body.get("limit", 1000), authorized_source=authorized_source,
+                        target=body.get("target"),
+                        cursor=body.get("cursor"),
+                        limit=body.get("limit", 1000),
+                        authorized_source=authorized_source,
                     )
                     if result is None:
-                        self.send_json(404, {"error": "not found"}); return
+                        self.send_json(404, {"error": "not found"})
+                        return
                 self.send_json(200, result)
             except (ValueError, TypeError, json.JSONDecodeError) as exc:
                 self.send_json(400, {"error": str(exc)})
             return
         if path != "/v1/ingest/batches":
-            self.send_json(404, {"error": "not found"}); return
+            self.send_json(404, {"error": "not found"})
+            return
         principal = self.require("write")
         if not principal:
             return
@@ -246,12 +440,17 @@ class Handler(BaseHTTPRequestHandler):
         try:
             body = json.loads(self.rfile.read(length))
             if principal.get("kind") == "collector" and principal.get("source_id"):
-                if any(event.get("source_id") != principal["source_id"] for event in body["events"]):
+                if any(
+                    event.get("source_id") != principal["source_id"]
+                    for event in body["events"]
+                ):
                     with COUNTER_LOCK:
                         COUNTERS["auth_denied"] += 1
                     self.send_json(403, {"error": "collector source scope mismatch"})
                     return
-            ack, replay = self.store.ingest(self.headers.get("Idempotency-Key", ""), body["events"])
+            ack, replay = self.store.ingest(
+                self.headers.get("Idempotency-Key", ""), body["events"]
+            )
             with COUNTER_LOCK:
                 COUNTERS["ingest_replays" if replay else "ingest_commits"] += 1
             self.send_json(200 if replay else 201, {**ack, "replay": replay})
@@ -268,7 +467,9 @@ class Handler(BaseHTTPRequestHandler):
             # Never let driver exceptions render payload excerpts through socketserver tracebacks.
             LOG.error("ingest failed type=%s", type(exc).__name__)
             try:
-                self.store.record_dead_letter(type(exc).__name__, "database rejected ingest")
+                self.store.record_dead_letter(
+                    type(exc).__name__, "database rejected ingest"
+                )
             except Exception:
                 LOG.error("dead-letter write failed after ingest error")
             self.send_json(500, {"error": "ingest failed"})
@@ -276,7 +477,9 @@ class Handler(BaseHTTPRequestHandler):
 
 def serve(dsn: str, host: str = "127.0.0.1", port: int = 8788) -> None:
     if os.environ.get("RECALL_AUTH_REQUIRED", "0") != "1" and host not in {
-        "127.0.0.1", "localhost", "::1",
+        "127.0.0.1",
+        "localhost",
+        "::1",
     }:
         raise RuntimeError("authentication is required for a non-loopback TCP bind")
     Handler.store = BrainStore(dsn, semantic_runtime=SemanticRuntime.from_env())
@@ -285,7 +488,9 @@ def serve(dsn: str, host: str = "127.0.0.1", port: int = 8788) -> None:
     server.serve_forever()
 
 
-class ThreadingUnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+class ThreadingUnixHTTPServer(
+    socketserver.ThreadingMixIn, socketserver.UnixStreamServer
+):
     daemon_threads = True
     is_unix_socket = True
 
@@ -314,8 +519,14 @@ def serve_unix(dsn: str, path: str) -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format="%(levelname)s %(message)s")
+    logging.basicConfig(
+        level=os.environ.get("LOG_LEVEL", "INFO"), format="%(levelname)s %(message)s"
+    )
     if os.environ.get("RECALL_UNIX_SOCKET"):
         serve_unix(os.environ["RECALL_DATABASE_URL"], os.environ["RECALL_UNIX_SOCKET"])
     else:
-        serve(os.environ["RECALL_DATABASE_URL"], os.environ.get("RECALL_HOST", "127.0.0.1"), int(os.environ.get("RECALL_PORT", "8788")))
+        serve(
+            os.environ["RECALL_DATABASE_URL"],
+            os.environ.get("RECALL_HOST", "127.0.0.1"),
+            int(os.environ.get("RECALL_PORT", "8788")),
+        )
