@@ -1,5 +1,8 @@
 name: recall-ci
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: ["main"]
@@ -61,4 +64,18 @@ jobs:
           do
             python "server/tests/$test"
           done
+      - name: Immutable Recall Core container contract
+        env:
+          RECALL_CORE_IMAGE: recall-core:ci
+        run: |
+          docker build --pull --tag "$RECALL_CORE_IMAGE" --file server/Dockerfile .
+          python server/tests/e2e_core_container.py
+      - name: Recall Core image vulnerability gate
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: recall-core:ci
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
       - run: npm pack --dry-run

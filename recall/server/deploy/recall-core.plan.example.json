@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "deployment_name": "synthetic-recall-core",
+  "image": "registry.example.invalid/recall-core@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "database": {
+    "adapter": "postgres",
+    "provider": "planetscale",
+    "url_ref": "secret://runtime/RECALL_DATABASE_URL",
+    "tls_mode": "verify-full"
+  },
+  "service": {
+    "adapter": "render-private-service",
+    "region_ref": "approval://provider-region",
+    "billing_ref": "approval://provider-billing",
+    "public_ingress": false
+  },
+  "network": {
+    "adapter": "tailscale-gateway",
+    "route_ref": "approval://tailnet-route",
+    "listen_port": 9443
+  },
+  "authorization": {
+    "provider_ref": "approval://provider-authorization",
+    "cutover_ref": "approval://writer-cutover"
+  }
+}

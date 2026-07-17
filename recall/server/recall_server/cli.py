@@ -4,10 +4,14 @@ import argparse
 import json
 import logging
 import os
+import sys
+from pathlib import Path
 
 from . import SCHEMA_VERSION
 from .app import serve, serve_unix
+from .capabilities import CapabilityError, probe_database
 from .db import BrainStore
+from .deployment import DeploymentManifestError, load_manifest, preview
 from .federation import QUALITY_SCORES, SOURCE_FAMILIES
 from .semantic import SemanticRuntime
 
@@ -18,6 +22,10 @@ def main() -> None:
     ap.add_argument("--dsn", default=os.environ.get("RECALL_DATABASE_URL"))
     sub = ap.add_subparsers(dest="command", required=True)
     sub.add_parser("migrate")
+    capability = sub.add_parser("capability-check")
+    capability.add_argument("--profile", choices=("production", "local-fixture"), default="production")
+    deployment = sub.add_parser("deployment-preview")
+    deployment.add_argument("--manifest", type=Path, required=True)
     sub.add_parser("rebuild")
     backfill_entities = sub.add_parser("backfill-entities")
     backfill_entities.add_argument("--batch-size", type=int, default=5000)
@@ -46,10 +54,37 @@ def main() -> None:
     source_alias.add_argument("alias")
     source_alias.add_argument("source_id")
     sub.add_parser("federation-scoreboard")
-    server = sub.add_parser("serve"); server.add_argument("--host", default="127.0.0.1"); server.add_argument("--port", type=int, default=8788); server.add_argument("--unix-socket")
+    server = sub.add_parser("serve")
+    server.add_argument("--host", default="127.0.0.1")
+    server.add_argument("--port", type=int, default=8788)
+    server.add_argument("--unix-socket")
+    server.add_argument("--require-auth", action="store_true")
+    server.add_argument(
+        "--capability-profile", choices=("production", "local-fixture"),
+    )
     args = ap.parse_args()
+    if args.command == "deployment-preview":
+        try:
+            print(json.dumps(preview(load_manifest(args.manifest)), sort_keys=True))
+        except DeploymentManifestError:
+            print(json.dumps({"status": "rejected", "code": "manifest_invalid"}), file=sys.stderr)
+            raise SystemExit(2) from None
+        return
     if not args.dsn:
         ap.error("--dsn or RECALL_DATABASE_URL is required")
+    if args.command == "capability-check":
+        try:
+            print(json.dumps(probe_database(args.dsn, args.profile), sort_keys=True))
+        except CapabilityError as error:
+            print(json.dumps({"status": "rejected", "code": error.code}), file=sys.stderr)
+            raise SystemExit(2) from None
+        return
+    if args.command == "serve" and args.capability_profile:
+        try:
+            probe_database(args.dsn, args.capability_profile)
+        except CapabilityError as error:
+            print(json.dumps({"status": "rejected", "code": error.code}), file=sys.stderr)
+            raise SystemExit(2) from None
     store = BrainStore(args.dsn, semantic_runtime=SemanticRuntime.from_env())
     if args.command == "migrate":
         store.migrate(); print(json.dumps({"status": "ok", "schema_version": SCHEMA_VERSION}))
@@ -92,6 +127,8 @@ def main() -> None:
     elif args.command == "federation-scoreboard":
         print(json.dumps(store.federation_scoreboard(), sort_keys=True))
     else:
+        if args.require_auth:
+            os.environ["RECALL_AUTH_REQUIRED"] = "1"
         if args.unix_socket:
             serve_unix(args.dsn, args.unix_socket)
         else:
