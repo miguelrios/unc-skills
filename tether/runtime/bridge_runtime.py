@@ -613,6 +613,16 @@ class Broker:
         if not channel.startswith("C") or channel in self._joined_channels:
             return
         try:
+            info = _slack_call(
+                self.token, "conversations.info", {"channel": channel, "include_num_members": False},
+            )
+            conversation = info.get("channel") if isinstance(info, dict) else None
+            if isinstance(conversation, dict) and any(
+                conversation.get(flag)
+                for flag in ("is_im", "is_mpim", "is_private", "is_member")
+            ):
+                self._joined_channels.add(channel)
+                return
             _slack_call(self.token, "conversations.join", {"channel": channel})
         except RuntimeError as exc:
             raise RuntimeError(
@@ -672,6 +682,7 @@ class Broker:
             raise RuntimeError("Slack opened a DM without returning a valid channel")
         request = BridgeRequest(incoming)
         request["channel_id"] = str(channel["id"])
+        self._joined_channels.add(request["channel_id"])
         request["_skip_channel_join"] = True
         if not request.get("team_id"):
             request["team_id"] = str(self._identity().get("team_id") or config.team_id)
