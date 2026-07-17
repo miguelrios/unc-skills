@@ -68,6 +68,23 @@ def detected_source(args: argparse.Namespace) -> tuple[str, dict[str, str]]:
     raise SystemExit("No resumable context found; pass --run-id for a headless run")
 
 
+def attached_source(args: argparse.Namespace) -> tuple[str, dict[str, str]]:
+    if args.claude_session_id:
+        return "claude_session", {
+            "session_id": args.claude_session_id,
+            "cwd": str(Path(args.cwd or Path.cwd()).resolve()),
+        }
+    return detected_source(args)
+
+
+def ambient_zellij_source() -> tuple[str, dict[str, str]]:
+    session = os.getenv("ZELLIJ_SESSION_NAME", "")
+    pane = os.getenv("ZELLIJ_PANE_ID", "")
+    if not session or not pane:
+        raise SystemExit("rebind must run inside the intended live Zellij pane")
+    return "zellij_pane", zellij_pane_identity(session, pane, str(Path.cwd()))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Send or answer a resumable Hermes Slack thread")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -80,9 +97,34 @@ def build_parser() -> argparse.ArgumentParser:
     notify.add_argument("--run-id")
     notify.add_argument("--hermes-session-id")
     notify.add_argument("--file")
+    dm = sub.add_parser("dm")
+    dm.add_argument("--user", action="append", required=True, dest="users")
+    dm.add_argument("--text", required=True)
+    dm.add_argument("--owner")
+    dm.add_argument("--team")
+    dm.add_argument("--idempotency-key", default="")
+    dm.add_argument("--run-id")
+    dm.add_argument("--hermes-session-id")
+    dm.add_argument("--file")
     reply = sub.add_parser("reply")
     reply.add_argument("--bridge-id", required=True)
     reply.add_argument("--text", required=True)
+    attach = sub.add_parser("attach")
+    attach.add_argument("--channel", required=True)
+    attach.add_argument("--thread-ts", required=True)
+    attach.add_argument("--owner")
+    attach.add_argument("--team")
+    attach.add_argument("--idempotency-key", required=True)
+    attach.add_argument("--claude-session-id")
+    attach.add_argument("--run-id")
+    attach.add_argument("--hermes-session-id")
+    attach.add_argument("--cwd")
+    attach.add_argument("--json", action="store_true")
+    rebind = sub.add_parser("rebind")
+    rebind.add_argument("--channel", required=True)
+    rebind.add_argument("--thread-ts", required=True)
+    rebind.add_argument("--team")
+    rebind.add_argument("--json", action="store_true")
     post = sub.add_parser("post")
     post.add_argument("--channel", required=True)
     post.add_argument("--thread-ts", required=True)
@@ -216,6 +258,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_setup(args)
     if args.command == "reply":
         result = broker_call({"op": "reply", "bridge_id": args.bridge_id, "text": args.text})
+    elif args.command == "dm":
+        kind, source = detected_source(args)
+        result = broker_call({
+            "op": "dm_notify", "text": args.text, "source_kind": kind, "source": source,
+            "owner_user_id": args.owner or "", "team_id": args.team or "",
+            "idempotency_key": args.idempotency_key or str(uuid.uuid4()),
+            "file_path": args.file, "user_ids": args.users,
+        })
+    elif args.command == "attach":
+        kind, source = attached_source(args)
+        result = broker_call({
+            "op": "attach", "source_kind": kind, "source": source,
+            "owner_user_id": args.owner or "", "channel_id": args.channel,
+            "team_id": args.team or "", "thread_ts": args.thread_ts,
+            "idempotency_key": args.idempotency_key,
+        })
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False))
+            return 0
+    elif args.command == "rebind":
+        kind, source = ambient_zellij_source()
+        result = broker_call({
+            "op": "rebind", "source_kind": kind, "source": source,
+            "channel_id": args.channel, "team_id": args.team or "",
+            "thread_ts": args.thread_ts,
+        })
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False))
+            return 0
     elif args.command == "post":
         result = broker_call({
             "op": "thread_reply", "channel_id": args.channel,

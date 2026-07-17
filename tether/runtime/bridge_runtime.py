@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import datetime
 import hashlib
 import json
 import http.client
@@ -30,10 +31,12 @@ HERMES_HOME = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")).expan
 DATA_HOME = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")).expanduser()
 CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")).expanduser()
 RUNTIME_HOME = DATA_HOME / "tether"
+INBOX_HOME = RUNTIME_HOME / "inbox"
 CONFIG_PATH = Path(os.environ.get("TETHER_CONFIG", CONFIG_HOME / "tether" / "config.toml")).expanduser()
 DB_PATH = HERMES_HOME / "bridges.db"
 SOCKET_PATH = HERMES_HOME / "bridge.sock"
 ID_PATTERN = re.compile(r"^[A-Z][A-Z0-9]{7,}$")
+CHANNEL_ID_PATTERN = re.compile(r"^[CDG][A-Z0-9]{7,}$")
 SECRET_PATTERNS = (
     (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"), "[REDACTED_SLACK_TOKEN]"),
     (re.compile(r"\bxap[p]-[A-Za-z0-9-]{10,}\b"), "[REDACTED_SLACK_APP_TOKEN]"),
@@ -52,6 +55,7 @@ MAX_TEXT = 35_000
 MAX_NATIVE_OUTPUT = 35_000
 MAX_SOURCE_VALUE = 4_096
 MAX_IDEMPOTENCY_KEY = 256
+MAX_VISIBLE_PANE_INPUT = 800
 SOURCE_FIELDS = {
     "zellij_pane": frozenset({
         "session_name", "pane_id", "zellij_session", "zellij_pane_id", "cwd",
@@ -73,6 +77,7 @@ SLACK_METHOD_PATHS = {
     "chat.postMessage": "/api/chat.postMessage",
     "conversations.history": "/api/conversations.history",
     "conversations.join": "/api/conversations.join",
+    "conversations.open": "/api/conversations.open",
     "conversations.replies": "/api/conversations.replies",
 }
 class BridgeRequest(TypedDict, total=False):
@@ -88,6 +93,7 @@ class BridgeRequest(TypedDict, total=False):
     bridge_id: str
     file_path: str | None
     limit: int
+    user_ids: list[str]
 
 
 @dataclass(frozen=True)
@@ -131,7 +137,7 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
     default_channel = str(raw.get("default_channel") or "")
     default_owner = str(raw.get("default_owner") or "")
     team_id = str(raw.get("team_id") or "")
-    if default_channel and not ID_PATTERN.fullmatch(default_channel):
+    if default_channel and not CHANNEL_ID_PATTERN.fullmatch(default_channel):
         raise ValueError("default_channel is not a valid Slack channel ID")
     if default_owner and default_owner != "*" and not ID_PATTERN.fullmatch(default_owner):
         raise ValueError("default_owner is not a valid Slack member ID")
@@ -218,6 +224,18 @@ class Store:
                   event_id TEXT PRIMARY KEY, bridge_id TEXT NOT NULL,
                   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
+                CREATE TABLE IF NOT EXISTS thread_participation (
+                  team_id TEXT NOT NULL DEFAULT '', channel_id TEXT NOT NULL,
+                  thread_ts TEXT NOT NULL,
+                  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  PRIMARY KEY (team_id, channel_id, thread_ts)
+                );
+                CREATE TABLE IF NOT EXISTS thread_ingress (
+                  event_id TEXT PRIMARY KEY,
+                  team_id TEXT NOT NULL DEFAULT '', channel_id TEXT NOT NULL,
+                  thread_ts TEXT NOT NULL,
+                  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
                 """
             )
             columns = {row[1] for row in db.execute("PRAGMA table_info(bridge_events)")}
@@ -272,7 +290,7 @@ class Store:
         channel = str(request["channel_id"])
         owner = str(request["owner_user_id"])
         team = str(request.get("team_id") or "")
-        if not ID_PATTERN.fullmatch(channel) or (owner != "*" and not ID_PATTERN.fullmatch(owner)):
+        if not CHANNEL_ID_PATTERN.fullmatch(channel) or (owner != "*" and not ID_PATTERN.fullmatch(owner)):
             raise ValueError("invalid Slack channel or owner ID")
         if team and not ID_PATTERN.fullmatch(team):
             raise ValueError("invalid Slack workspace ID")
@@ -313,6 +331,101 @@ class Store:
                 ).fetchone()
             return self.decode(row)
 
+    def replace_source(self, bridge_id: str, kind: str, raw_source: dict[str, Any]) -> Bridge:
+        if kind not in SOURCE_FIELDS:
+            raise ValueError("unsupported bridge source kind")
+        if not isinstance(raw_source, dict) or set(raw_source) - SOURCE_FIELDS[kind]:
+            raise ValueError("invalid bridge source")
+        if not all(isinstance(key, str) and isinstance(value, str) for key, value in raw_source.items()):
+            raise ValueError("bridge source values must be strings")
+        source = {key: value for key, value in raw_source.items() if value}
+        if any(len(value) > MAX_SOURCE_VALUE for value in source.values()):
+            raise ValueError("bridge source value is too large")
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            changed = db.execute(
+                "UPDATE bridges SET source_kind=?,source_json=? WHERE bridge_id=? AND status='active'",
+                (kind, json.dumps(source, separators=(",", ":")), bridge_id),
+            ).rowcount
+            if changed != 1:
+                raise ValueError("active bridge not found")
+            return self.decode(db.execute("SELECT * FROM bridges WHERE bridge_id=?", (bridge_id,)).fetchone())  # type: ignore[return-value]
+
+    def mark_participation(self, team_id: str, channel_id: str, thread_ts: str) -> None:
+        if not channel_id or not thread_ts:
+            raise ValueError("channel and thread timestamp are required")
+        with self.connect() as db:
+            db.execute(
+                """
+                INSERT INTO thread_participation(team_id,channel_id,thread_ts)
+                VALUES(?,?,?)
+                ON CONFLICT(team_id,channel_id,thread_ts)
+                DO UPDATE SET updated_at=CURRENT_TIMESTAMP
+                """,
+                (team_id, channel_id, thread_ts),
+            )
+
+    def participates(self, team_id: str, channel_id: str, thread_ts: str) -> bool:
+        if not channel_id or not thread_ts:
+            return False
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT 1 FROM thread_participation WHERE team_id=? AND channel_id=? AND thread_ts=?",
+                (team_id, channel_id, thread_ts),
+            ).fetchone()
+            if row is None and team_id:
+                row = db.execute(
+                    "SELECT 1 FROM thread_participation WHERE team_id='' AND channel_id=? AND thread_ts=?",
+                    (channel_id, thread_ts),
+                ).fetchone()
+            return row is not None
+
+    def recent_participating_threads(
+        self, hours: int = 168, limit: int = 500,
+    ) -> list[tuple[str, str, str, float]]:
+        hours = max(1, min(hours, 24 * 90))
+        limit = max(1, min(limit, 2_000))
+        with self.connect() as db:
+            rows = db.execute(
+                """
+                SELECT team_id,channel_id,thread_ts,updated_at FROM thread_participation
+                WHERE updated_at >= datetime('now', ?)
+                ORDER BY updated_at DESC LIMIT ?
+                """,
+                (f"-{hours} hours", limit),
+            ).fetchall()
+            return [
+                (
+                    row[0], row[1], row[2],
+                    datetime.datetime.fromisoformat(row[3]).replace(
+                        tzinfo=datetime.timezone.utc,
+                    ).timestamp(),
+                )
+                for row in rows
+            ]
+
+    def mark_thread_ingress(
+        self, event_id: str, team_id: str, channel_id: str, thread_ts: str,
+    ) -> bool:
+        if not event_id:
+            return False
+        with self.connect() as db:
+            try:
+                db.execute(
+                    "INSERT INTO thread_ingress(event_id,team_id,channel_id,thread_ts) VALUES(?,?,?,?)",
+                    (event_id, team_id, channel_id, thread_ts),
+                )
+                db.execute(
+                    """
+                    UPDATE thread_participation SET updated_at=CURRENT_TIMESTAMP
+                    WHERE team_id=? AND channel_id=? AND thread_ts=?
+                    """,
+                    (team_id, channel_id, thread_ts),
+                )
+                return True
+            except sqlite3.IntegrityError:
+                return False
+
     def recent_active_bridges(self, hours: int = 24, limit: int = 100) -> list[Bridge]:
         hours = max(1, min(hours, 168))
         limit = max(1, min(limit, 500))
@@ -348,6 +461,7 @@ class Store:
             return bool(
                 db.execute("SELECT 1 FROM bridge_ingress WHERE event_id=?", (event_id,)).fetchone()
                 or db.execute("SELECT 1 FROM bridge_events WHERE event_id=?", (event_id,)).fetchone()
+                or db.execute("SELECT 1 FROM thread_ingress WHERE event_id=?", (event_id,)).fetchone()
             )
 
     def claim_event(self, event_id: str, bridge_id: str) -> bool:
@@ -499,20 +613,25 @@ class Broker:
         if not channel.startswith("C") or channel in self._joined_channels:
             return
         try:
-            _slack_call(self.token, "conversations.join", {"channel": channel})
+            _slack_call(self.token, "conversations.history", {"channel": channel, "limit": 1})
         except RuntimeError as exc:
-            raise RuntimeError(
-                "Tether could not join the public Slack destination. Grant the bot "
-                "channels:join or invite it to the channel before creating a resumable thread "
-                f"({exc})"
-            ) from exc
+            if "not_in_channel" not in str(exc):
+                raise
+            try:
+                _slack_call(self.token, "conversations.join", {"channel": channel})
+            except RuntimeError as join_exc:
+                raise RuntimeError(
+                    "Tether could not join the public Slack destination. Grant the bot "
+                    "channels:join or invite it to the channel before creating a resumable thread "
+                    f"({join_exc})"
+                ) from join_exc
         self._joined_channels.add(channel)
 
     def _status(self, config: Config, allowed_users: tuple[str, ...]) -> dict[str, Any]:
         status = {
             "ok": True,
             "implementation": "tether",
-            "protocol_version": 2,
+            "protocol_version": 4,
             "channel_configured": bool(effective_channel(config)),
             "owner_configured": bool(config.default_owner or allowed_users),
             "allowed_user_count": len(allowed_users),
@@ -532,6 +651,37 @@ class Broker:
             "user_id": str(result.get("user_id") or ""),
             "user": str(result.get("user") or ""),
         }
+
+    def _dm_notify(
+        self,
+        incoming: BridgeRequest,
+        config: Config,
+        allowed_users: tuple[str, ...],
+    ) -> dict[str, Any]:
+        requested = incoming.get("user_ids")
+        if not isinstance(requested, list):
+            raise ValueError("DM recipients must be a Slack member ID list")
+        users = list(dict.fromkeys(str(value) for value in requested))
+        if not 1 <= len(users) <= 8 or any(not ID_PATTERN.fullmatch(value) for value in users):
+            raise ValueError("DM recipients must contain 1-8 valid Slack member IDs")
+        unauthorized = sorted(set(users) - set(allowed_users))
+        if unauthorized:
+            raise ValueError("DM recipients must all be explicitly allowlisted Hermes operators")
+        opened = _slack_call(
+            self.token,
+            "conversations.open",
+            {"users": ",".join(users), "return_im": True},
+        )
+        channel = opened.get("channel")
+        if not isinstance(channel, dict) or not ID_PATTERN.fullmatch(str(channel.get("id") or "")):
+            raise RuntimeError("Slack opened a DM without returning a valid channel")
+        request = BridgeRequest(incoming)
+        request["channel_id"] = str(channel["id"])
+        self._joined_channels.add(request["channel_id"])
+        request["_skip_channel_join"] = True
+        if not request.get("team_id"):
+            request["team_id"] = str(self._identity().get("team_id") or config.team_id)
+        return self._notify(request, config, allowed_users)
 
     def _notify(
         self,
@@ -558,7 +708,8 @@ class Broker:
             }
         root_text = with_origin(text, bridge)
         requested_thread = request.get("thread_ts")
-        self._ensure_channel_membership(bridge.channel_id)
+        if not request.get("_skip_channel_join"):
+            self._ensure_channel_membership(bridge.channel_id)
         if request.get("file_path"):
             timestamp = slack_upload(
                 self.token,
@@ -569,6 +720,8 @@ class Broker:
             )
         else:
             timestamp = slack_post(self.token, bridge.channel_id, root_text, requested_thread)
+        if requested_thread:
+            self.store.mark_participation(bridge.team_id, bridge.channel_id, str(requested_thread))
         bridge = self.store.bind(bridge.bridge_id, str(requested_thread or timestamp))
         return {
             "ok": True,
@@ -583,11 +736,70 @@ class Broker:
             raise ValueError("active bridge not found")
         self._ensure_channel_membership(bridge.channel_id)
         timestamp = slack_post(self.token, bridge.channel_id, str(request.get("text") or ""), bridge.thread_ts)
+        self.store.mark_participation(bridge.team_id, bridge.channel_id, bridge.thread_ts)
         return {
             "ok": True,
             "bridge_id": bridge.bridge_id,
             "thread_ts": bridge.thread_ts,
             "message_ts": timestamp,
+        }
+
+    def _attach(
+        self,
+        incoming: BridgeRequest,
+        config: Config,
+        allowed_users: tuple[str, ...],
+    ) -> dict[str, Any]:
+        request = BridgeRequest(incoming)
+        request["channel_id"] = str(request.get("channel_id") or effective_channel(config))
+        request["owner_user_id"] = str(
+            request.get("owner_user_id") or config.default_owner or ("*" if allowed_users else "")
+        )
+        request["team_id"] = str(request.get("team_id") or config.team_id)
+        thread_ts = str(request.get("thread_ts") or "")
+        if not request["channel_id"] or not thread_ts:
+            raise ValueError("Slack channel and existing thread timestamp are required")
+        existing = self.store.find(request["team_id"], request["channel_id"], thread_ts)
+        if existing is not None:
+            if existing.idempotency_key == str(request.get("idempotency_key") or ""):
+                return {
+                    "ok": True,
+                    "bridge_id": existing.bridge_id,
+                    "thread_ts": existing.thread_ts,
+                    "deduplicated": True,
+                }
+            raise ValueError("Slack thread already has an active Tether binding")
+        bridge = self.store.create(request)
+        bridge = self.store.bind(bridge.bridge_id, thread_ts)
+        self.store.mark_participation(bridge.team_id, bridge.channel_id, thread_ts)
+        return {
+            "ok": True,
+            "bridge_id": bridge.bridge_id,
+            "thread_ts": bridge.thread_ts,
+            "deduplicated": False,
+        }
+
+    def _rebind(self, request: BridgeRequest, config: Config) -> dict[str, Any]:
+        channel = str(request.get("channel_id") or effective_channel(config))
+        team = str(request.get("team_id") or config.team_id)
+        thread_ts = str(request.get("thread_ts") or "")
+        if not channel or not thread_ts:
+            raise ValueError("Slack channel and existing thread timestamp are required")
+        existing = self.store.find(team, channel, thread_ts)
+        if existing is None:
+            raise ValueError("active bridge not found for Slack thread")
+        kind = str(request.get("source_kind") or "")
+        source = request.get("source")
+        if kind != "zellij_pane" or not isinstance(source, dict):
+            raise ValueError("rebind requires the caller's live ambient Zellij pane")
+        bridge = self.store.replace_source(existing.bridge_id, kind, source)
+        self.store.mark_participation(bridge.team_id, bridge.channel_id, thread_ts)
+        return {
+            "ok": True,
+            "bridge_id": bridge.bridge_id,
+            "thread_ts": bridge.thread_ts,
+            "source_kind": bridge.source_kind,
+            "pane_id": bridge.source.get("pane_id", ""),
         }
 
     def _history(self, request: BridgeRequest, config: Config) -> dict[str, Any]:
@@ -627,7 +839,7 @@ class Broker:
         ]
         return {"ok": True, "messages": messages}
 
-    def _thread_reply(self, request: BridgeRequest) -> dict[str, Any]:
+    def _thread_reply(self, request: BridgeRequest, config: Config) -> dict[str, Any]:
         channel = str(request.get("channel_id") or "")
         thread_ts = str(request.get("thread_ts") or "")
         text = str(request.get("text") or "")
@@ -637,6 +849,9 @@ class Broker:
             raise ValueError("thread reply text is empty or too large")
         self._ensure_channel_membership(channel)
         message_ts = slack_post(self.token, channel, text, thread_ts)
+        self.store.mark_participation(
+            str(request.get("team_id") or config.team_id), channel, thread_ts,
+        )
         return {"ok": True, "thread_ts": thread_ts, "message_ts": message_ts}
 
     def handle(self, request: BridgeRequest) -> dict[str, Any]:
@@ -650,6 +865,15 @@ class Broker:
         if operation == "notify":
             with self._notify_lock:
                 return self._notify(request, config, allowed_users)
+        if operation == "dm_notify":
+            with self._notify_lock:
+                return self._dm_notify(request, config, allowed_users)
+        if operation == "attach":
+            with self._notify_lock:
+                return self._attach(request, config, allowed_users)
+        if operation == "rebind":
+            with self._notify_lock:
+                return self._rebind(request, config)
         if operation == "reply":
             return self._reply(request)
         if operation == "history":
@@ -657,7 +881,7 @@ class Broker:
         if operation == "thread_history":
             return self._thread_history(request, config)
         if operation == "thread_reply":
-            return self._thread_reply(request)
+            return self._thread_reply(request, config)
         raise ValueError("unsupported operation")
 
 
@@ -957,6 +1181,26 @@ def deliver_zellij(bridge: Bridge, text: str) -> None:
         f"[Hermes Slack reply; {marker}] " + text + "\n\nAfter handling this, reply in the same Slack thread with: "
         f"python3 {notifier} reply --bridge-id {bridge.bridge_id} --text '<your response>'"
     )
+    if "\n" in text or len(instruction) > MAX_VISIBLE_PANE_INPUT:
+        INBOX_HOME.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(INBOX_HOME, 0o700)
+        payload = INBOX_HOME / f"{marker}.txt"
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(payload, flags, 0o600)
+        try:
+            with os.fdopen(fd, "w") as stream:
+                stream.write(instruction)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except BaseException:
+            payload.unlink(missing_ok=True)
+            raise
+        instruction = (
+            f"[Hermes Slack reply; {marker}] Read and follow the complete request in {payload}. "
+            "Delete that file after reading it, then reply to the same Slack thread as instructed there."
+        )
     target = pane if pane.startswith(("terminal_", "plugin_")) else "terminal_" + pane
     zellij = _resolve_executable("zellij")
     # Absolute executable; session and pane are argv, never shell text.
