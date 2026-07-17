@@ -82,6 +82,15 @@ class SchemaMigrationContractTest(unittest.TestCase):
         rendered = migration.read_text()
         self.assertTrue(all(f"'{family}'" in rendered for family in added))
 
+    def test_source_scoped_backfill_has_a_live_item_id_index(self) -> None:
+        migration = SERVER / "schema" / "013_source_backfill_index.sql"
+        rendered = " ".join(migration.read_text().split()).casefold()
+        self.assertIn("on items(source_id, id)", rendered)
+        self.assertIn(
+            "where deleted_at is null and btrim(text_redacted) <> ''",
+            rendered,
+        )
+
 
 class TypedConnectorProjectionTest(unittest.TestCase):
     def test_v2_communication_projects_clean_conversation_evidence(self) -> None:
