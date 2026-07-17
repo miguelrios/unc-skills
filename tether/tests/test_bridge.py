@@ -231,6 +231,56 @@ class StoreTest(unittest.TestCase):
             "ok": True, "team_id": "T12345678", "user_id": "U12345678", "user": "agent",
         })
 
+    def test_group_dm_opens_inside_broker_and_creates_resumable_bridge(self):
+        broker = self.runtime.Broker("test-token", self.store)
+        request = {
+            "op": "dm_notify",
+            "text": "Welcome",
+            "source_kind": "headless_run",
+            "source": {"run_id": "onboarding-1", "cwd": "/tmp/project"},
+            "user_ids": ["U12345678", "U87654321"],
+            "idempotency_key": "onboarding-1",
+        }
+        with mock.patch.dict(
+            os.environ,
+            {"SLACK_ALLOWED_USERS": "U12345678,U87654321"},
+            clear=False,
+        ), mock.patch.object(self.runtime, "_slack_call", side_effect=[
+            {"ok": True, "channel": {"id": "G12345678"}},
+            {"ok": True, "team_id": "T12345678", "user_id": "U11111111", "user": "agent"},
+        ]) as call, mock.patch.object(
+            self.runtime, "slack_post", return_value="123.456",
+        ) as post:
+            result = broker.handle(request)
+        self.assertEqual(call.call_args_list[0], mock.call(
+            "test-token",
+            "conversations.open",
+            {"users": "U12345678,U87654321", "return_im": True},
+        ))
+        post.assert_called_once()
+        bridge = self.store.get(result["bridge_id"])
+        self.assertEqual(bridge.channel_id, "G12345678")
+        self.assertEqual(bridge.team_id, "T12345678")
+        self.assertEqual(bridge.owner_user_id, "*")
+
+    def test_group_dm_rejects_non_allowlisted_recipients_before_slack(self):
+        broker = self.runtime.Broker("test-token", self.store)
+        with mock.patch.dict(
+            os.environ,
+            {"SLACK_ALLOWED_USERS": "U12345678"},
+            clear=False,
+        ), mock.patch.object(self.runtime, "_slack_call") as call:
+            with self.assertRaisesRegex(ValueError, "explicitly allowlisted"):
+                broker.handle({
+                    "op": "dm_notify",
+                    "text": "Welcome",
+                    "source_kind": "headless_run",
+                    "source": {"run_id": "onboarding-2", "cwd": "/tmp/project"},
+                    "user_ids": ["U12345678", "U87654321"],
+                    "idempotency_key": "onboarding-2",
+                })
+        call.assert_not_called()
+
     def test_brokered_thread_post_does_not_create_a_second_bridge(self):
         broker = self.runtime.Broker("test-token", self.store)
         with mock.patch.object(broker, "_ensure_channel_membership"), mock.patch.object(
