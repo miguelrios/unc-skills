@@ -825,6 +825,41 @@ class PluginRoutingTest(unittest.TestCase):
         )
         self.assertLess(participation[0][3], datetime.datetime.now().timestamp() + 1)
 
+    def test_import_uses_newest_sessions_when_store_exceeds_limit(self):
+        sessions = self.runtime.HERMES_HOME / "sessions" / "sessions.json"
+        sessions.parent.mkdir(parents=True)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        payload = {
+            f"old-{index}": {
+                "updated_at": (now - datetime.timedelta(days=30)).isoformat(),
+                "origin": {
+                    "platform": "slack",
+                    "chat_id": "COLD00000",
+                    "thread_id": f"{index}.000",
+                },
+            }
+            for index in range(2000)
+        }
+        payload["recent"] = {
+            "updated_at": now.isoformat(),
+            "origin": {
+                "platform": "slack",
+                "chat_id": "C0BHSK52GP5",
+                "thread_id": "1784319237.201969",
+            },
+        }
+        sessions.write_text(json.dumps(payload))
+        adapter = types.SimpleNamespace(
+            _channel_team={"C0BHSK52GP5": "T12345678"},
+        )
+
+        imported = self.plugin._import_native_slack_participation(adapter)
+
+        self.assertEqual(imported, 1)
+        self.assertTrue(self.plugin.store.participates(
+            "T12345678", "C0BHSK52GP5", "1784319237.201969",
+        ))
+
     def test_authorization_fails_closed_and_honors_owner(self):
         bridge = self.make_bridge()
         self.assertTrue(self.plugin._authorized(bridge, "U12345678"))
@@ -1048,9 +1083,32 @@ class PluginRoutingTest(unittest.TestCase):
 
             async def _handle_slack_message(self, event):
                 self.events.append(event)
-                self_plugin.store.mark_ingress(str(event["ts"]), bridge.bridge_id)
+                source = types.SimpleNamespace(
+                    platform=platform,
+                    thread_id=event["thread_ts"],
+                    guild_id="T12345678",
+                    chat_id=event["channel"],
+                    user_id=event["user"],
+                    message_id=event["ts"],
+                    is_bot=False,
+                )
+                gateway_event = types.SimpleNamespace(
+                    source=source,
+                    message_id=event["ts"],
+                    text=event["text"],
+                )
+                result = self_plugin._pre_gateway_dispatch(
+                    event=gateway_event,
+                    gateway=types.SimpleNamespace(adapters={platform: self}),
+                )
+                self.events[-1]["dispatch_result"] = result
 
         self_plugin = self.plugin
+
+        class Platform:
+            value = "slack"
+
+        platform = Platform()
         adapter = Adapter()
         recovered = asyncio.run(self.plugin._poll_recent_replies(adapter))
         recovered_again = asyncio.run(self.plugin._poll_recent_replies(adapter))
@@ -1058,9 +1116,10 @@ class PluginRoutingTest(unittest.TestCase):
         self.assertEqual(recovered_again, 0)
         self.assertEqual(adapter.events[0]["text"], "continue")
         self.assertTrue(adapter.events[0]["_tether_polled"])
+        self.assertEqual(adapter.events[0]["dispatch_result"]["action"], "rewrite")
 
     def test_reply_poller_joins_only_after_not_in_channel(self):
-        bridge = self.make_bridge()
+        self.make_bridge()
         calls = []
 
         class Client:
@@ -1117,7 +1176,6 @@ class PluginRoutingTest(unittest.TestCase):
 
             async def _handle_slack_message(self, event):
                 self.events.append(event)
-
         adapter = Adapter()
         recovered = asyncio.run(self.plugin._poll_recent_replies(adapter))
         recovered_again = asyncio.run(self.plugin._poll_recent_replies(adapter))
@@ -1165,7 +1223,32 @@ class PluginRoutingTest(unittest.TestCase):
 
             async def _handle_slack_message(self, event):
                 self.events.append(event)
+                source = types.SimpleNamespace(
+                    platform=platform,
+                    thread_id=event["thread_ts"],
+                    guild_id="T12345678",
+                    chat_id=event["channel"],
+                    user_id=event["user"],
+                    message_id=event["ts"],
+                    is_bot=True,
+                )
+                gateway_event = types.SimpleNamespace(
+                    source=source,
+                    message_id=event["ts"],
+                    text=event["text"],
+                )
+                result = self_plugin._pre_gateway_dispatch(
+                    event=gateway_event,
+                    gateway=types.SimpleNamespace(adapters={platform: self}),
+                )
+                self.events[-1]["dispatch_result"] = result
 
+        self_plugin = self.plugin
+
+        class Platform:
+            value = "slack"
+
+        platform = Platform()
         adapter = Adapter()
         with mock.patch.dict(os.environ, {"TETHER_ALLOWED_BOT_USERS": "UPEER"}, clear=False):
             recovered = asyncio.run(self.plugin._poll_recent_replies(adapter))
@@ -1173,6 +1256,7 @@ class PluginRoutingTest(unittest.TestCase):
         self.assertEqual(recovered, 2)
         self.assertEqual(recovered_again, 0)
         self.assertEqual(adapter.events[0]["ts"], "111.1")
+        self.assertEqual(adapter.events[0]["dispatch_result"]["action"], "rewrite")
 
     def test_peer_bot_requires_explicit_tether_allowlist(self):
         adapter = types.SimpleNamespace(

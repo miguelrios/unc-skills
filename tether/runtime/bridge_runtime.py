@@ -570,11 +570,12 @@ class Store:
             if not rows:
                 return []
             event_ids = [str(row["event_id"]) for row in rows]
-            placeholders = ",".join("?" for _ in event_ids)
-            db.execute(
-                f"UPDATE bridge_events SET state='processing',updated_at=CURRENT_TIMESTAMP "
-                f"WHERE event_id IN ({placeholders})",
-                event_ids,
+            db.executemany(
+                """
+                UPDATE bridge_events SET state='processing',updated_at=CURRENT_TIMESTAMP
+                WHERE event_id=?
+                """,
+                ((event_id,) for event_id in event_ids),
             )
             return [
                 {

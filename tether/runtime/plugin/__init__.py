@@ -87,25 +87,28 @@ def _import_native_slack_participation(adapter) -> int:
         return 0
     sessions = payload.values() if isinstance(payload, dict) else ()
     cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=7)
-    imported = 0
-    for session in list(sessions)[:2000]:
+    recent_sessions = []
+    for session in sessions:
         if not isinstance(session, dict):
-            continue
-        origin = session.get("origin")
-        if not isinstance(origin, dict) or origin.get("platform") != "slack":
-            continue
-        channel_id = str(origin.get("chat_id") or "")
-        thread_ts = str(origin.get("thread_id") or "")
-        if not channel_id or not thread_ts:
             continue
         updated_at = str(session.get("updated_at") or "")
         try:
             updated = datetime.datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
             if updated.tzinfo is None:
                 updated = updated.replace(tzinfo=datetime.timezone.utc)
-            if updated < cutoff:
-                continue
         except ValueError:
+            continue
+        if updated >= cutoff:
+            recent_sessions.append((updated, session))
+    recent_sessions.sort(key=lambda item: item[0], reverse=True)
+    imported = 0
+    for updated, session in recent_sessions[:2000]:
+        origin = session.get("origin")
+        if not isinstance(origin, dict) or origin.get("platform") != "slack":
+            continue
+        channel_id = str(origin.get("chat_id") or "")
+        thread_ts = str(origin.get("thread_id") or "")
+        if not channel_id or not thread_ts:
             continue
         team_id = str(getattr(adapter, "_channel_team", {}).get(channel_id, "") or "")
         store.mark_participation(
@@ -307,15 +310,6 @@ def _install_slack_bridge_prefilter():
                     event_id, team_id, channel_id, thread_ts,
                 ):
                     return None
-            if bridge is not None:
-                event_id = str(event.get("ts") or "")
-                if (
-                    not event.get("_tether_polled")
-                    and _is_bot_message(event)
-                    and event_id
-                    and not store.mark_ingress(event_id, bridge.bridge_id)
-                ):
-                    return None
         except Exception:
             log.exception("Could not evaluate a Slack bridge thread before the mention gate")
         return await original(self, event)
@@ -448,14 +442,12 @@ async def _poll_recent_replies(adapter) -> int:
                 or store.has_ingress(event_id)
             ):
                 continue
-            if bridge is not None:
-                claimed = store.mark_ingress(event_id, bridge.bridge_id)
-            else:
+            if bridge is None:
                 claimed = store.mark_thread_ingress(
                     event_id, team_id, channel_id, thread_ts,
                 )
-            if not claimed:
-                continue
+                if not claimed:
+                    continue
             event = dict(message)
             event.update({
                 "channel": channel_id,
