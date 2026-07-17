@@ -238,6 +238,7 @@ class HttpBoundaryContractTest(unittest.TestCase):
         self.assertIn("ORDER BY id DESC LIMIT 1", sql)
         self.assertNotIn("count(", sql.casefold())
 
+
     def test_remote_doctor_uses_bounded_health_not_full_metrics(self) -> None:
         handler = object.__new__(Handler)
         handler.path = "/v1/doctor"
@@ -282,6 +283,31 @@ class HttpBoundaryContractTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "non-socket"):
                 serve_unix("postgresql://synthetic.invalid/recall", str(path))
             self.assertEqual(path.read_text(), "do not delete")
+
+
+class IngestTransactionContractTest(unittest.TestCase):
+    def test_batch_projection_advances_the_shared_watermark_once(self) -> None:
+        store = BrainStore("postgresql://synthetic.invalid/recall")
+        store._project_one = mock.MagicMock()
+        store._advance_projector = mock.MagicMock()
+        connection = mock.MagicMock()
+        events = [
+            (41, envelope(native_id="turn-1"), 1),
+            (43, envelope(native_id="turn-2"), 1),
+            (42, envelope(native_id="turn-3"), 1),
+        ]
+
+        store._project_batch(connection, events)
+
+        self.assertEqual(
+            store._project_one.call_args_list,
+            [
+                mock.call(connection, 41, events[0][1], 1),
+                mock.call(connection, 43, events[1][1], 1),
+                mock.call(connection, 42, events[2][1], 1),
+            ],
+        )
+        store._advance_projector.assert_called_once_with(connection, 43)
 
 
 class AdminCliSafetyTest(unittest.TestCase):

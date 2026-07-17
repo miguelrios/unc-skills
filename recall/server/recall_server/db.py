@@ -10,7 +10,7 @@ import uuid
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import psycopg
 from psycopg.rows import dict_row
@@ -418,6 +418,7 @@ class BrainStore:
                 receipts: list[str] = []
                 inserted = 0
                 duplicate_events = 0
+                pending_projections: list[tuple[int, dict, int]] = []
                 source_principals: dict[str, str] = {}
                 for envelope in events:
                     source_id = envelope["source_id"]
@@ -477,12 +478,13 @@ class BrainStore:
                              envelope["visibility"], envelope["content_type"], envelope["content_sha256"], revision,
                              json.dumps(envelope), envelope["kind"] == "tombstone", batch_id),
                         ).fetchone()
-                        self._project_one(conn, row["id"], envelope, revision)
+                        pending_projections.append((row["id"], envelope, revision))
                         existing_by_content[content_identity] = revision
                         max_revision[identity] = revision
                         inserted += 1
                     receipts.append(event_receipt(source_id, envelope["native_id"], revision))
 
+                self._project_batch(conn, pending_projections)
                 acknowledgement = {
                     "batch_id": str(batch_id),
                     "status": "committed",
@@ -497,6 +499,19 @@ class BrainStore:
                 )
                 return acknowledgement, False
 
+    def _project_batch(
+        self,
+        conn,
+        events: Iterable[tuple[int, dict, int]],
+    ) -> None:
+        latest_event_id: int | None = None
+        for event_id, envelope, revision in events:
+            self._project_one(conn, event_id, envelope, revision)
+            if latest_event_id is None or event_id > latest_event_id:
+                latest_event_id = event_id
+        if latest_event_id is not None:
+            self._advance_projector(conn, latest_event_id)
+
     def _project_one(self, conn, event_id: int, envelope: dict, revision: int) -> None:
         session_id = effective_session_id(envelope)
         if envelope["kind"] == "tombstone":
@@ -505,11 +520,9 @@ class BrainStore:
                 "UPDATE items SET deleted_at=now() WHERE source_id=%s AND event_native_id=%s AND deleted_at IS NULL",
                 (envelope["source_id"], target),
             )
-            self._advance_projector(conn, event_id)
             return
         items, metadata = project(envelope, revision)
         if not items and set(metadata) <= {"projector_version", "harness"}:
-            self._advance_projector(conn, event_id)
             return
         conn.execute(
             """INSERT INTO sessions(source_id,native_id,principal_id,harness,started_at,ended_at,metadata,projector_version)
@@ -545,8 +558,6 @@ class BrainStore:
                             for entity in item["entities"]
                         ],
                     )
-        self._advance_projector(conn, event_id)
-
     def _advance_projector(self, conn, event_id: int) -> None:
         conn.execute(
             """INSERT INTO projection_watermarks(projector,version,last_event_id) VALUES ('items',%s,%s)
@@ -1614,8 +1625,13 @@ class BrainStore:
                     "projection_watermarks RESTART IDENTITY"
                 )
                 rows = conn.execute("SELECT id,envelope,revision FROM source_events ORDER BY id").fetchall()
-                for row in rows:
-                    self._project_one(conn, row["id"], row["envelope"], row["revision"])
+                self._project_batch(
+                    conn,
+                    (
+                        (row["id"], row["envelope"], row["revision"])
+                        for row in rows
+                    ),
+                )
                 after = conn.execute("SELECT count(*) AS n FROM items WHERE deleted_at IS NULL").fetchone()["n"]
                 entities_after = conn.execute("SELECT count(*) AS n FROM entities").fetchone()["n"]
                 return {
