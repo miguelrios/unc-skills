@@ -75,6 +75,7 @@ SLACK_METHOD_PATHS = {
     "auth.test": "/api/auth.test",
     "chat.postMessage": "/api/chat.postMessage",
     "conversations.history": "/api/conversations.history",
+    "conversations.info": "/api/conversations.info",
     "conversations.join": "/api/conversations.join",
     "conversations.open": "/api/conversations.open",
     "conversations.replies": "/api/conversations.replies",
