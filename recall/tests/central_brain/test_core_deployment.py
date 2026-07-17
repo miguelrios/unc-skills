@@ -288,7 +288,7 @@ class ContainerContractTest(unittest.TestCase):
     def test_image_has_pinned_base_nonroot_runtime_and_content_free_healthcheck(
         self,
     ) -> None:
-        dockerfile = (SERVER / "Dockerfile").read_text()
+        dockerfile = (RECALL / "Dockerfile").read_text()
         first = dockerfile.splitlines()[0]
         self.assertRegex(
             first,
