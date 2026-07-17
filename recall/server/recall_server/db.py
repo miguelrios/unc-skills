@@ -189,6 +189,14 @@ class BrainStore:
                 return None
             return row
 
+    def readiness(self) -> dict[str, str]:
+        """Prove the database is reachable without scanning runtime data."""
+        with self.connect() as conn:
+            row = conn.execute("SELECT 1 AS ready").fetchone()
+        if not row or row["ready"] != 1:
+            raise RuntimeError("database readiness probe failed")
+        return {"status": "ready"}
+
     def service_metrics(self) -> dict:
         with self.connect() as conn:
             metrics = {

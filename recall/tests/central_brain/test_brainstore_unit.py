@@ -197,6 +197,30 @@ class SourceScopedReadContractTest(unittest.TestCase):
 
 
 class HttpBoundaryContractTest(unittest.TestCase):
+    def test_readiness_executes_one_constant_query(self) -> None:
+        connection = mock.MagicMock()
+        connection.execute.return_value.fetchone.return_value = {"ready": 1}
+        context = mock.MagicMock()
+        context.__enter__.return_value = connection
+        store = BrainStore("postgresql://synthetic.invalid/recall")
+        store.connect = mock.MagicMock(return_value=context)
+
+        self.assertEqual(store.readiness(), {"status": "ready"})
+        connection.execute.assert_called_once_with("SELECT 1 AS ready")
+
+    def test_readyz_uses_constant_time_database_probe_not_full_metrics(self) -> None:
+        handler = object.__new__(Handler)
+        handler.path = "/readyz"
+        handler.store = mock.MagicMock()
+        handler.store.readiness.return_value = {"status": "ready"}
+        handler.send_json = mock.MagicMock()
+
+        Handler.do_GET(handler)
+
+        handler.store.readiness.assert_called_once_with()
+        handler.store.service_metrics.assert_not_called()
+        handler.send_json.assert_called_once_with(200, {"status": "ready"})
+
     def test_search_rejects_oversized_query_before_database_or_model_io(self) -> None:
         with self.assertRaisesRegex(ValueError, "too large"):
             BrainStore("postgresql://unused").search("x" * 8193)
