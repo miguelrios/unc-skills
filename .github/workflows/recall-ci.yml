@@ -68,7 +68,7 @@ jobs:
         env:
           RECALL_CORE_IMAGE: recall-core:ci
         run: |
-          docker build --pull --tag "$RECALL_CORE_IMAGE" --file server/Dockerfile .
+          docker build --pull --tag "$RECALL_CORE_IMAGE" --file Dockerfile .
           python server/tests/e2e_core_container.py
       - name: Recall Core image vulnerability gate
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0

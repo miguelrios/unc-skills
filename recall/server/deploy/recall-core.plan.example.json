@@ -10,12 +10,14 @@
   },
   "service": {
     "adapter": "render-private-service",
+    "embedding_image": "ghcr.io/huggingface/text-embeddings-inference@sha256:ad950d30878eceb72aaf32024d26fa2b1d04a75304fa0b4776b49aa1941fea07",
     "region_ref": "approval://provider-region",
     "billing_ref": "approval://provider-billing",
     "public_ingress": false
   },
   "network": {
     "adapter": "tailscale-gateway",
+    "gateway_image": "docker.io/tailscale/tailscale@sha256:f15d5d3f4a68773a853180b72496f70ba614b64de0878c43fe3da39fe0afba47",
     "route_ref": "approval://tailnet-route",
     "listen_port": 9443
   },

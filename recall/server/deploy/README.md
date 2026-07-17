@@ -43,6 +43,83 @@ approval and is never inferred from infrastructure approval. Provider adapters r
 only the closed desired state and return content-free receipts; repeated reconciliation
 must converge to `unchanged` without duplicate resources.
 
+The managed pilot profile is deliberately one stack:
+
+```text
+Grep/Codex/Claude/Mac collectors
+              |
+       Tailnet HTTPS :9443
+              |
+  Render private Tailscale gateway
+              |
+      Render private network
+        |                 |
+  Recall Core :8788   TEI/Qwen embedding :80
+        |
+ PlanetScale Postgres (Virginia, HA, bounded autoscaling)
+```
+
+There is no Render public web service and no Tailscale Funnel. Core requires a
+revocable bearer credential even after the Tailnet boundary. Grep agents use the
+stable MCP Streamable HTTP endpoint at `https://<tailnet-host>:9443/mcp`; the
+same bearer token and source scope apply to both MCP tools and REST reads.
+`recall_search`, `recall_related`, and `recall_show` are read-only. Browser
+clients must match `RECALL_MCP_ALLOWED_ORIGINS`; server-side agents omit
+`Origin`.
+
+The live adapter profile pins PlanetScale `PS_80` with two replicas, 50 GiB
+initial storage, a 1 TiB autoscaling ceiling, PostgreSQL 17, and the current
+PlanetScale Virginia slug `us-east`. It creates only digest-pinned Render
+private services: Starter Core, Pro embedding, and a Starter Tailscale gateway
+with a 1 GiB identity disk. Existing service environment variables, secret
+files, image digests, commands, plans, disks, and regions must match exactly or
+reconciliation fails without mutation.
+
+Inject credentials from the approved 1Password Environment at runtime. Never
+put their values in arguments, a manifest, an approval file, shell history, or
+the repository:
+
+```text
+PLANETSCALE_SERVICE_TOKEN_ID
+PLANETSCALE_SERVICE_TOKEN
+RENDER_API_KEY
+RECALL_DATABASE_URL
+TAILSCALE_OAUTH_CLIENT_ID
+TAILSCALE_OAUTH_CLIENT_SECRET
+```
+
+`RECALL_DATABASE_URL` must be a PlanetScale application role URL with
+`sslmode=verify-full` and an explicit trust root. Prefer
+`sslrootcert=/etc/ssl/certs/ca-certificates.crt` in the pinned Linux container;
+`sslrootcert=system` is also accepted where the runtime's libpq/OpenSSL build
+resolves the OS trust store correctly. Bootstrap and migrate the database with
+a separate administrative credential, then retain only this least-privilege
+runtime URL in the injected environment. The provider token needs only database
+read/create permissions; the Tailscale OAuth client must be restricted to the
+dedicated gateway tag.
+
+After reviewing the zero-network preview and mode-0600 approval document, run
+the exact approved apply under 1Password injection:
+
+```bash
+OP_CACHE=false op run --environment "$APPROVED_ENV_ID" -- \
+  python -m recall_server.cli deployment-apply \
+  --manifest /private/recall-core.plan.json \
+  --approvals /private/approvals.json \
+  --planetscale-organization ORGANIZATION \
+  --database-name DATABASE \
+  --render-owner-id WORKSPACE_ID \
+  --core-name RECALL_CORE \
+  --embedding-name RECALL_EMBEDDING \
+  --gateway-name RECALL_GATEWAY \
+  --tailnet-hostname RECALL \
+  --tailnet-tag tag:recall
+```
+
+The command checks infrastructure approvals before reading any credential. Its
+stdout is content-free: actions, plan hash, and non-reversible resource
+receipts only. Writer cutover remains a separate approval.
+
 ## Existing host pilot
 
 The existing host pilot listens on a Unix socket, not TCP. Tailscale Serve is its only network proxy.
@@ -93,9 +170,33 @@ Searches have a 300ms database-work budget by default. Override it only within t
 10–2000ms range with `RECALL_SEARCH_DEADLINE_MS`; the response and service log expose only
 content-free per-leg timings, result counts, and the deadline outcome.
 
-Semantic retrieval requires PostgreSQL with pgvector and a loopback-only embedding sidecar. The
-packaged unit pins TEI 1.9 and Qwen3-Embedding-0.6B, binds only `127.0.0.1:8089`, and never exposes
-an embedding route through Tailscale Serve. Keep `RECALL_EMBEDDING_BATCH_SIZE=1`: the derivation
+Semantic retrieval requires PostgreSQL with pgvector and one explicitly selected embedding
+profile. Recall supports three protocols:
+
+- `voyage` is the recommended hosted profile. `voyage-4` supports 512-dimensional output and
+  distinct `document`/`query` retrieval modes.
+- `openai` calls the standard `/v1/embeddings` contract and works with OpenAI-compatible hosted or
+  local services. Optional document/query prefixes support asymmetric open models such as Nomic.
+- `tei` preserves the pinned local Qwen profile below for operators who prioritize private
+  inference and accept its compute footprint.
+
+Leaving `RECALL_EMBEDDING_URL` unset is a supported zero-dependency lexical-only profile. This is
+degraded retrieval, not failed startup. Hosted profiles send projected memory text to the selected
+provider; operators must make that privacy choice deliberately.
+
+Every non-loopback endpoint must use HTTPS, exactly match
+`RECALL_EMBEDDING_APPROVED_URL`, and read its bearer from exactly one protected source:
+an owner-only, non-symlink `RECALL_EMBEDDING_KEY_FILE`, or the deployment secret variable named
+by `RECALL_EMBEDDING_KEY_ENV`. The latter is the normal container pattern; the variable's value
+must be injected by the secret manager and never written in the config file. Recall rejects
+redirects, rereads the selected key source, validates response
+indices, dimensions, and finite values, and fingerprints the protocol, model version, dimensions,
+and query/document transformation. A profile change therefore makes old vectors stale until the
+online backfill converges.
+
+The optional packaged self-hosted unit pins TEI 1.9 and Qwen3-Embedding-0.6B, binds only
+`127.0.0.1:8089`, and never exposes an embedding route through Tailscale Serve. Keep
+`RECALL_EMBEDDING_BATCH_SIZE=1`: the derivation
 fingerprint and backfill deliberately trade background throughput for reproducible Qwen document
 vectors. The sidecar admits only one single-input request at a time because this Qwen/TEI CPU path is
 not reproducible across batched requests. An overlapping request is rejected and retrieval safely
@@ -112,7 +213,8 @@ sets its endpoint at `ExecStart`, after `EnvironmentFile` loading, so the live-q
 the dedicated backfill route through systemd environment precedence. Its 120-second transport timeout
 allows long CPU inference to finish under contention without relaxing the live-query timeout.
 
-Query planning is optional but, when enabled, must use the staging LiteLLM HTTPS router plus a
+Query planning is separate from embeddings and optional. When enabled, it must use the staging
+LiteLLM HTTPS router plus a
 short-lived model-scoped virtual key in a non-symlink owner-only file. A separate secret-manager
 timer must atomically replace that file before expiry. Never place a LiteLLM master key in
 `service.env`, pass it to Recall, or call a model provider directly. Recall rereads the key on every

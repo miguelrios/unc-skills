@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -19,6 +20,7 @@ from recall_server import SCHEMA_VERSION  # noqa: E402
 from recall_server.capabilities import (  # noqa: E402
     CAPABILITY_SQL,
     CapabilityError,
+    _client_tls_in_use,
     assess_snapshot,
     validate_connection_policy,
 )
@@ -67,12 +69,16 @@ def synthetic_manifest() -> dict:
         },
         "service": {
             "adapter": "render-private-service",
+            "embedding_image": (
+                "registry.example.invalid/recall-embedding@sha256:" + "b" * 64
+            ),
             "region_ref": "approval://provider-region",
             "billing_ref": "approval://provider-billing",
             "public_ingress": False,
         },
         "network": {
             "adapter": "tailscale-gateway",
+            "gateway_image": ("registry.example.invalid/tailscale@sha256:" + "c" * 64),
             "route_ref": "approval://tailnet-route",
             "listen_port": 9443,
         },
@@ -89,7 +95,18 @@ class DatabaseCapabilityContractTest(unittest.TestCase):
             "postgresql://synthetic:synthetic@db.example.invalid/recall"
             "?sslmode=verify-full&sslrootcert=system"
         )
-        self.assertEqual(validate_connection_policy(secure, "production")["tls"], "verify-full")
+        self.assertEqual(
+            validate_connection_policy(secure, "production")["tls"], "verify-full"
+        )
+        explicit_system_bundle = (
+            "postgresql://synthetic:synthetic@db.example.invalid/recall"
+            "?sslmode=verify-full"
+            "&sslrootcert=/etc/ssl/certs/ca-certificates.crt"
+        )
+        self.assertEqual(
+            validate_connection_policy(explicit_system_bundle, "production")["tls"],
+            "verify-full",
+        )
         for unsafe in (
             "postgresql://synthetic:synthetic@db.example.invalid/recall?sslmode=require",
             "postgresql://synthetic:synthetic@db.example.invalid/recall?sslmode=verify-full",
@@ -136,19 +153,22 @@ class DatabaseCapabilityContractTest(unittest.TestCase):
             "tls_not_active": ("ssl_in_use", False),
         }
         for code, (field, value) in failures.items():
-            snapshot = healthy_snapshot(); snapshot[field] = value
+            snapshot = healthy_snapshot()
+            snapshot[field] = value
             with self.subTest(code=code):
                 with self.assertRaises(CapabilityError) as raised:
                     assess_snapshot(snapshot, profile="production")
                 self.assertEqual(raised.exception.code, code)
         for privilege in healthy_snapshot()["role"]:
-            snapshot = healthy_snapshot(); snapshot["role"][privilege] = True
+            snapshot = healthy_snapshot()
+            snapshot["role"][privilege] = True
             with self.subTest(privilege=privilege):
                 with self.assertRaises(CapabilityError) as raised:
                     assess_snapshot(snapshot, profile="production")
                 self.assertEqual(raised.exception.code, "role_privilege_excessive")
         for privilege in healthy_snapshot()["privileges"]:
-            snapshot = healthy_snapshot(); snapshot["privileges"][privilege] = False
+            snapshot = healthy_snapshot()
+            snapshot["privileges"][privilege] = False
             with self.subTest(missing_privilege=privilege):
                 with self.assertRaises(CapabilityError) as raised:
                     assess_snapshot(snapshot, profile="production")
@@ -160,6 +180,11 @@ class DatabaseCapabilityContractTest(unittest.TestCase):
         self.assertIn("pg_stat_ssl", lowered)
         for provider in ("planetscale", "render", "supabase", "neon"):
             self.assertNotIn(provider, lowered)
+
+    def test_client_tls_observation_can_survive_proxy_backend_hop(self) -> None:
+        connection = SimpleNamespace(pgconn=SimpleNamespace(ssl_in_use=True))
+        self.assertTrue(_client_tls_in_use(connection))
+        self.assertFalse(_client_tls_in_use(SimpleNamespace()))
 
 
 class DeploymentPreviewContractTest(unittest.TestCase):
@@ -186,13 +211,21 @@ class DeploymentPreviewContractTest(unittest.TestCase):
         self.assertEqual(
             first["pending_gates"],
             [
-                "provider-billing", "provider-region", "provider-authorization",
-                "tailnet-route", "writer-cutover",
+                "provider-billing",
+                "provider-region",
+                "provider-authorization",
+                "tailnet-route",
+                "writer-cutover",
             ],
         )
         self.assertEqual(
             first["resources"],
-            ["postgres-database", "private-service", "tailscale-gateway"],
+            [
+                "postgres-database",
+                "private-service",
+                "embedding-service",
+                "tailscale-gateway",
+            ],
         )
         rendered = json.dumps(first, sort_keys=True)
         self.assertNotIn("secret://", rendered)
@@ -201,22 +234,38 @@ class DeploymentPreviewContractTest(unittest.TestCase):
         network.assert_not_called()
         process.assert_not_called()
 
-    def test_manifest_is_closed_and_rejects_credentials_or_unpinned_images(self) -> None:
+    def test_manifest_is_closed_and_rejects_credentials_or_unpinned_images(
+        self,
+    ) -> None:
         for mutate in (
             lambda value: value.update({"password": "do-not-accept"}),
-            lambda value: value["database"].update({"url_ref": "postgresql://user:password@host/db"}),
-            lambda value: value.update({"image": "registry.example.invalid/recall-core:latest"}),
+            lambda value: value["database"].update(
+                {"url_ref": "postgresql://user:password@host/db"}
+            ),
+            lambda value: value.update(
+                {"image": "registry.example.invalid/recall-core:latest"}
+            ),
+            lambda value: value["service"].update(
+                {"embedding_image": "registry.example.invalid/embedding:latest"}
+            ),
+            lambda value: value["network"].update(
+                {"gateway_image": "registry.example.invalid/tailscale:latest"}
+            ),
             lambda value: value["service"].update({"public_ingress": True}),
             lambda value: value["network"].update({"listen_port": 443}),
         ):
-            value = synthetic_manifest(); mutate(value)
+            value = synthetic_manifest()
+            mutate(value)
             with self.subTest(value=value):
                 with self.assertRaises(DeploymentManifestError):
                     load_manifest(self.write_manifest(value))
 
     def test_private_listener_port_is_configurable_without_permitting_443(self) -> None:
-        value = synthetic_manifest(); value["network"]["listen_port"] = 10443
-        self.assertEqual(load_manifest(self.write_manifest(value))["network"]["listen_port"], 10443)
+        value = synthetic_manifest()
+        value["network"]["listen_port"] = 10443
+        self.assertEqual(
+            load_manifest(self.write_manifest(value))["network"]["listen_port"], 10443
+        )
 
     def test_repository_profile_is_valid_and_safe_to_preview(self) -> None:
         profile = load_manifest(SERVER / "deploy" / "recall-core.plan.example.json")
@@ -225,17 +274,21 @@ class DeploymentPreviewContractTest(unittest.TestCase):
         self.assertRegex(result["plan_sha256"], r"^[0-9a-f]{64}$")
 
     def test_manifest_reader_rejects_symlinks_before_reading(self) -> None:
-        directory = tempfile.TemporaryDirectory(); self.addCleanup(directory.cleanup)
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
         target = Path(directory.name) / "target.json"
         target.write_text(json.dumps(synthetic_manifest()))
-        link = Path(directory.name) / "manifest.json"; link.symlink_to(target)
+        link = Path(directory.name) / "manifest.json"
+        link.symlink_to(target)
         with self.assertRaises(DeploymentManifestError):
             load_manifest(link)
 
 
 class ContainerContractTest(unittest.TestCase):
-    def test_image_has_pinned_base_nonroot_runtime_and_content_free_healthcheck(self) -> None:
-        dockerfile = (SERVER / "Dockerfile").read_text()
+    def test_image_has_pinned_base_nonroot_runtime_and_content_free_healthcheck(
+        self,
+    ) -> None:
+        dockerfile = (RECALL / "Dockerfile").read_text()
         first = dockerfile.splitlines()[0]
         self.assertRegex(
             first,

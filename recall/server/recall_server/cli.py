@@ -13,23 +13,47 @@ from .capabilities import CapabilityError, probe_database
 from .db import BrainStore
 from .deployment import DeploymentManifestError, load_manifest, preview
 from .federation import QUALITY_SCORES, SOURCE_FAMILIES
-from .managed_apply import ApprovalError, approval_status, load_approvals
+from .live_providers import (
+    LiveProviderError,
+    build_live_adapters,
+)
+from .managed_apply import (
+    ApprovalError,
+    approval_status,
+    load_approvals,
+    reconcile_infrastructure,
+)
 from .semantic import SemanticRuntime
 
 
 def main() -> None:
-    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format="%(levelname)s %(message)s")
+    logging.basicConfig(
+        level=os.environ.get("LOG_LEVEL", "INFO"), format="%(levelname)s %(message)s"
+    )
     ap = argparse.ArgumentParser(prog="recall-server")
     ap.add_argument("--dsn", default=os.environ.get("RECALL_DATABASE_URL"))
     sub = ap.add_subparsers(dest="command", required=True)
     sub.add_parser("migrate")
     capability = sub.add_parser("capability-check")
-    capability.add_argument("--profile", choices=("production", "local-fixture"), default="production")
+    capability.add_argument(
+        "--profile", choices=("production", "local-fixture"), default="production"
+    )
     deployment = sub.add_parser("deployment-preview")
     deployment.add_argument("--manifest", type=Path, required=True)
     approval = sub.add_parser("deployment-approval-check")
     approval.add_argument("--manifest", type=Path, required=True)
     approval.add_argument("--approvals", type=Path, required=True)
+    apply = sub.add_parser("deployment-apply")
+    apply.add_argument("--manifest", type=Path, required=True)
+    apply.add_argument("--approvals", type=Path, required=True)
+    apply.add_argument("--planetscale-organization", required=True)
+    apply.add_argument("--database-name", required=True)
+    apply.add_argument("--render-owner-id", required=True)
+    apply.add_argument("--core-name", required=True)
+    apply.add_argument("--embedding-name", required=True)
+    apply.add_argument("--gateway-name", required=True)
+    apply.add_argument("--tailnet-hostname", required=True)
+    apply.add_argument("--tailnet-tag", required=True)
     sub.add_parser("rebuild")
     backfill_entities = sub.add_parser("backfill-entities")
     backfill_entities.add_argument("--batch-size", type=int, default=5000)
@@ -47,12 +71,25 @@ def main() -> None:
     backfill_embeddings.add_argument("--source-id")
     backfill_embeddings.add_argument("--surface")
     sub.add_parser("export")
-    create_token = sub.add_parser("token-create"); create_token.add_argument("name"); create_token.add_argument("--source"); create_token.add_argument("--scopes", default="read,write"); create_token.add_argument("--output", required=True, help="write the one-time plaintext credential to a new mode-0600 file")
-    revoke_token = sub.add_parser("token-revoke"); revoke_token.add_argument("name")
+    create_token = sub.add_parser("token-create")
+    create_token.add_argument("name")
+    create_token.add_argument("--source")
+    create_token.add_argument("--scopes", default="read,write")
+    create_token.add_argument(
+        "--output",
+        required=True,
+        help="write the one-time plaintext credential to a new mode-0600 file",
+    )
+    revoke_token = sub.add_parser("token-revoke")
+    revoke_token.add_argument("name")
     source_profile = sub.add_parser("source-profile-set")
     source_profile.add_argument("source_id")
-    source_profile.add_argument("--family", choices=sorted(SOURCE_FAMILIES), required=True)
-    source_profile.add_argument("--quality", choices=sorted(QUALITY_SCORES), required=True)
+    source_profile.add_argument(
+        "--family", choices=sorted(SOURCE_FAMILIES), required=True
+    )
+    source_profile.add_argument(
+        "--quality", choices=sorted(QUALITY_SCORES), required=True
+    )
     source_profile.add_argument("--freshness-half-life-days", type=int, required=True)
     source_alias = sub.add_parser("source-alias-set")
     source_alias.add_argument("alias")
@@ -64,26 +101,76 @@ def main() -> None:
     server.add_argument("--unix-socket")
     server.add_argument("--require-auth", action="store_true")
     server.add_argument(
-        "--capability-profile", choices=("production", "local-fixture"),
+        "--capability-profile",
+        choices=("production", "local-fixture"),
     )
     args = ap.parse_args()
     if args.command == "deployment-preview":
         try:
             print(json.dumps(preview(load_manifest(args.manifest)), sort_keys=True))
         except DeploymentManifestError:
-            print(json.dumps({"status": "rejected", "code": "manifest_invalid"}), file=sys.stderr)
+            print(
+                json.dumps({"status": "rejected", "code": "manifest_invalid"}),
+                file=sys.stderr,
+            )
             raise SystemExit(2) from None
         return
     if args.command == "deployment-approval-check":
         try:
             manifest = load_manifest(args.manifest)
             plan_sha256 = preview(manifest)["plan_sha256"]
-            print(json.dumps(approval_status(
-                load_approvals(args.approvals, plan_sha256),
-            ), sort_keys=True))
+            print(
+                json.dumps(
+                    approval_status(
+                        load_approvals(args.approvals, plan_sha256),
+                    ),
+                    sort_keys=True,
+                )
+            )
         except (ApprovalError, DeploymentManifestError) as error:
-            code = error.code if isinstance(error, ApprovalError) else "manifest_invalid"
+            code = (
+                error.code if isinstance(error, ApprovalError) else "manifest_invalid"
+            )
             print(json.dumps({"status": "rejected", "code": code}), file=sys.stderr)
+            raise SystemExit(2) from None
+        return
+    if args.command == "deployment-apply":
+        try:
+            manifest = load_manifest(args.manifest)
+            approvals = load_approvals(args.approvals, preview(manifest)["plan_sha256"])
+            pending = approval_status(approvals)["pending_gates"]
+            if any(gate != "writer-cutover" for gate in pending):
+                raise ApprovalError("infrastructure_approval_required")
+            adapters = build_live_adapters(
+                planetscale_organization=args.planetscale_organization,
+                database_name=args.database_name,
+                render_owner_id=args.render_owner_id,
+                core_name=args.core_name,
+                embedding_name=args.embedding_name,
+                gateway_name=args.gateway_name,
+                tailnet_hostname=args.tailnet_hostname,
+                tailnet_tag=args.tailnet_tag,
+            )
+            print(
+                json.dumps(
+                    reconcile_infrastructure(manifest, approvals, adapters),
+                    sort_keys=True,
+                )
+            )
+        except (
+            ApprovalError,
+            DeploymentManifestError,
+            LiveProviderError,
+        ) as error:
+            code = (
+                error.code
+                if isinstance(error, (ApprovalError, LiveProviderError))
+                else "manifest_invalid"
+            )
+            print(
+                json.dumps({"status": "rejected", "code": code}),
+                file=sys.stderr,
+            )
             raise SystemExit(2) from None
         return
     if not args.dsn:
@@ -92,54 +179,106 @@ def main() -> None:
         try:
             print(json.dumps(probe_database(args.dsn, args.profile), sort_keys=True))
         except CapabilityError as error:
-            print(json.dumps({"status": "rejected", "code": error.code}), file=sys.stderr)
+            print(
+                json.dumps({"status": "rejected", "code": error.code}), file=sys.stderr
+            )
             raise SystemExit(2) from None
         return
     if args.command == "serve" and args.capability_profile:
         try:
             probe_database(args.dsn, args.capability_profile)
         except CapabilityError as error:
-            print(json.dumps({"status": "rejected", "code": error.code}), file=sys.stderr)
+            print(
+                json.dumps({"status": "rejected", "code": error.code}), file=sys.stderr
+            )
             raise SystemExit(2) from None
     store = BrainStore(args.dsn, semantic_runtime=SemanticRuntime.from_env())
     if args.command == "migrate":
-        store.migrate(); print(json.dumps({"status": "ok", "schema_version": SCHEMA_VERSION}))
+        store.migrate()
+        print(json.dumps({"status": "ok", "schema_version": SCHEMA_VERSION}))
     elif args.command == "rebuild":
         print(json.dumps(store.rebuild(), sort_keys=True))
     elif args.command == "backfill-entities":
-        print(json.dumps(store.backfill_entities(args.batch_size, args.max_batches), sort_keys=True))
+        print(
+            json.dumps(
+                store.backfill_entities(args.batch_size, args.max_batches),
+                sort_keys=True,
+            )
+        )
     elif args.command == "backfill-redaction":
-        print(json.dumps(store.backfill_redaction(
-            args.batch_size, args.max_batches, args.workers,
-        ), sort_keys=True))
+        print(
+            json.dumps(
+                store.backfill_redaction(
+                    args.batch_size,
+                    args.max_batches,
+                    args.workers,
+                ),
+                sort_keys=True,
+            )
+        )
     elif args.command == "backfill-cowork-sessions":
-        print(json.dumps(store.backfill_cowork_sessions(
-            args.batch_size, args.max_batches,
-        ), sort_keys=True))
+        print(
+            json.dumps(
+                store.backfill_cowork_sessions(
+                    args.batch_size,
+                    args.max_batches,
+                ),
+                sort_keys=True,
+            )
+        )
     elif args.command == "backfill-embeddings":
-        print(json.dumps(store.embed_pending(
-            args.batch_size, args.max_batches, args.source_id, args.surface,
-        ), sort_keys=True))
+        print(
+            json.dumps(
+                store.embed_pending(
+                    args.batch_size,
+                    args.max_batches,
+                    args.source_id,
+                    args.surface,
+                ),
+                sort_keys=True,
+            )
+        )
     elif args.command == "export":
-        for envelope in store.export_raw(): print(json.dumps(envelope, sort_keys=True))
+        for envelope in store.export_raw():
+            print(json.dumps(envelope, sort_keys=True))
     elif args.command == "token-create":
-        credential = store.create_collector_token(args.name, args.source, [scope.strip() for scope in args.scopes.split(",") if scope.strip()])
+        credential = store.create_collector_token(
+            args.name,
+            args.source,
+            [scope.strip() for scope in args.scopes.split(",") if scope.strip()],
+        )
         payload = (json.dumps(credential, sort_keys=True) + "\n").encode()
         descriptor = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(descriptor, "wb") as output:
             output.write(payload)
-        print(json.dumps({key: value for key, value in credential.items() if key != "token"}, sort_keys=True))
+        print(
+            json.dumps(
+                {key: value for key, value in credential.items() if key != "token"},
+                sort_keys=True,
+            )
+        )
     elif args.command == "token-revoke":
         print(json.dumps({"revoked": store.revoke_collector_token(args.name)}))
     elif args.command == "source-profile-set":
-        print(json.dumps(store.set_source_profile({
-            "source_id": args.source_id,
-            "family": args.family,
-            "quality": args.quality,
-            "freshness_half_life_days": args.freshness_half_life_days,
-        }), sort_keys=True))
+        print(
+            json.dumps(
+                store.set_source_profile(
+                    {
+                        "source_id": args.source_id,
+                        "family": args.family,
+                        "quality": args.quality,
+                        "freshness_half_life_days": args.freshness_half_life_days,
+                    }
+                ),
+                sort_keys=True,
+            )
+        )
     elif args.command == "source-alias-set":
-        print(json.dumps(store.set_source_alias(args.alias, args.source_id), sort_keys=True))
+        print(
+            json.dumps(
+                store.set_source_alias(args.alias, args.source_id), sort_keys=True
+            )
+        )
     elif args.command == "federation-scoreboard":
         print(json.dumps(store.federation_scoreboard(), sort_keys=True))
     else:
