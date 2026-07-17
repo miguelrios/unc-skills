@@ -205,6 +205,7 @@ class MacPackageTest(unittest.TestCase):
         self.assertIn('ssl.get_default_verify_paths()', installer)
         self.assertIn('get_ca_certs()', installer)
         self.assertIn('cp -R "$SOURCE/lib/connectors"', installer)
+        self.assertIn('cp -R "$SOURCE/lib/contracts"', installer)
         self.assertIn('"client.cli", "export-inbox-sync"', installer)
         self.assertIn('"client.cli", "cowork-local-sync"', installer)
         self.assertIn('claude-code', installer)

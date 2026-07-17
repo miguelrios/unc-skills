@@ -28,7 +28,7 @@ except ModuleNotFoundError:
 from recall_server import SCHEMA_VERSION
 from recall_server import cli as server_cli
 from recall_server.app import Handler, serve, serve_unix
-from recall_server.db import BrainStore
+from recall_server.db import BrainStore, semantic_candidate_limit
 from recall_server.federation import SOURCE_FAMILIES, SourceProfile
 from recall_server.projectors import advisory_lock_key, canonical_json, effective_session_id, partial_lexical_probes, phrase_query_spec, preferred_phrase_probe, preferred_phrase_probes, project, redact_text, validate_envelope
 from recall_server.ranking import DEFAULT_SEARCH_DEADLINE_MS, evidence_rank_components, retrieval_leg_order, should_run_partial
@@ -317,6 +317,66 @@ class IngestTransactionContractTest(unittest.TestCase):
             ],
         )
         store._advance_projector.assert_called_once_with(connection, 43)
+
+
+class SemanticRetrievalContractTest(unittest.TestCase):
+    def test_similarity_floor_is_explicit_validated_deployment_config(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"RECALL_SEMANTIC_MINIMUM_SIMILARITY": "0.25"},
+        ):
+            store = BrainStore("postgresql://synthetic.invalid/recall")
+        self.assertEqual(store.semantic_minimum_similarity, 0.25)
+        with self.assertRaisesRegex(ValueError, "semantic minimum similarity"):
+            BrainStore(
+                "postgresql://synthetic.invalid/recall",
+                semantic_minimum_similarity=1.01,
+            )
+
+    def test_dense_candidate_pool_is_bounded_and_keeps_anchor_headroom(self) -> None:
+        self.assertEqual(semantic_candidate_limit(1), 20)
+        self.assertEqual(semantic_candidate_limit(5), 20)
+        self.assertEqual(semantic_candidate_limit(10), 40)
+        self.assertEqual(semantic_candidate_limit(50), 100)
+
+    def test_similarity_threshold_is_applied_after_bounded_hnsw_retrieval(self) -> None:
+        runtime = mock.Mock(
+            model="voyage-4",
+            fingerprint="voyage:synthetic",
+            dimensions=512,
+        )
+        store = BrainStore(
+            "postgresql://synthetic.invalid/recall",
+            semantic_runtime=runtime,
+        )
+        cursor = mock.MagicMock()
+        cursor.fetchall.return_value = [
+            {"id": 1, "lexical_rank": 0.81},
+            {"id": 2, "lexical_rank": 0.22},
+        ]
+        store._execute_bounded = mock.MagicMock(return_value=cursor)
+        connection = mock.MagicMock()
+
+        rows = store._semantic_leg(
+            connection,
+            [0.1] * 512,
+            {},
+            limit=5,
+            minimum_similarity=0.35,
+        )
+
+        _connection, sql, values, _deadline = (
+            store._execute_bounded.call_args.args
+        )
+        self.assertNotIn(
+            "AND 1-(embedding.embedding <=> %s::halfvec) >=",
+            sql,
+        )
+        self.assertNotIn(0.35, values)
+        self.assertEqual(
+            rows,
+            [{"id": 1, "lexical_rank": 0.81, "leg": "semantic", "tier": 2}],
+        )
 
 
 class AdminCliSafetyTest(unittest.TestCase):

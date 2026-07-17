@@ -180,7 +180,11 @@ Searches have a 300ms database-work budget by default. Override it only within t
 content-free per-leg timings, result counts, and the deadline outcome.
 
 Semantic retrieval requires PostgreSQL with pgvector and one explicitly selected embedding
-profile. Recall supports three protocols:
+profile. Cosine score distributions vary by model, so
+`RECALL_SEMANTIC_MINIMUM_SIMILARITY` is an explicit validated deployment setting in the
+0–1 range and defaults to `0.35`. Calibrate it with a private retrieval eval when changing
+models; the bounded top-K candidate pool prevents a lower floor from creating an unbounded
+scan. Recall supports three protocols:
 
 - `voyage` is the recommended hosted profile. `voyage-4` supports 512-dimensional output and
   distinct `document`/`query` retrieval modes.

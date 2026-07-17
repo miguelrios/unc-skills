@@ -30,14 +30,40 @@ class SearchDeadlineExceeded(Exception):
     pass
 
 
+def semantic_candidate_limit(result_limit: int) -> int:
+    """Keep enough dense anchors for deduplication without broad payload reads."""
+    return min(100, max(20, result_limit * 4))
+
+
 class BrainStore:
     def __init__(self, dsn: str, search_deadline_ms: int | None = None,
-                 semantic_runtime: SemanticRuntime | None = None):
+                 semantic_runtime: SemanticRuntime | None = None,
+                 semantic_minimum_similarity: float | None = None):
         self.dsn = dsn
         configured = search_deadline_ms if search_deadline_ms is not None else int(os.environ.get("RECALL_SEARCH_DEADLINE_MS", str(DEFAULT_SEARCH_DEADLINE_MS)))
         if not 10 <= configured <= 5000:
             raise ValueError("search deadline must be between 10 and 5000 milliseconds")
         self.search_deadline_ms = configured
+        try:
+            similarity = (
+                semantic_minimum_similarity
+                if semantic_minimum_similarity is not None
+                else float(
+                    os.environ.get(
+                        "RECALL_SEMANTIC_MINIMUM_SIMILARITY",
+                        "0.35",
+                    )
+                )
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "semantic minimum similarity must be between 0 and 1"
+            ) from exc
+        if not 0 <= similarity <= 1:
+            raise ValueError(
+                "semantic minimum similarity must be between 0 and 1"
+            )
+        self.semantic_minimum_similarity = similarity
         if semantic_runtime is not None and semantic_runtime.dimensions != 512:
             raise ValueError("BrainStore semantic runtime requires 512 dimensions")
         self.semantic_runtime = semantic_runtime
@@ -835,7 +861,6 @@ class BrainStore:
               AND embedding.projector_version=i.projector_version
               AND embedding.content_sha256=
                   encode(sha256(convert_to(i.text_redacted,'UTF8')),'hex')
-              AND 1-(embedding.embedding <=> %s::halfvec) >= %s
               AND {where}
             ORDER BY embedding.embedding <=> %s::halfvec,i.id DESC
             LIMIT %s
@@ -845,15 +870,17 @@ class BrainStore:
                 self.semantic_runtime.model,
                 self.semantic_runtime.fingerprint,
                 self.semantic_runtime.dimensions,
-                encoded,
-                minimum_similarity,
                 *params,
                 encoded,
                 limit,
             ],
             deadline_at,
         ).fetchall()
-        return [{**dict(row), "leg": "semantic", "tier": 2} for row in rows]
+        return [
+            {**dict(row), "leg": "semantic", "tier": 2}
+            for row in rows
+            if float(row["lexical_rank"]) >= minimum_similarity
+        ]
 
     def _answer_leg(self, conn, anchors: list[dict], filters: dict, *,
                     deadline_at: float | None = None) -> list[dict]:
@@ -1069,7 +1096,8 @@ class BrainStore:
                         semantic_rows = run_leg(f"semantic-{vector_index}", lambda semantic_vector=semantic_vector: self._semantic_leg(
                             conn, semantic_vector, filters, authorized_source=authorized_source,
                             routed_source_ids=routed_source_ids, deadline_at=deadline_at,
-                            limit=max(100, limit * 10), minimum_similarity=0.35,
+                            limit=semantic_candidate_limit(limit),
+                            minimum_similarity=self.semantic_minimum_similarity,
                         ))
                         if vector_index == 0:
                             for semantic_row in semantic_rows:
