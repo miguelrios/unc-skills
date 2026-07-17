@@ -27,6 +27,22 @@ python -m recall_server.cli capability-check
 `--profile local-fixture` is a visibly non-production exception restricted to a
 loopback PostgreSQL fixture. It never reports production readiness.
 
+The separate approval document is owner-only, bound to the exact preview hash, and
+contains only explicit booleans plus the approved billing and region slugs. Validate it
+without applying anything:
+
+```bash
+python -m recall_server.cli deployment-approval-check \
+  --manifest server/deploy/recall-core.plan.example.json \
+  --approvals /private/approvals.json
+```
+
+Infrastructure reconciliation remains impossible until billing, region, provider
+authorization, and the Tailnet route are all approved. Writer cutover is a separate
+approval and is never inferred from infrastructure approval. Provider adapters receive
+only the closed desired state and return content-free receipts; repeated reconciliation
+must converge to `unchanged` without duplicate resources.
+
 ## Existing host pilot
 
 The existing host pilot listens on a Unix socket, not TCP. Tailscale Serve is its only network proxy.
