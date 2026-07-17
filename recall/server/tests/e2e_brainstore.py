@@ -9,6 +9,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -104,6 +105,71 @@ def main() -> None:
                     time.sleep(0.1)
             else:
                 raise AssertionError("server did not become healthy")
+
+            # A large batch may project for a while, but it must not hold the
+            # shared watermark row while unrelated sources are still projecting.
+            projection_started = threading.Event()
+            release_projection = threading.Event()
+            slow_done = threading.Event()
+            fast_done = threading.Event()
+            failures = []
+
+            class PausingStore(BrainStore):
+                def _project_one(self, conn, event_id, value, revision):
+                    super()._project_one(conn, event_id, value, revision)
+                    if not projection_started.is_set():
+                        projection_started.set()
+                        if not release_projection.wait(10):
+                            raise AssertionError("projection release timed out")
+
+            def ingest_slow_batch():
+                try:
+                    PausingStore(dsn).ingest(
+                        "watermark-slow-batch",
+                        [
+                            make_envelope(
+                                f"slow-{index}",
+                                {"target_native_id": f"slow-{index}"},
+                                source="synthetic:watermark:slow",
+                                kind="tombstone",
+                            )
+                            for index in range(2)
+                        ],
+                    )
+                except Exception as error:
+                    failures.append(error)
+                finally:
+                    slow_done.set()
+
+            def ingest_fast_batch():
+                try:
+                    BrainStore(dsn).ingest(
+                        "watermark-fast-batch",
+                        [
+                            make_envelope(
+                                "fast-1",
+                                {"target_native_id": "fast-1"},
+                                source="synthetic:watermark:fast",
+                                kind="tombstone",
+                            )
+                        ],
+                    )
+                except Exception as error:
+                    failures.append(error)
+                finally:
+                    fast_done.set()
+
+            slow_thread = threading.Thread(target=ingest_slow_batch)
+            slow_thread.start()
+            assert projection_started.wait(5)
+            fast_thread = threading.Thread(target=ingest_fast_batch)
+            fast_thread.start()
+            unrelated_batch_completed = fast_done.wait(5)
+            release_projection.set()
+            slow_thread.join(10)
+            fast_thread.join(10)
+            assert unrelated_batch_completed
+            assert slow_done.is_set() and fast_done.is_set() and not failures
 
             first = make_envelope("session-1:turn-1", {"role": "user", "text": "quartz decision"})
             first["provenance"]["private_internal"] = "synthetic-not-client-visible"
@@ -604,6 +670,8 @@ def main() -> None:
                     "revisions_for_session_1_turn_1": conn.execute("SELECT count(*) AS n FROM source_events WHERE source_id='codex:linux' AND native_id='session-1:turn-1'").fetchone()["n"],
                     "race_duplicates": 0,
                     "same_key_race_single_commit": True,
+                    "watermark_advanced_once_per_batch": True,
+                    "unrelated_ingest_not_blocked_by_projection": True,
                     "source_takeover_rejected": True,
                     "source_identity_conflations": 0,
                     "disconnected_ack_replayed": True,

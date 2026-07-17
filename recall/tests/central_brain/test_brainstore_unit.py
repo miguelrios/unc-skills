@@ -82,6 +82,15 @@ class SchemaMigrationContractTest(unittest.TestCase):
         rendered = migration.read_text()
         self.assertTrue(all(f"'{family}'" in rendered for family in added))
 
+    def test_source_scoped_backfill_has_a_live_item_id_index(self) -> None:
+        migration = SERVER / "schema" / "013_source_backfill_index.sql"
+        rendered = " ".join(migration.read_text().split()).casefold()
+        self.assertIn("on items(source_id, id)", rendered)
+        self.assertIn(
+            "where deleted_at is null and btrim(text_redacted) <> ''",
+            rendered,
+        )
+
 
 class TypedConnectorProjectionTest(unittest.TestCase):
     def test_v2_communication_projects_clean_conversation_evidence(self) -> None:
@@ -197,6 +206,69 @@ class SourceScopedReadContractTest(unittest.TestCase):
 
 
 class HttpBoundaryContractTest(unittest.TestCase):
+    def test_readiness_executes_one_constant_query(self) -> None:
+        connection = mock.MagicMock()
+        connection.execute.return_value.fetchone.return_value = {"ready": 1}
+        context = mock.MagicMock()
+        context.__enter__.return_value = connection
+        store = BrainStore("postgresql://synthetic.invalid/recall")
+        store.connect = mock.MagicMock(return_value=context)
+
+        self.assertEqual(store.readiness(), {"status": "ready"})
+        connection.execute.assert_called_once_with("SELECT 1 AS ready")
+
+    def test_readyz_uses_constant_time_database_probe_not_full_metrics(self) -> None:
+        handler = object.__new__(Handler)
+        handler.path = "/readyz"
+        handler.store = mock.MagicMock()
+        handler.store.readiness.return_value = {"status": "ready"}
+        handler.send_json = mock.MagicMock()
+
+        Handler.do_GET(handler)
+
+        handler.store.readiness.assert_called_once_with()
+        handler.store.service_metrics.assert_not_called()
+        handler.send_json.assert_called_once_with(200, {"status": "ready"})
+
+    def test_operational_health_uses_one_bounded_projection_probe(self) -> None:
+        connection = mock.MagicMock()
+        connection.execute.return_value.fetchone.return_value = {"projection_lag": 0}
+        context = mock.MagicMock()
+        context.__enter__.return_value = connection
+        store = BrainStore("postgresql://synthetic.invalid/recall")
+        store.connect = mock.MagicMock(return_value=context)
+
+        self.assertEqual(
+            store.operational_health(),
+            {"status": "ok", "projection_lag": 0},
+        )
+        connection.execute.assert_called_once()
+        sql = connection.execute.call_args.args[0]
+        self.assertIn("ORDER BY id DESC LIMIT 1", sql)
+        self.assertNotIn("count(", sql.casefold())
+
+
+    def test_remote_doctor_uses_bounded_health_not_full_metrics(self) -> None:
+        handler = object.__new__(Handler)
+        handler.path = "/v1/doctor"
+        handler.require = mock.MagicMock(return_value={"source_id": "source-a"})
+        handler.store = mock.MagicMock()
+        handler.store.operational_health.return_value = {
+            "status": "ok",
+            "projection_lag": 0,
+        }
+        handler.send_json = mock.MagicMock()
+
+        Handler.do_GET(handler)
+
+        handler.store.operational_health.assert_called_once_with()
+        handler.store.doctor.assert_not_called()
+        handler.store.service_metrics.assert_not_called()
+        handler.send_json.assert_called_once_with(
+            200,
+            {"status": "ok", "projection_lag": 0},
+        )
+
     def test_search_rejects_oversized_query_before_database_or_model_io(self) -> None:
         with self.assertRaisesRegex(ValueError, "too large"):
             BrainStore("postgresql://unused").search("x" * 8193)
@@ -220,6 +292,31 @@ class HttpBoundaryContractTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "non-socket"):
                 serve_unix("postgresql://synthetic.invalid/recall", str(path))
             self.assertEqual(path.read_text(), "do not delete")
+
+
+class IngestTransactionContractTest(unittest.TestCase):
+    def test_batch_projection_advances_the_shared_watermark_once(self) -> None:
+        store = BrainStore("postgresql://synthetic.invalid/recall")
+        store._project_one = mock.MagicMock()
+        store._advance_projector = mock.MagicMock()
+        connection = mock.MagicMock()
+        events = [
+            (41, envelope(native_id="turn-1"), 1),
+            (43, envelope(native_id="turn-2"), 1),
+            (42, envelope(native_id="turn-3"), 1),
+        ]
+
+        store._project_batch(connection, events)
+
+        self.assertEqual(
+            store._project_one.call_args_list,
+            [
+                mock.call(connection, 41, events[0][1], 1),
+                mock.call(connection, 43, events[1][1], 1),
+                mock.call(connection, 42, events[2][1], 1),
+            ],
+        )
+        store._advance_projector.assert_called_once_with(connection, 43)
 
 
 class AdminCliSafetyTest(unittest.TestCase):
@@ -253,6 +350,20 @@ class EnvelopeContractTest(unittest.TestCase):
     def test_default_deadline_fits_below_tailnet_slo_with_client_headroom(self) -> None:
         self.assertEqual(DEFAULT_SEARCH_DEADLINE_MS, 300)
         self.assertLess(DEFAULT_SEARCH_DEADLINE_MS, 500)
+
+    def test_large_remote_corpora_may_select_a_bounded_five_second_deadline(self) -> None:
+        self.assertEqual(
+            BrainStore(
+                "postgresql://synthetic.invalid/recall",
+                search_deadline_ms=5000,
+            ).search_deadline_ms,
+            5000,
+        )
+        with self.assertRaisesRegex(ValueError, "between 10 and 5000"):
+            BrainStore(
+                "postgresql://synthetic.invalid/recall",
+                search_deadline_ms=5001,
+            )
 
     def test_advisory_lock_key_is_postgres_text_safe_and_boundary_preserving(self) -> None:
         key = advisory_lock_key("ab", "c")

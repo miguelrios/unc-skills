@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "deployment_name": "synthetic-recall-core",
+  "image": "registry.example.invalid/recall-core@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "database": {
+    "adapter": "postgres",
+    "provider": "planetscale",
+    "url_ref": "secret://runtime/RECALL_DATABASE_URL",
+    "tls_mode": "verify-full"
+  },
+  "service": {
+    "adapter": "render-private-service",
+    "embedding": {
+      "protocol": "voyage",
+      "url": "https://api.voyageai.com",
+      "approved_url": "https://api.voyageai.com",
+      "key_ref": "secret://runtime/RECALL_EMBEDDING_API_KEY",
+      "model": "voyage-4",
+      "revision": "voyage-4",
+      "dimensions": 512,
+      "batch_size": 64
+    },
+    "region_ref": "approval://provider-region",
+    "billing_ref": "approval://provider-billing",
+    "public_ingress": false
+  },
+  "network": {
+    "adapter": "tailscale-gateway",
+    "gateway_image": "docker.io/tailscale/tailscale@sha256:f15d5d3f4a68773a853180b72496f70ba614b64de0878c43fe3da39fe0afba47",
+    "route_ref": "approval://tailnet-route",
+    "listen_port": 9443
+  },
+  "authorization": {
+    "provider_ref": "approval://provider-authorization",
+    "cutover_ref": "approval://writer-cutover"
+  }
+}

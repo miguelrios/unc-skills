@@ -10,7 +10,7 @@ import uuid
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import psycopg
 from psycopg.rows import dict_row
@@ -35,8 +35,8 @@ class BrainStore:
                  semantic_runtime: SemanticRuntime | None = None):
         self.dsn = dsn
         configured = search_deadline_ms if search_deadline_ms is not None else int(os.environ.get("RECALL_SEARCH_DEADLINE_MS", str(DEFAULT_SEARCH_DEADLINE_MS)))
-        if not 10 <= configured <= 2000:
-            raise ValueError("search deadline must be between 10 and 2000 milliseconds")
+        if not 10 <= configured <= 5000:
+            raise ValueError("search deadline must be between 10 and 5000 milliseconds")
         self.search_deadline_ms = configured
         if semantic_runtime is not None and semantic_runtime.dimensions != 512:
             raise ValueError("BrainStore semantic runtime requires 512 dimensions")
@@ -189,6 +189,33 @@ class BrainStore:
                 return None
             return row
 
+    def readiness(self) -> dict[str, str]:
+        """Prove the database is reachable without scanning runtime data."""
+        with self.connect() as conn:
+            row = conn.execute("SELECT 1 AS ready").fetchone()
+        if not row or row["ready"] != 1:
+            raise RuntimeError("database readiness probe failed")
+        return {"status": "ready"}
+
+    def operational_health(self) -> dict[str, str | int]:
+        """Return client health without scanning the corpus or exact metric totals."""
+        with self.connect() as conn:
+            row = conn.execute(
+                """SELECT GREATEST(
+                       0,
+                       COALESCE((
+                           SELECT id FROM source_events ORDER BY id DESC LIMIT 1
+                       ), 0) -
+                       COALESCE((
+                           SELECT last_event_id FROM projection_watermarks
+                           WHERE projector='items'
+                       ), 0)
+                   ) AS projection_lag"""
+            ).fetchone()
+        if not row:
+            raise RuntimeError("database operational health probe failed")
+        return {"status": "ok", "projection_lag": row["projection_lag"]}
+
     def service_metrics(self) -> dict:
         with self.connect() as conn:
             metrics = {
@@ -219,10 +246,13 @@ class BrainStore:
                     ]
                 row = conn.execute(
                     f"""SELECT count(*) AS embedded,
-                               (SELECT count(*) FROM items WHERE deleted_at IS NULL) AS live
+                               (SELECT count(*) FROM items
+                                WHERE deleted_at IS NULL
+                                  AND btrim(text_redacted) <> '') AS live
                         FROM item_embeddings embedding
                         JOIN items item ON item.id=embedding.item_id
-                        WHERE item.deleted_at IS NULL{compatibility}""",
+                        WHERE item.deleted_at IS NULL
+                          AND btrim(item.text_redacted) <> ''{compatibility}""",
                     values,
                 ).fetchone()
                 metrics["embedded_items"] = row["embedded"]
@@ -230,7 +260,8 @@ class BrainStore:
             else:
                 metrics["embedded_items"] = 0
                 metrics["embedding_lag"] = conn.execute(
-                    "SELECT count(*) AS n FROM items WHERE deleted_at IS NULL"
+                    """SELECT count(*) AS n FROM items
+                       WHERE deleted_at IS NULL AND btrim(text_redacted) <> ''"""
                 ).fetchone()["n"]
             return metrics
 
@@ -270,6 +301,7 @@ class BrainStore:
                            FROM items item
                            LEFT JOIN item_embeddings embedding ON embedding.item_id=item.id
                            WHERE item.deleted_at IS NULL
+                             AND btrim(item.text_redacted) <> ''
                              AND (%s::text IS NULL OR item.source_id=%s)
                              AND (%s::text IS NULL OR item.surface=%s)
                              AND (
@@ -386,6 +418,7 @@ class BrainStore:
                 receipts: list[str] = []
                 inserted = 0
                 duplicate_events = 0
+                pending_projections: list[tuple[int, dict, int]] = []
                 source_principals: dict[str, str] = {}
                 for envelope in events:
                     source_id = envelope["source_id"]
@@ -445,12 +478,13 @@ class BrainStore:
                              envelope["visibility"], envelope["content_type"], envelope["content_sha256"], revision,
                              json.dumps(envelope), envelope["kind"] == "tombstone", batch_id),
                         ).fetchone()
-                        self._project_one(conn, row["id"], envelope, revision)
+                        pending_projections.append((row["id"], envelope, revision))
                         existing_by_content[content_identity] = revision
                         max_revision[identity] = revision
                         inserted += 1
                     receipts.append(event_receipt(source_id, envelope["native_id"], revision))
 
+                self._project_batch(conn, pending_projections)
                 acknowledgement = {
                     "batch_id": str(batch_id),
                     "status": "committed",
@@ -465,6 +499,19 @@ class BrainStore:
                 )
                 return acknowledgement, False
 
+    def _project_batch(
+        self,
+        conn,
+        events: Iterable[tuple[int, dict, int]],
+    ) -> None:
+        latest_event_id: int | None = None
+        for event_id, envelope, revision in events:
+            self._project_one(conn, event_id, envelope, revision)
+            if latest_event_id is None or event_id > latest_event_id:
+                latest_event_id = event_id
+        if latest_event_id is not None:
+            self._advance_projector(conn, latest_event_id)
+
     def _project_one(self, conn, event_id: int, envelope: dict, revision: int) -> None:
         session_id = effective_session_id(envelope)
         if envelope["kind"] == "tombstone":
@@ -473,11 +520,9 @@ class BrainStore:
                 "UPDATE items SET deleted_at=now() WHERE source_id=%s AND event_native_id=%s AND deleted_at IS NULL",
                 (envelope["source_id"], target),
             )
-            self._advance_projector(conn, event_id)
             return
         items, metadata = project(envelope, revision)
         if not items and set(metadata) <= {"projector_version", "harness"}:
-            self._advance_projector(conn, event_id)
             return
         conn.execute(
             """INSERT INTO sessions(source_id,native_id,principal_id,harness,started_at,ended_at,metadata,projector_version)
@@ -513,8 +558,6 @@ class BrainStore:
                             for entity in item["entities"]
                         ],
                     )
-        self._advance_projector(conn, event_id)
-
     def _advance_projector(self, conn, event_id: int) -> None:
         conn.execute(
             """INSERT INTO projection_watermarks(projector,version,last_event_id) VALUES ('items',%s,%s)
@@ -1582,8 +1625,13 @@ class BrainStore:
                     "projection_watermarks RESTART IDENTITY"
                 )
                 rows = conn.execute("SELECT id,envelope,revision FROM source_events ORDER BY id").fetchall()
-                for row in rows:
-                    self._project_one(conn, row["id"], row["envelope"], row["revision"])
+                self._project_batch(
+                    conn,
+                    (
+                        (row["id"], row["envelope"], row["revision"])
+                        for row in rows
+                    ),
+                )
                 after = conn.execute("SELECT count(*) AS n FROM items WHERE deleted_at IS NULL").fetchone()["n"]
                 entities_after = conn.execute("SELECT count(*) AS n FROM entities").fetchone()["n"]
                 return {
