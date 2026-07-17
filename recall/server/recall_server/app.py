@@ -262,8 +262,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/readyz":
             try:
-                self.store.service_metrics()
-                self.send_json(200, {"status": "ready"})
+                self.send_json(200, self.store.readiness())
             except Exception:
                 self.send_json(503, {"status": "not_ready"})
             return

@@ -564,6 +564,7 @@ class RenderPrivateStackAdapter:
                 "key": "RECALL_EMBEDDING_BATCH_SIZE",
                 "value": str(embedding["batch_size"]),
             },
+            {"key": "RECALL_SEARCH_DEADLINE_MS", "value": "2000"},
             {"key": "LOG_LEVEL", "value": "INFO"},
         ]
 
