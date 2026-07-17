@@ -1,0 +1,6 @@
+{
+  "name": "selfqa",
+  "version": "0.1.0",
+  "description": "Self-QA a repo's running app end-to-end — discover run/auth/features, build a feature×modality test matrix, execute it live, and produce a witnessed pass/fail report.",
+  "author": { "name": "Miguel Rios", "url": "https://github.com/miguelrios" }
+}

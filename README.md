@@ -13,13 +13,14 @@ Miguel's collection of portable Agent Skills for Claude Code, Codex, and pi.
 | [`recap`](recap/) | Reconstructs everything observable that happened in one exact coding-agent session. | Uses Recall's Claude/Codex evidence; pi can run it but is not yet an indexed source. |
 | [`tether`](tether/) | Keeps Slack threads attached to the exact agents that created them. | Codex and Claude Code resume natively; stock pi publishes as a headless run. End-to-end routing also installs an external Hermes plugin/runtime. |
 | [`desloppify`](desloppify/) | Turns whole-codebase slop into evidence-backed cleanup with Peter O'Malley's official engine. | One canonical workflow selects honest native or prepared-packet review routes per harness. |
+| [`selfqa`](selfqa/) | Points at any repo, discovers how it runs, and QAs the live app end-to-end with a witnessed report. | Uses whatever browser tooling the harness has; API/CLI checks work everywhere. |
 
 The skill payloads are canonical `skills/<name>/SKILL.md` directories. Harness-specific
 manifests package those same files; there are no Claude/Codex/pi forks to drift apart.
 
 ## Install with skills.sh
 
-Browse all seven skills at [skills.sh/miguelrios/unc-skills](https://skills.sh/miguelrios/unc-skills),
+Browse all eight skills at [skills.sh/miguelrios/unc-skills](https://skills.sh/miguelrios/unc-skills),
 or install interactively:
 
 ```bash
