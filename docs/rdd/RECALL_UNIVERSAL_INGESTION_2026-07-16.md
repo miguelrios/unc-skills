@@ -694,3 +694,57 @@ choices, but do not override the hard safety and evidence contracts in this RDD.
   bounded history, and pay-per-use cost controls.
 - [Baileys repository and disclaimer](https://github.com/WhiskeySockets/Baileys) for the explicitly
   experimental WhatsApp linked-device option and its non-affiliation, breakage, and account-risk gate.
+
+## 17. Public MCP replan addendum — 2026-07-17
+
+The owner selected a public HTTPS MCP because the primary Grep agent runtime executes outside the
+Tailnet. This addendum supersedes the Tailnet-only product choice in sections 2, 3.6, 4.2, 5.1, 12,
+15.1, and the corresponding L0 acceptance row. It does not weaken source privacy, database security,
+or authorization floors.
+
+The first hosted OSS profile is one Render public web service running the immutable Recall image in a
+closed `mcp-only` mode, PlanetScale Postgres, and a managed embedding API called directly over HTTPS.
+Only `/mcp`, `/healthz`, and `/readyz` are public. Administrative, migration, credential, ingestion,
+metrics, debug, and generic REST surfaces are absent from that listener. Existing collectors stay on
+the proven writer until the public MCP loop exits; a later source loop may add a separately authorized
+collector path without broadening the MCP listener.
+
+Public MCP authentication is capability- and principal-aware:
+
+- a credential is stored only as a digest and is immediately revocable;
+- read capability resolves only sources granted to its principal;
+- deliberate capture and exact-receipt forget are confined to one named memory source;
+- tool discovery exposes only capabilities held by the current principal;
+- missing, malformed, revoked, wrong-principal, wrong-source, and wrong-capability requests fail
+  before source or store access; and
+- the first profile remains one owner per deployment/database. Cross-owner multi-tenancy is outside
+  this chain.
+
+Grep must inject the MCP credential through a host-managed secret boundary. A durable credential may
+not appear in a sandbox environment, filesystem, prompt, tool result, or log. If the Grep runtime
+cannot prove this property, the public-MCP loop stops `AT_BOUND` and the successor design uses a
+short-lived token exchange; it does not copy an owner-wide credential into an untrusted sandbox.
+
+PlanetScale remains a public managed endpoint protected by verified TLS, database authentication, and
+an all-role IP restriction. The production Render service uses a dedicated outbound-IP set scoped to
+its region and environment; shared regional ranges are not the production network boundary. The
+temporary proven-writer address remains allowlisted only through cutover. Purchasing the dedicated
+set and final cutover are explicit human gates.
+
+For clarity, public MCP ingress does not make imported evidence public. The service returns evidence
+only after Recall authorization, retains exact receipts and deletion lineage, keeps raw/private proof
+out of the repository, and exposes no anonymous query mode. Private-network deployment remains an
+optional operator profile rather than an OSS requirement.
+
+The execution plan is
+`docs/LOOP_CHAIN_RECALL_PUBLIC_MCP_AND_UNIVERSAL_INGESTION_2026-07-17.md`.
+
+Primary provider references for this replan:
+
+- [Render web services](https://render.com/docs/web-services) for managed public HTTPS.
+- [Render outbound IP addresses](https://render.com/docs/outbound-ip-addresses) for regional shared
+  ranges and the dedicated-IP alternative.
+- [Render dedicated IPs](https://render.com/docs/dedicated-ips) for fixed, workspace-exclusive
+  outbound addresses.
+- [PlanetScale IP restrictions](https://planetscale.com/docs/postgres/connecting/ip-restrictions) for
+  all-role/schema CIDR enforcement.
