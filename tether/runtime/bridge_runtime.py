@@ -652,13 +652,20 @@ class Broker:
         if not channel.startswith("C") or channel in self._joined_channels:
             return
         try:
-            _slack_call(self.token, "conversations.join", {"channel": channel})
+            # C-prefixed IDs include public channels, DMs, and group DMs. Probe
+            # existing access first because Slack refuses conversations.join for DMs.
+            _slack_call(self.token, "conversations.history", {"channel": channel, "limit": 1})
         except RuntimeError as exc:
-            raise RuntimeError(
-                "Tether could not join the public Slack destination. Grant the bot "
-                "channels:join or invite it to the channel before creating a resumable thread "
-                f"({exc})"
-            ) from exc
+            if "not_in_channel" not in str(exc):
+                raise
+            try:
+                _slack_call(self.token, "conversations.join", {"channel": channel})
+            except RuntimeError as join_exc:
+                raise RuntimeError(
+                    "Tether could not join the public Slack destination. Grant the bot "
+                    "channels:join or invite it to the channel before creating a resumable thread "
+                    f"({join_exc})"
+                ) from join_exc
         self._joined_channels.add(channel)
 
     def _status(self, config: Config, allowed_users: tuple[str, ...]) -> dict[str, Any]:
