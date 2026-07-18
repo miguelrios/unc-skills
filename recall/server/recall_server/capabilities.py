@@ -179,21 +179,34 @@ def _client_tls_in_use(connection: Any) -> bool:
         return False
 
 
+def _connection_failure_code(error: BaseException) -> str:
+    sqlstate = getattr(error, "sqlstate", None)
+    if isinstance(sqlstate, str) and sqlstate.startswith("28"):
+        return "database_auth_failed"
+    return "database_connection_failed"
+
+
 def probe_database(dsn: str, profile: str = "production") -> dict[str, Any]:
     validate_connection_policy(dsn, profile)
     try:
         import psycopg
         from psycopg.rows import dict_row
-
-        with psycopg.connect(dsn, row_factory=dict_row) as connection:
+    except Exception as error:
+        raise CapabilityError("database_driver_unavailable") from error
+    try:
+        connection = psycopg.connect(dsn, row_factory=dict_row)
+    except Exception as error:
+        raise CapabilityError(_connection_failure_code(error)) from error
+    try:
+        with connection:
             row = connection.execute(CAPABILITY_SQL).fetchone()
             client_ssl_in_use = _client_tls_in_use(connection)
     except CapabilityError:
         raise
     except Exception as error:
-        raise CapabilityError("database_probe_failed") from error
+        raise CapabilityError("database_query_failed") from error
     if not row:
-        raise CapabilityError("database_probe_failed")
+        raise CapabilityError("database_query_failed")
     snapshot = {
         "server_version_num": row["server_version_num"],
         "vector_version": row["vector_version"],

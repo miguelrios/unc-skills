@@ -21,6 +21,7 @@ from recall_server.capabilities import (  # noqa: E402
     CAPABILITY_SQL,
     CapabilityError,
     _client_tls_in_use,
+    _connection_failure_code,
     assess_snapshot,
     validate_connection_policy,
 )
@@ -192,6 +193,22 @@ class DatabaseCapabilityContractTest(unittest.TestCase):
         connection = SimpleNamespace(pgconn=SimpleNamespace(ssl_in_use=True))
         self.assertTrue(_client_tls_in_use(connection))
         self.assertFalse(_client_tls_in_use(SimpleNamespace()))
+
+    def test_connection_failure_codes_are_content_free_and_sqlstate_driven(
+        self,
+    ) -> None:
+        self.assertEqual(
+            _connection_failure_code(SimpleNamespace(sqlstate="28P01")),
+            "database_auth_failed",
+        )
+        self.assertEqual(
+            _connection_failure_code(SimpleNamespace(sqlstate="08006")),
+            "database_connection_failed",
+        )
+        self.assertEqual(
+            _connection_failure_code(RuntimeError("synthetic sensitive detail")),
+            "database_connection_failed",
+        )
 
 
 class DeploymentPreviewContractTest(unittest.TestCase):
