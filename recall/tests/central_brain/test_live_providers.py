@@ -227,10 +227,11 @@ class LiveProviderAdapterTest(unittest.TestCase):
         details = body["serviceDetails"]
         self.assertEqual(details["healthCheckPath"], "/readyz")
         self.assertEqual(
-            details["dockerCommand"],
+            details["envSpecificDetails"]["dockerCommand"],
             "serve --host 0.0.0.0 --port 10000 --require-auth "
             "--capability-profile production",
         )
+        self.assertNotIn("dockerCommand", details)
         env = {item["key"]: item["value"] for item in body["envVars"]}
         self.assertEqual(env["RECALL_HTTP_PROFILE"], "public-mcp")
         self.assertEqual(env["RECALL_AUTH_REQUIRED"], "1")
@@ -239,6 +240,35 @@ class LiveProviderAdapterTest(unittest.TestCase):
         self.assertNotIn("TAILSCALE_OAUTH", rendered)
         self.assertNotIn("TS_AUTHKEY", rendered)
         self.assertEqual(first["public_url"], "https://synthetic-recall-mcp.onrender.com")
+
+    def test_public_mcp_rejects_provider_dropping_nested_docker_command(self):
+        provider = FakePublicRender()
+        adapter = RenderPublicMcpAdapter(
+            provider,
+            owner_id="owner-synthetic",
+            region_selection="virginia",
+            billing_selection="balanced-ha",
+            region="virginia",
+            name="synthetic-recall-mcp",
+            plan="starter",
+            embedding_api_key="synthetic-embedding-key",
+            database_url=(
+                "postgresql://synthetic:synthetic@db.invalid/recall"
+                "?sslmode=verify-full&sslrootcert=system"
+            ),
+        )
+        desired = service_desired()
+        desired["adapter"] = "render-public-mcp"
+        desired["public_ingress"] = True
+        adapter.ensure("recall-public-mcp", desired)
+        del provider.services[
+            "synthetic-recall-mcp"
+        ]["serviceDetails"]["envSpecificDetails"]
+        with self.assertRaisesRegex(
+            LiveProviderError,
+            "render_public_service_drift",
+        ):
+            adapter.ensure("recall-public-mcp", desired)
 
     def test_dedicated_egress_requires_purchase_approval_and_converges(self):
         provider = FakePublicRender()
