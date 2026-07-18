@@ -29,7 +29,11 @@ except ModuleNotFoundError:
 from recall_server import SCHEMA_VERSION
 from recall_server import cli as server_cli
 from recall_server.app import Handler, serve, serve_unix, validate_http_profile
-from recall_server.db import BrainStore, semantic_candidate_limit
+from recall_server.db import (
+    BrainStore,
+    related_candidate_limit,
+    semantic_candidate_limit,
+)
 from recall_server.federation import SOURCE_FAMILIES, SourceProfile
 from recall_server.projectors import advisory_lock_key, canonical_json, effective_session_id, partial_lexical_probes, phrase_query_spec, preferred_phrase_probe, preferred_phrase_probes, project, redact_text, validate_envelope
 from recall_server.ranking import DEFAULT_SEARCH_DEADLINE_MS, evidence_rank_components, retrieval_leg_order, should_run_partial
@@ -520,7 +524,7 @@ class IngestTransactionContractTest(unittest.TestCase):
         store._advance_projector.assert_called_once_with(connection, 43)
 
 
-class SemanticRetrievalContractTest(unittest.TestCase):
+class SemanticRetrievalConfigurationTest(unittest.TestCase):
     def test_similarity_floor_is_explicit_validated_deployment_config(self) -> None:
         with mock.patch.dict(
             os.environ,
@@ -540,6 +544,50 @@ class SemanticRetrievalContractTest(unittest.TestCase):
         self.assertEqual(semantic_candidate_limit(10), 40)
         self.assertEqual(semantic_candidate_limit(50), 100)
 
+
+class RelatedRetrievalContractTest(unittest.TestCase):
+    def test_fast_candidate_pool_is_bounded_with_filter_headroom(self) -> None:
+        self.assertEqual(related_candidate_limit(1), 100)
+        self.assertEqual(related_candidate_limit(5), 100)
+        self.assertEqual(related_candidate_limit(10), 200)
+        self.assertEqual(related_candidate_limit(20), 400)
+
+    def test_fast_query_uses_indexable_evidence_join_and_candidate_cap(self) -> None:
+        connection = mock.MagicMock()
+        connection.execute.return_value.fetchall.return_value = [{
+            "source_id": "synthetic:source",
+            "native_id": "session-1",
+            "metadata": {"cwd": "/workspace/recall", "branch": "main"},
+            "ended_at": None,
+            "path": "/workspace/recall/session.jsonl",
+            "receipt": "recall://synthetic/session?rev=1#item=0",
+            "overlap": 2,
+        }]
+        store = BrainStore("postgresql://synthetic.invalid/recall")
+        store.connect = mock.MagicMock(
+            return_value=contextlib.nullcontext(connection)
+        )
+
+        result = store.related(
+            cwd="/workspace/recall",
+            branch="main",
+            limit=3,
+            mains_only=True,
+            fast=True,
+            authorized_source=["synthetic:source"],
+        )
+
+        sql, params = connection.execute.call_args.args
+        normalized = " ".join(sql.split())
+        self.assertIn("WITH candidates AS MATERIALIZED", normalized)
+        self.assertIn("JOIN source_events event ON event.id=i.event_id", normalized)
+        self.assertNotIn("COALESCE(se.native_parent_id,se.native_id)", normalized)
+        self.assertIn("LIMIT %s", normalized)
+        self.assertEqual(params[-2:], [100, 3])
+        self.assertEqual(result["results"][0]["overlap"], 2)
+
+
+class SemanticRetrievalContractTest(unittest.TestCase):
     def test_similarity_threshold_is_applied_after_bounded_hnsw_retrieval(self) -> None:
         runtime = mock.Mock(
             model="voyage-4",
