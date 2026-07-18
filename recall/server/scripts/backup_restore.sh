@@ -5,6 +5,8 @@ umask 077
 MODE=${1:-}
 BACKUP_DIR=${2:-}
 TOOLS_IMAGE=${PG_TOOLS_IMAGE:-postgres:17-alpine}
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+LIBPQ_ENV="$SCRIPT_DIR/libpq_env.py"
 
 usage() {
   echo "usage: RECALL_DATABASE_URL=... $0 backup DIR" >&2
@@ -13,10 +15,11 @@ usage() {
 }
 
 fingerprint() {
-  local dsn=$1
+  local url_env=$1
   local snapshot=${2:-}
   if [ -n "$snapshot" ]; then
-    psql "$dsn" -XAtq -v ON_ERROR_STOP=1 <<SQL
+    python3 "$LIBPQ_ENV" exec --url-env "$url_env" -- \
+      psql -XAtq -v ON_ERROR_STOP=1 <<SQL
 BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
 SET TRANSACTION SNAPSHOT '$snapshot';
 SELECT count(*) || ':' || COALESCE(md5(string_agg(source_id || ':' || native_id || ':' || revision || ':' || content_sha256, '|' ORDER BY id)), md5('')) FROM source_events;
@@ -24,13 +27,15 @@ COMMIT;
 SQL
     return
   fi
-  psql "$dsn" -At -v ON_ERROR_STOP=1 -c \
+  python3 "$LIBPQ_ENV" exec --url-env "$url_env" -- \
+    psql -At -v ON_ERROR_STOP=1 -c \
     "SELECT count(*) || ':' || COALESCE(md5(string_agg(source_id || ':' || native_id || ':' || revision || ':' || content_sha256, '|' ORDER BY id)), md5('')) FROM source_events"
 }
 
 snapshot_newest_epoch() {
-  local dsn=$1 snapshot=$2
-  psql "$dsn" -XAtq -v ON_ERROR_STOP=1 <<SQL
+  local url_env=$1 snapshot=$2
+  python3 "$LIBPQ_ENV" exec --url-env "$url_env" -- \
+    psql -XAtq -v ON_ERROR_STOP=1 <<SQL
 BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
 SET TRANSACTION SNAPSHOT '$snapshot';
 SELECT COALESCE(extract(epoch FROM max(created_at))::bigint,0) FROM source_events;
@@ -61,7 +66,8 @@ case "$MODE" in
     started=$(date -u +%s)
     started_ms=$(date -u +%s%3N)
     (
-      psql "$RECALL_DATABASE_URL" -XAtq -v ON_ERROR_STOP=1 <<SQL
+      python3 "$LIBPQ_ENV" exec --url-env RECALL_DATABASE_URL -- \
+        psql -XAtq -v ON_ERROR_STOP=1 <<SQL
 BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
 SELECT pg_export_snapshot();
 \! read ignored < "$snapshot_release"
@@ -76,10 +82,12 @@ SQL
     done
     read -r database_snapshot < "$snapshot_output"
     case "$database_snapshot" in ''|*[!A-Fa-f0-9-]*) echo "invalid exported database snapshot" >&2; exit 1;; esac
-    source_fingerprint=$(fingerprint "$RECALL_DATABASE_URL" "$database_snapshot")
-    newest_epoch=$(snapshot_newest_epoch "$RECALL_DATABASE_URL" "$database_snapshot")
-    docker run --rm --network host "$TOOLS_IMAGE" \
-      pg_dump "$RECALL_DATABASE_URL" --snapshot="$database_snapshot" --format=custom --no-owner >"$stage/brain.dump"
+    source_fingerprint=$(fingerprint RECALL_DATABASE_URL "$database_snapshot")
+    newest_epoch=$(snapshot_newest_epoch RECALL_DATABASE_URL "$database_snapshot")
+    python3 "$LIBPQ_ENV" write --url-env RECALL_DATABASE_URL \
+      --output "$stage/libpq.env"
+    docker run --rm --network host --env-file "$stage/libpq.env" "$TOOLS_IMAGE" \
+      pg_dump --snapshot="$database_snapshot" --format=custom --no-owner >"$stage/brain.dump"
     printf 'release\n' >&9
     wait "$snapshot_pid"
     snapshot_pid=''
@@ -110,7 +118,7 @@ PY
     mv -f "$stage/brain.dump" "$BACKUP_DIR/brain.dump"
     mv -f "$stage/manifest.json" "$BACKUP_DIR/manifest.json"
     chmod 600 "$BACKUP_DIR/brain.dump" "$BACKUP_DIR/manifest.json"
-    rm -f "$stage/snapshot-release" "$stage/snapshot-id"
+    rm -f "$stage/snapshot-release" "$stage/snapshot-id" "$stage/libpq.env"
     rmdir "$stage"
     exec 9>&- 9<&-
     trap - EXIT
@@ -128,9 +136,12 @@ PY
     expected_fingerprint=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_fingerprint"])' "$snapshot/manifest.json")
     started=$(date -u +%s)
     started_ms=$(date -u +%s%3N)
-    docker run --rm --network host -v "$snapshot:/backup:ro" "$TOOLS_IMAGE" \
-      pg_restore --dbname="$RECALL_RESTORE_DATABASE_URL" --clean --if-exists --no-owner /backup/brain.dump
-    actual_fingerprint=$(fingerprint "$RECALL_RESTORE_DATABASE_URL")
+    python3 "$LIBPQ_ENV" write --url-env RECALL_RESTORE_DATABASE_URL \
+      --output "$snapshot/libpq.env"
+    docker run --rm --network host --env-file "$snapshot/libpq.env" \
+      -v "$snapshot:/backup:ro" "$TOOLS_IMAGE" \
+      pg_restore --clean --if-exists --no-owner /backup/brain.dump
+    actual_fingerprint=$(fingerprint RECALL_RESTORE_DATABASE_URL)
     completed=$(date -u +%s)
     completed_ms=$(date -u +%s%3N)
     [ "$expected_fingerprint" = "$actual_fingerprint" ] || { echo "restore fingerprint mismatch" >&2; exit 1; }

@@ -30,6 +30,15 @@ class BackupPublicationTest(unittest.TestCase):
             docker.write_text(
                 """#!/bin/sh
 set -eu
+case "$*" in *synthetic-secret*) exit 9;; esac
+previous=''
+environment=''
+for argument in "$@"; do
+  test "$previous" != '--env-file' || environment=$argument
+  previous=$argument
+done
+test -n "$environment"
+grep -qx 'PGPASSWORD=synthetic-secret' "$environment"
 case "$*" in *':/backup'*) exit 5;; esac
 case "$*" in *--snapshot=00000001-00000001-1*) :;; *) exit 3;; esac
 printf partial
@@ -59,7 +68,10 @@ esac
             psql.chmod(0o755)
             environment = os.environ | {
                 "PATH": str(binaries) + os.pathsep + os.environ["PATH"],
-                "RECALL_DATABASE_URL": "postgresql://synthetic.invalid/db",
+                "RECALL_DATABASE_URL": (
+                    "postgresql://synthetic:synthetic-secret@synthetic.invalid/db"
+                    "?sslmode=verify-full"
+                ),
                 "BACKUP_CONTROL_DIR": str(control),
             }
             process = subprocess.Popen(
@@ -113,11 +125,18 @@ esac
             docker.write_text(
                 """#!/bin/sh
 set -eu
+case "$*" in *synthetic-secret*) exit 9;; esac
 mount=''
+previous=''
+environment=''
 for argument in "$@"; do
+  test "$previous" != '--env-file' || environment=$argument
   case "$argument" in *:/backup:ro) mount=${argument%:/backup:ro};; esac
+  previous=$argument
 done
 test -n "$mount"
+test -n "$environment"
+grep -qx 'PGPASSWORD=synthetic-secret' "$environment"
 touch "$BACKUP_CONTROL_DIR/snapshot-opened"
 while test ! -e "$BACKUP_CONTROL_DIR/continue"; do sleep 0.02; done
 test "$(cat "$mount/brain.dump")" = 'stable-root-owned-dump'
@@ -132,7 +151,10 @@ test "$(cat "$mount/brain.dump")" = 'stable-root-owned-dump'
             forbidden_link.chmod(0o755)
             environment = os.environ | {
                 "PATH": str(binaries) + os.pathsep + os.environ["PATH"],
-                "RECALL_RESTORE_DATABASE_URL": "postgresql://synthetic.invalid/restore",
+                "RECALL_RESTORE_DATABASE_URL": (
+                    "postgresql://synthetic:synthetic-secret@synthetic.invalid/restore"
+                    "?sslmode=verify-full"
+                ),
                 "BACKUP_CONTROL_DIR": str(control),
             }
             process = subprocess.Popen(
