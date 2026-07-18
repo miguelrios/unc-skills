@@ -34,6 +34,15 @@ SOURCE_SPECS = {
     "chatgpt-export": SourceSpec(
         "ai.parcha.recall.chatgpt-export", "chatgpt-export-runner.db", "chatgpt-export-inbox"
     ),
+    "imessage": SourceSpec(
+        "ai.parcha.recall.imessage", "imessage.db", "apple-imessage-read-only-snapshot"
+    ),
+    "whatsapp": SourceSpec(
+        "ai.parcha.recall.whatsapp", "whatsapp.db", "whatsapp-selected-text-export"
+    ),
+    "selected-text": SourceSpec(
+        "ai.parcha.recall.selected-text", "selected-text.db", "selected-markdown-obsidian-root"
+    ),
 }
 
 

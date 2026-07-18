@@ -39,6 +39,13 @@ class MacUtilityLifecycleTest(unittest.TestCase):
             ]}, output)
 
     def test_status_is_closed_content_free_and_reports_health_lag_checkpoint(self) -> None:
+        self.assertEqual(
+            list(SOURCE_SPECS),
+            [
+                "claude-code", "codex", "cowork", "chatgpt-export",
+                "imessage", "whatsapp", "selected-text",
+            ],
+        )
         self._enable("claude-code")
         self._enable("cowork")
         self._state("claude-code", {"last_scan_at": "190"})
@@ -67,6 +74,18 @@ class MacUtilityLifecycleTest(unittest.TestCase):
         self.assertEqual(
             result["sources"]["codex"]["surface"],
             "chatgpt-codex-desktop-rollouts",
+        )
+        self.assertEqual(
+            result["sources"]["imessage"]["surface"],
+            "apple-imessage-read-only-snapshot",
+        )
+        self.assertEqual(
+            result["sources"]["whatsapp"]["surface"],
+            "whatsapp-selected-text-export",
+        )
+        self.assertEqual(
+            result["sources"]["selected-text"]["surface"],
+            "selected-markdown-obsidian-root",
         )
         rendered = json.dumps(result, sort_keys=True)
         for forbidden in (str(self.home), "CANARY", "CREDENTIAL", "PATH"):
