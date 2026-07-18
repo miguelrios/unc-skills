@@ -23,6 +23,7 @@ FIELD = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 OPERATION_ID = re.compile(r"[a-z][a-z0-9_.-]{2,95}\Z")
 PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_]{0,63})\}")
 HEADER_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,63}\Z")
+QUERY_NAME = re.compile(r"[A-Za-z][A-Za-z0-9._-]{0,127}\Z")
 RESERVED_HEADERS = {"accept", "authorization", "content-type", "user-agent"}
 MAX_AUTHORITY_BYTES = 16_384
 MAX_PARAMETER_BYTES = 4_096
@@ -59,6 +60,7 @@ class RemoteOperation:
     path_fields: tuple[str, ...]
     query_fields: tuple[str, ...]
     json_fields: tuple[str, ...] = ()
+    fixed_query: Mapping[str, Any] | None = None
     fixed_json: Mapping[str, Any] | None = None
     _fixed_json_bytes: bytes = field(init=False, repr=False)
 
@@ -90,6 +92,33 @@ class RemoteOperation:
         object.__setattr__(self, "path_fields", path_fields)
         object.__setattr__(self, "query_fields", query_fields)
         object.__setattr__(self, "json_fields", json_fields)
+        if self.fixed_query is None:
+            fixed_query: Mapping[str, Any] = {}
+        elif isinstance(self.fixed_query, Mapping):
+            fixed_query = self.fixed_query
+        else:
+            raise ValueError("invalid fixed query")
+        if (
+            len(fixed_query) > 32
+            or any(
+                not isinstance(key, str)
+                or not QUERY_NAME.fullmatch(key)
+                or key in query_fields
+                for key in fixed_query
+            )
+        ):
+            raise ValueError("invalid fixed query")
+        rendered_fixed_query = {}
+        try:
+            for key in sorted(fixed_query):
+                rendered_fixed_query[key] = _scalar(fixed_query[key])
+        except RemoteApiError:
+            raise ValueError("invalid fixed query") from None
+        object.__setattr__(
+            self,
+            "fixed_query",
+            MappingProxyType(rendered_fixed_query),
+        )
         if self.fixed_json is None:
             fixed_json: Mapping[str, Any] = {}
         elif isinstance(self.fixed_json, Mapping):
@@ -313,7 +342,7 @@ class BoundedJsonRail:
                 "{" + field_name + "}",
                 urllib.parse.quote(_scalar(path_values[field_name]), safe=""),
             )
-        query_pairs = [
+        query_pairs = list(operation.fixed_query.items()) + [
             (field_name, _scalar(query_values[field_name]))
             for field_name in operation.query_fields
             if field_name in query_values
