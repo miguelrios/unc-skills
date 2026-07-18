@@ -142,6 +142,24 @@ class SchemaMigrationContractTest(unittest.TestCase):
             rendered,
         )
 
+    def test_answer_adjacency_uses_role_scoped_turn_index_and_bounded_boundary(self) -> None:
+        migration = SERVER / "schema" / "017_answer_turn_index.sql"
+        rendered = " ".join(migration.read_text().split()).casefold()
+        self.assertIn(
+            "on items(source_id, session_native_id, role, occurred_at, id)",
+            rendered,
+        )
+        self.assertIn(
+            "where deleted_at is null and role in ('user','assistant')",
+            rendered,
+        )
+
+        implementation = inspect.getsource(BrainStore._answer_leg)
+        self.assertIn("LEFT JOIN LATERAL", implementation)
+        self.assertIn("boundary.role='user'", implementation)
+        self.assertIn("candidate.role='assistant'", implementation)
+        self.assertNotIn("NOT EXISTS", implementation)
+
     def test_managed_upgrade_documents_split_role_grant_refresh(self) -> None:
         guide = " ".join(
             (SERVER / "deploy" / "README.md").read_text().split()
