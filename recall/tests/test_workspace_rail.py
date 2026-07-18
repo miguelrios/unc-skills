@@ -110,6 +110,43 @@ class WorkspaceRailContractTest(unittest.TestCase):
                 self.assertNotIn("synthetic-secret-value", str(raised.exception))
                 self.assertNotIn(str(credential), str(raised.exception))
 
+    def test_structured_cli_errors_map_only_status_to_content_free_codes(self):
+        expected = {
+            401: "authority_revoked",
+            403: "authority_forbidden",
+            404: "not_found",
+            410: "cursor_expired",
+            429: "rate_limited",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            credential = Path(directory) / "google.json"
+            credential.write_text("synthetic")
+            os.chmod(credential, 0o600)
+            rail = WorkspaceRail(credential_path=credential)
+            for status, code in expected.items():
+                private_message = f"private-upstream-detail-{status}"
+                completed = mock.Mock(
+                    returncode=1,
+                    stdout=json.dumps({
+                        "error": {
+                            "code": status,
+                            "message": private_message,
+                            "reason": "syntheticReason",
+                        },
+                    }).encode(),
+                    stderr=b"other-private-detail",
+                )
+                with self.subTest(status=status), \
+                     mock.patch("connectors.workspace_rail._run_bounded", return_value=completed), \
+                     self.assertRaisesRegex(WorkspaceRailError, code) as raised:
+                    rail.run(
+                        "gmail.history.list",
+                        {"userId": "me", "startHistoryId": "100"},
+                    )
+                self.assertEqual(raised.exception.code, code)
+                self.assertNotIn(private_message, str(raised.exception))
+                self.assertNotIn("other-private-detail", str(raised.exception))
+
     def test_docs_export_uses_internal_private_output_and_returns_bounded_bytes(self):
         with tempfile.TemporaryDirectory() as directory:
             credential = Path(directory) / "google.json"

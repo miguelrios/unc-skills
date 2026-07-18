@@ -53,6 +53,11 @@ class Operation:
 
 
 OPERATIONS = {
+    "gmail.users.getProfile": Operation(
+        ("gmail", "users", "getProfile"),
+        frozenset({"userId"}),
+        frozenset({"emailAddress", "messagesTotal", "threadsTotal", "historyId"}),
+    ),
     "gmail.messages.list": Operation(
         ("gmail", "users", "messages", "list"),
         frozenset({"userId", "maxResults", "pageToken", "q", "labelIds", "includeSpamTrash"}),
@@ -113,8 +118,9 @@ OPERATIONS = {
     "drive.changes.list": Operation(
         ("drive", "changes", "list"),
         frozenset({
-            "pageToken", "driveId", "fields", "includeItemsFromAllDrives", "pageSize",
-            "restrictToMyDrive", "spaces", "supportsAllDrives",
+            "pageToken", "driveId", "fields", "includeItemsFromAllDrives",
+            "includeRemoved", "pageSize", "restrictToMyDrive", "spaces",
+            "supportsAllDrives",
         }),
         frozenset({"kind", "nextPageToken", "newStartPageToken", "changes"}),
     ),
@@ -150,6 +156,26 @@ class WorkspaceRailError(RuntimeError):
     def __init__(self, code: str):
         self.code = code
         super().__init__(code)
+
+
+def _structured_error_code(payload: bytes) -> str:
+    try:
+        value = json.loads(
+            payload,
+            parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return "upstream_error"
+    error = value.get("error") if isinstance(value, dict) else None
+    status = error.get("code") if isinstance(error, dict) else None
+    return {
+        400: "upstream_invalid_request",
+        401: "authority_revoked",
+        403: "authority_forbidden",
+        404: "not_found",
+        410: "cursor_expired",
+        429: "rate_limited",
+    }.get(status, "upstream_error")
 
 
 def _stop_process_group(process: subprocess.Popen[bytes]) -> None:
@@ -285,7 +311,7 @@ class WorkspaceRail:
         if len(stdout) > self.max_output_bytes:
             raise WorkspaceRailError("output_too_large")
         if completed.returncode != 0:
-            raise WorkspaceRailError("upstream_error")
+            raise WorkspaceRailError(_structured_error_code(stdout))
         try:
             value = json.loads(stdout, parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()))
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError):

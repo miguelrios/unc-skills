@@ -24,6 +24,8 @@ RUNTIME_ERROR_CODES = {
     "brain_invalid_acknowledgement", "brain_unauthorized", "brain_unavailable",
     "connector_disabled", "connector_invalid_page", "connector_rate_limited",
     "connector_spool_error", "connector_unavailable",
+    "connector_authority_forbidden", "connector_authority_revoked",
+    "connector_schema_drift", "connector_upstream_error",
     "grep_ai_conflict", "grep_ai_forbidden", "grep_ai_idempotency_key_in_flight",
     "grep_ai_idempotency_key_reuse_mismatch", "grep_ai_idempotency_key_ttl_expired",
     "grep_ai_insufficient_credits", "grep_ai_internal_error", "grep_ai_invalid_error",
