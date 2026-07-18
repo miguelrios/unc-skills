@@ -43,6 +43,11 @@ from connectors.local_activity import (
     HermesSessionConnector,
 )
 from connectors.local_files import SelectedTextConnector
+from connectors.portable_pim import (
+    CalendarImportConnector,
+    ContactImportConnector,
+    MailImportConnector,
+)
 from connectors.whatsapp_export import WhatsAppExportConnector
 from connectors.registry import (
     REGISTRY,
@@ -289,6 +294,17 @@ def parser() -> argparse.ArgumentParser:
     hermes.add_argument("--date-max")
     hermes.add_argument("--spool", required=True)
     hermes.add_argument("--page-size", type=int, default=500)
+
+    for command in ("mail-import-sync", "calendar-import-sync", "contact-import-sync"):
+        portable = commands.add_parser(command)
+        _private_connection(portable)
+        _privacy(portable, choices=("scrub", "drop"), default="scrub")
+        portable.add_argument("--input", required=True)
+        portable.add_argument("--archive-id", required=True)
+        portable.add_argument("--owner-identifier", action="append", default=[])
+        portable.add_argument("--remove-native-id", action="append", default=[])
+        portable.add_argument("--spool", required=True)
+        portable.add_argument("--page-size", type=int, default=500)
 
     mac_status_parser = commands.add_parser("mac-status")
     mac_status_parser.add_argument(
@@ -714,6 +730,19 @@ def main() -> None:
             "hermes.sessions", visibility="private",
             privacy_mode=args.privacy_mode, authorities={"brain", "source"},
         )
+    elif args.command in {
+        "mail-import-sync", "calendar-import-sync", "contact-import-sync",
+    }:
+        _registry_policy(
+            {
+                "mail-import-sync": "portable.mail",
+                "calendar-import-sync": "portable.calendar",
+                "contact-import-sync": "portable.contacts",
+            }[args.command],
+            visibility="private",
+            privacy_mode=args.privacy_mode,
+            authorities={"brain", "source"},
+        )
     token = _token(args)
     common = {
         "endpoint": args.endpoint,
@@ -726,7 +755,8 @@ def main() -> None:
         "collect", "cowork-local-sync", "export", "put", "export-inbox-sync",
         "mcp-serve", "grep-ai-sync", "imessage-sync", "whatsapp-export-sync",
         "selected-text-sync", "browser-sync", "apple-notes-sync",
-        "hermes-session-sync",
+        "hermes-session-sync", "mail-import-sync", "calendar-import-sync",
+        "contact-import-sync",
     } else PrivacyPolicy(mode="off")
     if args.command == "mcp-serve":
         backend = CaptureClient(**common, privacy=privacy)
@@ -855,6 +885,32 @@ def main() -> None:
             roles=tuple(sorted(args.role or ("assistant", "user"))),
             date_min=args.date_min,
             date_max=args.date_max,
+            page_size=args.page_size,
+        )
+        runner = ConnectorRunner(
+            connector=connector, brain=BrainClient(**common),
+            spool_path=Path(args.spool), privacy=privacy,
+        )
+        try:
+            result = {"sync": runner.run_once(), "doctor": runner.doctor()}
+        finally:
+            runner.close()
+    elif args.command in {
+        "mail-import-sync", "calendar-import-sync", "contact-import-sync",
+    }:
+        connector_type = {
+            "mail-import-sync": MailImportConnector,
+            "calendar-import-sync": CalendarImportConnector,
+            "contact-import-sync": ContactImportConnector,
+        }[args.command]
+        connector = connector_type(
+            path=Path(args.input),
+            source_id=args.source_id,
+            archive_id=args.archive_id,
+            owner_identifiers=tuple(sorted(
+                value.lower() for value in args.owner_identifier
+            )),
+            removed_native_ids=tuple(sorted(args.remove_native_id)),
             page_size=args.page_size,
         )
         runner = ConnectorRunner(
