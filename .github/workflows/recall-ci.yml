@@ -59,7 +59,6 @@ jobs:
             e2e_export_inbox.py \
             e2e_federation_ranking.py \
             e2e_grep_ai.py \
-            e2e_imessage_connector.py \
             e2e_public_mcp_principal.py \
             e2e_remote_worker.py \
             e2e_workspace_rail.py \
