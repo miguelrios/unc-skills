@@ -11,6 +11,7 @@ SUPPORTED_PROTOCOL_VERSIONS = frozenset(
 )
 REQUEST_METHODS = ("initialize", "ping", "tools/list", "tools/call")
 NOTIFICATION_METHODS = ("notifications/initialized",)
+MAX_MCP_RESPONSE_BYTES = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -354,6 +355,16 @@ def _tool_result(value: dict) -> dict:
         "structuredContent": value,
         "isError": False,
     }
+
+
+def bound_response(response: dict, request_id: Any) -> dict:
+    encoded = json.dumps(response, default=str, sort_keys=True).encode()
+    if len(encoded) <= MAX_MCP_RESPONSE_BYTES:
+        return response
+    return error_response(
+        McpProtocolError(-32603, "tool result exceeds limit"),
+        request_id,
+    )
 
 
 def dispatch(store, principal: dict, message: Any) -> dict | None:

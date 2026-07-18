@@ -104,6 +104,14 @@ class FailingStore(FakeStore):
         raise RuntimeError("private payload must not escape")
 
 
+class OversizedShowStore(FakeStore):
+    def show(self, target, *, around, tail, prompts, authorized_source):
+        return {
+            "receipt": target,
+            "text": "private-oversized-canary-" + ("x" * (1024 * 1024)),
+        }
+
+
 class McpHttpServer:
     def __init__(self, store: FakeStore) -> None:
         Handler.store = store
@@ -642,6 +650,28 @@ class RemoteMcpContractTest(unittest.TestCase):
             {"code": -32603, "message": "tool execution failed"},
         )
         self.assertNotIn(b"private payload", raw)
+
+    def test_oversized_tool_result_becomes_a_bounded_content_free_error(self) -> None:
+        target = "recall://synthetic:codex/item-1?rev=1"
+        with McpHttpServer(OversizedShowStore()) as server:
+            status, _, raw = server.request(
+                "POST",
+                request(
+                    "tools/call",
+                    params={
+                        "name": "recall_show",
+                        "arguments": {"target": target},
+                    },
+                ),
+                protocol="2025-11-25",
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            json.loads(raw)["error"],
+            {"code": -32603, "message": "tool result exceeds limit"},
+        )
+        self.assertLess(len(raw), 1024)
+        self.assertNotIn(b"private-oversized-canary", raw)
 
 
 if __name__ == "__main__":
