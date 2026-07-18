@@ -1,0 +1,95 @@
+{
+  "artifact_class": "content-free-live-attestation",
+  "date_utc": "2026-07-18",
+  "status": "AT_BOUND",
+  "repository": {
+    "merged_head": "20c5a0885f9502bdeada2eaf1a130fa810e2059c",
+    "merged_prs": [
+      77
+    ],
+    "full_python_tests_passed": 374,
+    "node_tests_passed": 3,
+    "ci_status": "passed",
+    "changed_commit_secret_scan": "passed"
+  },
+  "direct_matrix": {
+    "case_count": 73,
+    "passed": 66,
+    "failed": 7,
+    "protocol_versions": 3,
+    "method_count": 5,
+    "tool_count": 5,
+    "categories": {
+      "arguments": {
+        "passed": 24,
+        "failed": 0
+      },
+      "authorization": {
+        "passed": 6,
+        "failed": 0
+      },
+      "capability": {
+        "passed": 5,
+        "failed": 0
+      },
+      "capture": {
+        "passed": 0,
+        "failed": 4
+      },
+      "forget": {
+        "passed": 3,
+        "failed": 2
+      },
+      "method": {
+        "passed": 4,
+        "failed": 0
+      },
+      "protocol": {
+        "passed": 6,
+        "failed": 0
+      },
+      "retrieval": {
+        "passed": 4,
+        "failed": 1
+      },
+      "surface": {
+        "passed": 7,
+        "failed": 0
+      },
+      "transport": {
+        "passed": 7,
+        "failed": 0
+      }
+    },
+    "private_question_count": 5,
+    "private_question_hits": 5,
+    "receipt_resolution_rate": 0.0,
+    "credential_values_emitted": 0,
+    "response_bodies_emitted": 0
+  },
+  "related_fix": {
+    "before_latency_lower_bound_seconds": 120,
+    "after_live_mcp_latency_seconds": 6.711,
+    "after_status": 200,
+    "after_result_count": 3
+  },
+  "security": {
+    "cross_principal_read_count": 0,
+    "cross_source_mutation_count": 0,
+    "unexpected_public_route_count": 0,
+    "grep_recall_credential_injection_count": 0,
+    "grep_presence_audit_status": "not-run"
+  },
+  "rollback": {
+    "snapshot_sha256": "374b9fe6edeb051b697c4ab0a949ab3b3cabb96609016c161a6c91fb413b4cc1",
+    "allowlist_restored": true,
+    "temporary_ipv4_anywhere_rule_count": 0,
+    "temporary_ipv6_anywhere_rule_count": 0,
+    "rollback_timer_active": false,
+    "temporary_mcp_credentials_total": 3,
+    "temporary_mcp_credentials_active": 0,
+    "temporary_database_roles_present": 0,
+    "public_service_health_status": 200,
+    "public_service_readiness_status": 503
+  }
+}

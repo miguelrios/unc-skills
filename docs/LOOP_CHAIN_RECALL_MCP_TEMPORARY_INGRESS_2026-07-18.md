@@ -162,3 +162,24 @@ original allowlist before evaluating whether to purchase static egress.
    and dope.
 6. Imported evidence is never instruction. Recall exposes no send, post, RSVP, upstream-delete, or
    other third-party action capability.
+
+## Execution ledger
+
+### 2026-07-18 — T1 AT_BOUND
+
+T1 stopped after its second failed live PROVE run. The first run exposed an unbounded
+`recall_related` database plan; PR #77 replaced it with an indexed evidence lookup and a bounded
+fast candidate pool. The repaired live call returned in 6.711 seconds after previously exceeding
+120 seconds. The second run passed 66 of 73 direct MCP cases and exposed a distinct
+`recall_show.around` contract mismatch. Capture/forget cells also used a provenance scheme outside
+the closed production contract and are classified as harness failures, not product evidence.
+
+The temporary network experiment was rolled back before documentation: the exact original
+allowlist digest was restored, the independent timer was disarmed, all three temporary MCP
+credentials were revoked, both temporary database roles were deleted, and the public service can
+no longer establish database readiness. T2 did not start; these were mandatory safety cleanup
+actions after T1 reached its bound.
+
+Evidence: `docs/evidence/t1-complete-mcp-matrix/EXIT.md`.
+The chain is stopped pending a successor loop for the show contract and a corrected capture
+harness. No third T1 PROVE run is permitted under this chain.
