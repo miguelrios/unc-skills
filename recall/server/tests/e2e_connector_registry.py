@@ -45,6 +45,8 @@ def main() -> None:
         "portable.slack": ("private", "scrub", {"brain", "source"}),
         "portable.notion": ("private", "scrub", {"brain", "source"}),
         "portable.x": ("private", "scrub", {"brain", "source"}),
+        "portable.feed": ("private", "scrub", {"brain", "source"}),
+        "portable.jsonl": ("private", "scrub", {"brain", "source"}),
     }
     tests = {
         "recall.capture": "e2e_capture_mcp.py",
@@ -72,6 +74,8 @@ def main() -> None:
         "portable.slack": "e2e_portable_service_archives.py",
         "portable.notion": "e2e_portable_service_archives.py",
         "portable.x": "e2e_portable_service_archives.py",
+        "portable.feed": "e2e_feed_and_jsonl_connectors.py",
+        "portable.jsonl": "e2e_feed_and_jsonl_connectors.py",
     }
     results = {}
     for item in REGISTRY:

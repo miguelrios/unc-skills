@@ -35,6 +35,7 @@ from client.local_surfaces import (
 )
 from connectors.cowork_local import CoworkLocalConnector
 from connectors.export_inbox import ExportInboxConnector
+from connectors.feeds import FeedConnector
 from connectors.grep_ai import GrepAIConnector, load_private_api_key, validate_api_key
 from connectors.imessage import IMessageConnector
 from connectors.local_activity import (
@@ -61,6 +62,7 @@ from connectors.registry import (
     preview as registry_preview,
     validate_policy,
 )
+from connectors.selected_jsonl import SelectedJsonlConnector
 from connectors.sdk import ConnectorContractError, ConnectorRunner, seed_acknowledged_records
 from connectors.supervisor import (
     SupervisorContractError,
@@ -313,6 +315,22 @@ def parser() -> argparse.ArgumentParser:
         portable.add_argument("--remove-native-id", action="append", default=[])
         portable.add_argument("--spool", required=True)
         portable.add_argument("--page-size", type=int, default=500)
+
+    feed = commands.add_parser("feed-sync")
+    _private_connection(feed)
+    _privacy(feed, choices=("scrub", "drop"), default="scrub")
+    feed.add_argument("--url", required=True)
+    feed.add_argument("--feed-id", required=True)
+    feed.add_argument("--spool", required=True)
+
+    selected_jsonl = commands.add_parser("jsonl-import-sync")
+    _private_connection(selected_jsonl)
+    _privacy(selected_jsonl, choices=("scrub", "drop"), default="scrub")
+    selected_jsonl.add_argument("--root", required=True)
+    selected_jsonl.add_argument("--max-depth", type=int, default=8)
+    selected_jsonl.add_argument("--remove-native-id", action="append", default=[])
+    selected_jsonl.add_argument("--spool", required=True)
+    selected_jsonl.add_argument("--page-size", type=int, default=500)
 
     mac_status_parser = commands.add_parser("mac-status")
     mac_status_parser.add_argument(
@@ -755,6 +773,16 @@ def main() -> None:
             privacy_mode=args.privacy_mode,
             authorities={"brain", "source"},
         )
+    elif args.command == "feed-sync":
+        _registry_policy(
+            "portable.feed", visibility="private",
+            privacy_mode=args.privacy_mode, authorities={"brain", "source"},
+        )
+    elif args.command == "jsonl-import-sync":
+        _registry_policy(
+            "portable.jsonl", visibility="private",
+            privacy_mode=args.privacy_mode, authorities={"brain", "source"},
+        )
     token = _token(args)
     common = {
         "endpoint": args.endpoint,
@@ -769,7 +797,7 @@ def main() -> None:
         "selected-text-sync", "browser-sync", "apple-notes-sync",
         "hermes-session-sync", "mail-import-sync", "calendar-import-sync",
         "contact-import-sync", "slack-archive-sync", "notion-archive-sync",
-        "x-archive-sync",
+        "x-archive-sync", "feed-sync", "jsonl-import-sync",
     } else PrivacyPolicy(mode="off")
     if args.command == "mcp-serve":
         backend = CaptureClient(**common, privacy=privacy)
@@ -933,6 +961,36 @@ def main() -> None:
         runner = ConnectorRunner(
             connector=connector, brain=BrainClient(**common),
             spool_path=Path(args.spool), privacy=privacy,
+        )
+        try:
+            result = {"sync": runner.run_once(), "doctor": runner.doctor()}
+        finally:
+            runner.close()
+    elif args.command == "feed-sync":
+        runner = ConnectorRunner(
+            connector=FeedConnector(
+                url=args.url, feed_id=args.feed_id, source_id=args.source_id,
+            ),
+            brain=BrainClient(**common),
+            spool_path=Path(args.spool),
+            privacy=privacy,
+        )
+        try:
+            result = {"sync": runner.run_once(), "doctor": runner.doctor()}
+        finally:
+            runner.close()
+    elif args.command == "jsonl-import-sync":
+        runner = ConnectorRunner(
+            connector=SelectedJsonlConnector(
+                root=Path(args.root),
+                source_id=args.source_id,
+                removed_native_ids=tuple(sorted(args.remove_native_id)),
+                max_depth=args.max_depth,
+                page_size=args.page_size,
+            ),
+            brain=BrainClient(**common),
+            spool_path=Path(args.spool),
+            privacy=privacy,
         )
         try:
             result = {"sync": runner.run_once(), "doctor": runner.doctor()}

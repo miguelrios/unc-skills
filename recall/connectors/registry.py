@@ -893,6 +893,51 @@ PORTABLE_IMPORT_REGISTRY = (
         backfill_modes=["export"],
         reconciliation=False,
     ),
+    ConnectorDefinitionV3.from_mapping({
+        "schema_version": 3,
+        "connector_id": "portable.feed",
+        "command": "feed-sync",
+        "mode": "pull",
+        "authority_slots": ["brain", "source"],
+        "source_family": "documents",
+        "record_kinds": ["document.v1"],
+        "placement": {
+            "execution": "either",
+            "acquisition": ["poll"],
+        },
+        "auth": {
+            "kind": "none",
+            "minimum_scopes": [],
+        },
+        "sync": {
+            "backfill_modes": ["full", "incremental"],
+            "checkpoint": "ack_cursor",
+            "edit_semantics": "content_revision",
+            "deletion_semantics": "none",
+            "reconciliation": False,
+        },
+        "policy": {
+            "visibility_modes": ["private"],
+            "privacy_modes": ["drop", "scrub"],
+            "default_privacy_mode": "scrub",
+            "retention_modes": ["source_controlled"],
+            "attachment_capability": False,
+        },
+        "selection_fields": ["feed_id", "url"],
+    }),
+    _local_v3(
+        connector_id="portable.jsonl",
+        command="jsonl-import-sync",
+        source_family="documents",
+        record_kinds=["document.v1"],
+        scopes=[],
+        selection_fields=["max_depth", "removed_native_ids", "root"],
+        deletion_semantics="explicit_owner",
+        acquisition=["import", "snapshot"],
+        auth_kind="selected_export",
+        backfill_modes=["export"],
+        reconciliation=False,
+    ),
 )
 
 

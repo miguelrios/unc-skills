@@ -44,7 +44,7 @@ def main() -> None:
         assert install.stderr == "" and wrapper.is_file()
 
         preview = run_json([str(wrapper), "connector-registry-preview"])
-        assert len(preview["connectors"]) == 25
+        assert len(preview["connectors"]) == 27
         for field in ("credential_reads", "source_reads", "network_requests", "writes"):
             assert preview[field] == 0
 
@@ -90,7 +90,7 @@ def main() -> None:
             "status": "pass",
             "summary": {
                 "architecture": "Darwin-arm64",
-                "registered_surfaces": 25,
+                "registered_surfaces": 27,
                 "preview_credential_reads": 0,
                 "preview_source_reads": 0,
                 "preview_network_requests": 0,
