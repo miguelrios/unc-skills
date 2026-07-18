@@ -166,6 +166,7 @@ def application_payloads(source_root: Path, runtime_lock_data: bytes) -> dict[st
         source_root / "connectors" / "host.py": "lib/connectors/host.py",
         source_root / "connectors" / "workspace_rail.py": "lib/connectors/workspace_rail.py",
         source_root / "connectors" / "kit.py": "lib/connectors/kit.py",
+        source_root / "connectors" / "conformance.py": "lib/connectors/conformance.py",
         source_root / "connectors" / "__init__.py": "lib/connectors/__init__.py",
         source_root / "contracts" / "connector_v2.json": "lib/contracts/connector_v2.json",
         source_root / "contracts" / "connector_page_v1.json": "lib/contracts/connector_page_v1.json",

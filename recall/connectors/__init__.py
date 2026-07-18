@@ -26,6 +26,13 @@ from .kit import (
     decode_page_wire,
     encode_page_wire,
 )
+from .conformance import (
+    CONNECTOR_CONFORMANCE_CELLS,
+    CONNECTOR_CONFORMANCE_VERSION,
+    ConformanceReport,
+    render_conformance_report,
+    run_connector_conformance,
+)
 from .supervisor import (
     ConnectorSupervisor,
     ScheduleDefinition,
@@ -57,6 +64,11 @@ __all__ = [
     "CONNECTOR_PAGE_WIRE_VERSION",
     "encode_page_wire",
     "decode_page_wire",
+    "CONNECTOR_CONFORMANCE_CELLS",
+    "CONNECTOR_CONFORMANCE_VERSION",
+    "ConformanceReport",
+    "render_conformance_report",
+    "run_connector_conformance",
     "ConnectorSupervisor",
     "ScheduleDefinition",
     "ScheduledJob",
