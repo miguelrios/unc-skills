@@ -253,7 +253,7 @@ class LoopbackStore:
                     "results": [
                         {
                             "receipt": (
-                                "recall://synthetic:capture/capture-1?rev=1"
+                                "recall://synthetic:capture/capture-1?rev=1#item=0"
                             ),
                             "source_id": "synthetic:capture",
                             "text": "synthetic captured evidence",
@@ -286,7 +286,7 @@ class LoopbackStore:
         self.capture_arguments = arguments
         return {
             "status": "committed",
-            "receipt": "recall://synthetic:capture/capture-1?rev=1",
+            "receipt": "recall://synthetic:capture/capture-1?rev=1#item=0",
             "replay": replay,
             "privacy": {"mode": "scrub", "changed_fields": 0},
         }

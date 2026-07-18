@@ -526,6 +526,41 @@ class IngestTransactionContractTest(unittest.TestCase):
 
 
 class DeliberateCaptureContractTest(unittest.TestCase):
+    def test_capture_returns_the_canonical_searchable_item_receipt(self) -> None:
+        store = BrainStore("postgresql://synthetic.invalid/recall")
+        store.ingest = mock.MagicMock(
+            return_value=(
+                {
+                    "status": "committed",
+                    "receipts": [
+                        "recall://synthetic:capture/capture_synthetic?rev=1"
+                    ],
+                },
+                False,
+            )
+        )
+
+        result = store.capture(
+            {
+                "source_id": "synthetic:capture",
+                "principal_id": "synthetic-owner",
+                "capture_origin": "synthetic-agent",
+            },
+            {
+                "schema_version": 1,
+                "title": "Synthetic canonical receipt",
+                "body": "synthetic receipt evidence",
+                "occurred_at": "2026-07-18T02:00:00Z",
+                "tags": ["synthetic"],
+                "provenance": {"uri": "manual://synthetic"},
+            },
+        )
+
+        self.assertEqual(
+            result["receipt"],
+            "recall://synthetic:capture/capture_synthetic?rev=1#item=0",
+        )
+
     def test_public_capture_limit_fits_the_mcp_transport_budget(self) -> None:
         principal = {
             "source_id": "synthetic:capture",

@@ -209,10 +209,12 @@ def main() -> None:
         rendered_envelope = json.dumps(capture_events[0]["envelope"])
         assert "synthetic-public-mcp-secret-canary" not in rendered_envelope
         assert capture_events[0]["envelope"]["content"]["origin"] == "grep-agent"
-        assert store.search(
+        capture_search = store.search(
             "bounded amethyst queue",
             authorized_source="synthetic:owner:capture",
         )["results"]
+        assert len(capture_search) == 1
+        assert capture_search[0]["receipt"] == receipt
 
         wrong_forget = tool(
             server,
