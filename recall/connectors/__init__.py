@@ -10,7 +10,22 @@ from .sdk import (
     seed_acknowledged_records,
 )
 from .export_inbox import ExportInboxConnector, ExportInboxError
-from .registry import ConnectorDefinition, ConnectorRegistryError, REGISTRY
+from .registry import (
+    ConnectorAuth,
+    ConnectorDefinition,
+    ConnectorDefinitionV3,
+    ConnectorPlacement,
+    ConnectorPolicy,
+    ConnectorRegistryError,
+    ConnectorSync,
+    REGISTRY,
+)
+from .kit import (
+    CONNECTOR_KIT_API_VERSION,
+    CONNECTOR_PAGE_WIRE_VERSION,
+    decode_page_wire,
+    encode_page_wire,
+)
 from .supervisor import (
     ConnectorSupervisor,
     ScheduleDefinition,
@@ -31,8 +46,17 @@ __all__ = [
     "ExportInboxConnector",
     "ExportInboxError",
     "ConnectorDefinition",
+    "ConnectorDefinitionV3",
+    "ConnectorPlacement",
+    "ConnectorAuth",
+    "ConnectorSync",
+    "ConnectorPolicy",
     "ConnectorRegistryError",
     "REGISTRY",
+    "CONNECTOR_KIT_API_VERSION",
+    "CONNECTOR_PAGE_WIRE_VERSION",
+    "encode_page_wire",
+    "decode_page_wire",
     "ConnectorSupervisor",
     "ScheduleDefinition",
     "ScheduledJob",

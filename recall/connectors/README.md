@@ -5,6 +5,40 @@ that boundary: closed-schema validation, pre-ingest privacy, a mode-0600 SQLite
 outbox, Brain acknowledgement recovery, cursor commits, canonical tombstones, and
 content-free doctor state.
 
+## Connector Kit v3
+
+`connectors.kit` is the versioned publisher surface around the same proven page
+runner. A v3 definition is composed from closed placement, auth, sync, policy,
+record-kind, and selection facets. It declares what a connector can do without
+containing executable paths, import strings, credentials, endpoint templates, or
+arbitrary request recipes.
+
+Placements are `source_local`, `remote_worker`, or `either`. Acquisition modes
+are explicit (`poll`, `watch`, `snapshot`, `import`, or `webhook`). Provider
+scopes remain code-owned strings on the bundled definition, which permits
+non-Google APIs without turning configuration into an operation language.
+
+Third-party workers do not load into Recall Core. They may exchange a single
+closed `recall.connector-page.v1` document with a source-scoped host:
+
+```python
+from connectors.kit import decode_page_wire, encode_page_wire
+
+payload = encode_page_wire(page)
+same_page = decode_page_wire(payload)
+```
+
+The wire contains only typed records, an opaque next cursor, and `has_more`.
+Source identity and Brain authority stay outside the payload and are bound by
+the host. Unknown versions, fields, record schemas, invalid cursors, non-finite
+JSON, and oversized payloads fail before the runner. The schema is published at
+`contracts/connector_page_v1.json`.
+
+The first kit deliberately provides no entry-point discovery or arbitrary
+worker launcher. Publishers can develop and conformance-test separate workers;
+operators must explicitly pin and run them outside Core until a later signed
+distribution contract is approved.
+
 Connectors are explicit Python objects. Recall does not discover or execute
 plugins, recipes, entry points, or code from the current directory.
 
