@@ -620,6 +620,12 @@ class RenderPrivateStackAdapter:
         }
 
 
+PUBLIC_MCP_DOCKER_COMMAND = (
+    "serve --host 0.0.0.0 --port 10000 --require-auth "
+    "--capability-profile production"
+)
+
+
 class RenderPublicMcpAdapter(RenderPrivateStackAdapter):
     """One public HTTPS service with an MCP-only application surface."""
 
@@ -661,6 +667,11 @@ class RenderPublicMcpAdapter(RenderPrivateStackAdapter):
         if not isinstance(service, dict):
             raise LiveProviderError("provider_response_invalid")
         details = service.get("serviceDetails")
+        environment = (
+            details.get("envSpecificDetails")
+            if isinstance(details, dict)
+            else None
+        )
         url = details.get("url") if isinstance(details, dict) else None
         parsed = urlsplit(url) if isinstance(url, str) else None
         expected_details = {
@@ -669,10 +680,6 @@ class RenderPublicMcpAdapter(RenderPrivateStackAdapter):
             "plan": self.core_plan,
             "numInstances": 1,
             "healthCheckPath": "/readyz",
-            "dockerCommand": (
-                "serve --host 0.0.0.0 --port 10000 --require-auth "
-                "--capability-profile production"
-            ),
         }
         if (
             service.get("name") != self.core_name
@@ -681,6 +688,8 @@ class RenderPublicMcpAdapter(RenderPrivateStackAdapter):
             or not isinstance(service.get("id"), str)
             or not isinstance(details, dict)
             or any(details.get(key) != value for key, value in expected_details.items())
+            or not isinstance(environment, dict)
+            or environment.get("dockerCommand") != PUBLIC_MCP_DOCKER_COMMAND
             or parsed is None
             or parsed.scheme != "https"
             or not parsed.hostname
@@ -719,10 +728,9 @@ class RenderPublicMcpAdapter(RenderPrivateStackAdapter):
                     "region": self.region,
                     "numInstances": 1,
                     "healthCheckPath": "/readyz",
-                    "dockerCommand": (
-                        "serve --host 0.0.0.0 --port 10000 --require-auth "
-                        "--capability-profile production"
-                    ),
+                    "envSpecificDetails": {
+                        "dockerCommand": PUBLIC_MCP_DOCKER_COMMAND,
+                    },
                 },
             },
         )
