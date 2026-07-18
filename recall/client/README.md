@@ -66,7 +66,7 @@ excluded app state, and ordinary Claude cloud-chat history is not claimed.
 `--privacy-mode off|scrub|drop` defaults to `scrub`, and Cowork rejects `off`.
 Re-running the installer is an in-place upgrade that preserves private state.
 
-Inspect all four source classes without printing a path, credential, cursor,
+Inspect configured source classes without printing a path, credential, cursor,
 content, or exception:
 
 ```bash

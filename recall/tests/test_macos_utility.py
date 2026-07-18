@@ -43,7 +43,8 @@ class MacUtilityLifecycleTest(unittest.TestCase):
             list(SOURCE_SPECS),
             [
                 "claude-code", "codex", "cowork", "chatgpt-export",
-                "imessage", "whatsapp", "selected-text",
+                "imessage", "whatsapp", "selected-text", "safari", "chrome",
+                "apple-notes", "hermes",
             ],
         )
         self._enable("claude-code")
@@ -86,6 +87,10 @@ class MacUtilityLifecycleTest(unittest.TestCase):
         self.assertEqual(
             result["sources"]["selected-text"]["surface"],
             "selected-markdown-obsidian-root",
+        )
+        self.assertEqual(
+            result["sources"]["hermes"]["surface"],
+            "hermes-session-schema-v22",
         )
         rendered = json.dumps(result, sort_keys=True)
         for forbidden in (str(self.home), "CANARY", "CREDENTIAL", "PATH"):

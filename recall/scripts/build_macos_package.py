@@ -173,6 +173,7 @@ def application_payloads(source_root: Path, runtime_lock_data: bytes) -> dict[st
         source_root / "connectors" / "local_sqlite.py": "lib/connectors/local_sqlite.py",
         source_root / "connectors" / "local_file.py": "lib/connectors/local_file.py",
         source_root / "connectors" / "local_files.py": "lib/connectors/local_files.py",
+        source_root / "connectors" / "local_activity.py": "lib/connectors/local_activity.py",
         source_root / "connectors" / "whatsapp_export.py": "lib/connectors/whatsapp_export.py",
         source_root / "connectors" / "__init__.py": "lib/connectors/__init__.py",
         source_root / "contracts" / "connector_v2.json": "lib/contracts/connector_v2.json",

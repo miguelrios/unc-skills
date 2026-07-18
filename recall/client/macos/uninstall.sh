@@ -29,7 +29,7 @@ stop_launch_agent() {
   done
 }
 
-for HARNESS in claude codex cowork chatgpt-export imessage whatsapp selected-text connector-supervisor; do
+for HARNESS in claude codex cowork chatgpt-export imessage whatsapp selected-text safari chrome apple-notes hermes connector-supervisor; do
   LABEL="ai.parcha.recall.$HARNESS"
   if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
     stop_launch_agent "$LABEL"

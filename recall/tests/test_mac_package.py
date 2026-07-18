@@ -226,6 +226,7 @@ class MacPackageTest(unittest.TestCase):
         self.assertIn("lib/connectors/local_sqlite.py", packaged_paths)
         self.assertIn("lib/connectors/local_file.py", packaged_paths)
         self.assertIn("lib/connectors/local_files.py", packaged_paths)
+        self.assertIn("lib/connectors/local_activity.py", packaged_paths)
         self.assertIn("lib/connectors/whatsapp_export.py", packaged_paths)
         self.assertIn("lib/contracts/connector_page_v1.json", packaged_paths)
         self.assertIn("lib/client/capture.py", packaged_paths)
@@ -251,6 +252,9 @@ class MacPackageTest(unittest.TestCase):
         self.assertIn('arguments[3] = "imessage-sync"', installer)
         self.assertIn('arguments[3] = "whatsapp-export-sync"', installer)
         self.assertIn('arguments[3] = "selected-text-sync"', installer)
+        self.assertIn('arguments[3] = "browser-sync"', installer)
+        self.assertIn('arguments[3] = "apple-notes-sync"', installer)
+        self.assertIn('arguments[3] = "hermes-session-sync"', installer)
         self.assertIn('claude-code', installer)
         self.assertIn('cowork', installer)
         self.assertIn('whatsapp|whatsapp-export) NORMALIZED=whatsapp', installer)
@@ -272,7 +276,7 @@ class MacPackageTest(unittest.TestCase):
         uninstaller = (package / "uninstall.sh").read_text()
         self.assertIn(
             "claude codex cowork chatgpt-export imessage whatsapp selected-text "
-            "connector-supervisor",
+            "safari chrome apple-notes hermes connector-supervisor",
             uninstaller,
         )
         self.assertIn('while launchctl print "$TARGET"', uninstaller)
@@ -309,10 +313,21 @@ class MacPackageTest(unittest.TestCase):
         imessage = self.root / "private-imessage-PATH-CANARY.db"
         whatsapp = self.root / "private-whatsapp-PATH-CANARY.txt"
         selected = self.root / "private-selected-PATH-CANARY"
+        safari_history = self.root / "private-safari-history-PATH-CANARY.db"
+        safari_bookmarks = self.root / "private-safari-bookmarks-PATH-CANARY.plist"
+        chrome_history = self.root / "private-chrome-history-PATH-CANARY.db"
+        chrome_bookmarks = self.root / "private-chrome-bookmarks-PATH-CANARY.json"
+        notes = self.root / "private-notes-PATH-CANARY.db"
+        hermes = self.root / "private-hermes-PATH-CANARY.db"
         imessage.write_bytes(b"synthetic")
         whatsapp.write_text("17/07/2026, 12:00 - Synthetic: fixture\n")
         selected.mkdir()
         (selected / "fixture.md").write_text("synthetic")
+        for path in (
+            safari_history, safari_bookmarks, chrome_history, chrome_bookmarks,
+            notes, hermes,
+        ):
+            path.write_bytes(b"synthetic")
 
         installed = subprocess.run([
             "sh", str(package / "install.sh"),
@@ -320,13 +335,22 @@ class MacPackageTest(unittest.TestCase):
             "--endpoint", "https://example.invalid", "--host-id", "synthetic-host",
             "--keychain-service", "synthetic.reference", "--visibility", "private",
             "--privacy-mode", "scrub",
-            "--sources", "imessage,whatsapp-export,obsidian",
+            "--sources",
+            "imessage,whatsapp-export,obsidian,safari,chrome,apple-notes,hermes",
             "--imessage-database", str(imessage),
             "--whatsapp-export", str(whatsapp),
             "--whatsapp-conversation-id", "synthetic-conversation",
             "--whatsapp-owner-name", "Synthetic Owner",
             "--whatsapp-date-order", "dmy", "--whatsapp-timezone", "UTC",
             "--selected-text-root", str(selected), "--no-load",
+            "--safari-history", str(safari_history),
+            "--safari-bookmarks", str(safari_bookmarks),
+            "--chrome-history", str(chrome_history),
+            "--chrome-bookmarks", str(chrome_bookmarks),
+            "--apple-notes-database", str(notes),
+            "--hermes-database", str(hermes),
+            "--hermes-sources", "cli,slack",
+            "--hermes-roles", "assistant,user",
         ], check=True, text=True, capture_output=True)
         self.assertEqual(installed.stderr, "")
         self.assertNotIn("PATH-CANARY", installed.stdout)
@@ -335,6 +359,10 @@ class MacPackageTest(unittest.TestCase):
             "imessage": ("imessage-sync", "--database", str(imessage)),
             "whatsapp": ("whatsapp-export-sync", "--export", str(whatsapp)),
             "selected-text": ("selected-text-sync", "--root", str(selected)),
+            "safari": ("browser-sync", "--history", str(safari_history)),
+            "chrome": ("browser-sync", "--history", str(chrome_history)),
+            "apple-notes": ("apple-notes-sync", "--database", str(notes)),
+            "hermes": ("hermes-session-sync", "--database", str(hermes)),
         }
         for name, (command, path_option, source_path) in expected.items():
             path = agents / f"ai.parcha.recall.{name}.plist"
@@ -360,7 +388,7 @@ class MacPackageTest(unittest.TestCase):
         rendered = status.stdout + status.stderr
         self.assertNotIn("PATH-CANARY", rendered)
         status_value = json.loads(status.stdout)
-        self.assertEqual(status_value["enabled"], 3)
+        self.assertEqual(status_value["enabled"], 7)
         self.assertTrue(all(
             status_value["sources"][name]["health"] == "starting"
             for name in expected

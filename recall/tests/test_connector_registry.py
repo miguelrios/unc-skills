@@ -52,7 +52,8 @@ class FrozenRegistryTest(unittest.TestCase):
             "google.gmail", "google.calendar", "google.contacts", "google.drive",
             "github.activity", "linear.activity", "slack.messages",
             "notion.workspace", "x.activity", "apple.imessage",
-            "whatsapp.export", "local.selected-text",
+            "whatsapp.export", "local.selected-text", "apple.safari",
+            "google.chrome", "apple.notes", "hermes.sessions",
         ))
         self.assertEqual(definition("grep.ai").authority_slots, ("brain", "source"))
         with self.assertRaises(ConnectorRegistryError):
@@ -101,7 +102,7 @@ class RegistryPreviewAndStatusTest(unittest.TestCase):
         self.assertEqual(value["source_reads"], 0)
         self.assertEqual(value["network_requests"], 0)
         self.assertEqual(value["writes"], 0)
-        self.assertEqual(len(value["connectors"]), 15)
+        self.assertEqual(len(value["connectors"]), 19)
 
     def test_status_health_is_bounded_read_only_and_content_free(self):
         with tempfile.TemporaryDirectory() as directory:

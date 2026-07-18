@@ -208,6 +208,36 @@ recall-brain whatsapp-export-sync --export /selected/chat.txt \
 recall-brain selected-text-sync --root /selected/notes --max-depth 8 ...
 ```
 
+### Browsers, Apple Notes, and Hermes
+
+`BrowserActivityConnector` reads only explicitly selected Safari or Chrome
+history/bookmark files. History uses a query-only SQLite snapshot; Safari
+bookmarks use the selected plist and Chrome bookmarks use the selected JSON
+file. Only bounded HTTP(S) URLs are projected. Profile discovery, cookies,
+passwords, form data, downloads, browser automation, and non-web local paths are
+out of scope. Snapshot absence never becomes a tombstone.
+
+`AppleNotesConnector` supports one pinned Notes schema and projects title and
+snippet only. It skips password-protected notes and never decodes proprietary
+note bodies, walks attachments, or infers deletion from an absent row. Any
+missing or changed required column fails closed before projection.
+
+`HermesSessionConnector` supports the upstream canonical `state.db` schema v22.
+At least one Hermes source tag must be selected. Only selected user/assistant
+turns are read; system prompts, tools, reasoning, attachments, billing data, and
+other tables are excluded. An explicit inactive message becomes a tombstone;
+database or row absence does not.
+
+All four connectors require private visibility plus `scrub` or `drop`, use
+stable hashed identities, cap snapshot rows, and commit their cursor only after
+Brain acknowledgement:
+
+```bash
+recall-brain browser-sync --browser safari --history /selected/History.db ...
+recall-brain apple-notes-sync --database /selected/NoteStore.sqlite ...
+recall-brain hermes-session-sync --database /selected/state.db --source cli ...
+```
+
 ```python
 from connectors.sdk import ConnectorPage, ConnectorRecord, ConnectorRunner
 

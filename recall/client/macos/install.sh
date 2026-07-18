@@ -18,6 +18,14 @@ WHATSAPP_OWNER_NAME=""
 WHATSAPP_DATE_ORDER=""
 WHATSAPP_TIMEZONE=""
 SELECTED_TEXT_ROOT=""
+SAFARI_HISTORY=""
+SAFARI_BOOKMARKS=""
+CHROME_HISTORY=""
+CHROME_BOOKMARKS=""
+APPLE_NOTES_DATABASE=""
+HERMES_DATABASE=""
+HERMES_SOURCES=""
+HERMES_ROLES=""
 NO_LOAD=0
 PRIVACY_MODE="scrub"
 EXPORT_INBOX=""
@@ -45,6 +53,14 @@ while [ "$#" -gt 0 ]; do
     --whatsapp-date-order) WHATSAPP_DATE_ORDER=$2; shift 2 ;;
     --whatsapp-timezone) WHATSAPP_TIMEZONE=$2; shift 2 ;;
     --selected-text-root) SELECTED_TEXT_ROOT=$2; shift 2 ;;
+    --safari-history) SAFARI_HISTORY=$2; shift 2 ;;
+    --safari-bookmarks) SAFARI_BOOKMARKS=$2; shift 2 ;;
+    --chrome-history) CHROME_HISTORY=$2; shift 2 ;;
+    --chrome-bookmarks) CHROME_BOOKMARKS=$2; shift 2 ;;
+    --apple-notes-database) APPLE_NOTES_DATABASE=$2; shift 2 ;;
+    --hermes-database) HERMES_DATABASE=$2; shift 2 ;;
+    --hermes-sources) HERMES_SOURCES=$2; shift 2 ;;
+    --hermes-roles) HERMES_ROLES=$2; shift 2 ;;
     --privacy-mode) PRIVACY_MODE=$2; shift 2 ;;
     --export-inbox) EXPORT_INBOX=$2; shift 2 ;;
     --disable-export-inbox) DISABLE_EXPORT_INBOX=1; shift ;;
@@ -52,7 +68,7 @@ while [ "$#" -gt 0 ]; do
     --connector-supervisor-config) SUPERVISOR_CONFIG=$2; shift 2 ;;
     --disable-connector-supervisor) DISABLE_SUPERVISOR=1; shift ;;
     --no-load) NO_LOAD=1; shift ;;
-    *) echo "usage: install.sh [connection] [--sources claude-code,codex,cowork,imessage,whatsapp,selected-text] [explicit source paths and selectors] [disable/lifecycle options]" >&2; exit 2 ;;
+    *) echo "usage: install.sh [connection] [--sources explicit,comma,separated,sources] [explicit source paths and selectors] [disable/lifecycle options]" >&2; exit 2 ;;
   esac
 done
 
@@ -84,6 +100,10 @@ for SOURCE_NAME in $(echo "$SOURCES" | tr ',' ' '); do
     imessage) NORMALIZED=imessage ;;
     whatsapp|whatsapp-export) NORMALIZED=whatsapp ;;
     selected-text|obsidian) NORMALIZED=selected-text ;;
+    safari) NORMALIZED=safari ;;
+    chrome) NORMALIZED=chrome ;;
+    apple-notes|notes) NORMALIZED=apple-notes ;;
+    hermes) NORMALIZED=hermes ;;
     *) echo "unsupported source: $SOURCE_NAME" >&2; exit 2 ;;
   esac
   case ",$NORMALIZED_SOURCES," in *,$NORMALIZED,*) echo "invalid duplicate or empty source selection" >&2; exit 2 ;; esac
@@ -112,8 +132,49 @@ case ",$SOURCES," in *,selected-text,*)
   [ "$VISIBILITY" = "private" ] || { echo "selected text visibility must be private" >&2; exit 2; }
   [ -d "$SELECTED_TEXT_ROOT" ] && [ ! -L "$SELECTED_TEXT_ROOT" ] || { echo "selected text root must be an explicit non-symlink directory" >&2; exit 2; }
 ;; esac
+case ",$SOURCES," in *,safari,*)
+  [ "$PRIVACY_MODE" != "off" ] || { echo "Safari requires scrub or drop privacy" >&2; exit 2; }
+  [ "$VISIBILITY" = "private" ] || { echo "Safari visibility must be private" >&2; exit 2; }
+  [ -n "$SAFARI_HISTORY" ] || [ -n "$SAFARI_BOOKMARKS" ] || { echo "Safari requires an explicit history or bookmarks file" >&2; exit 2; }
+  if [ -n "$SAFARI_HISTORY" ]; then [ -f "$SAFARI_HISTORY" ] && [ ! -L "$SAFARI_HISTORY" ] || { echo "Safari history must be an explicit non-symlink file" >&2; exit 2; }; fi
+  if [ -n "$SAFARI_BOOKMARKS" ]; then [ -f "$SAFARI_BOOKMARKS" ] && [ ! -L "$SAFARI_BOOKMARKS" ] || { echo "Safari bookmarks must be an explicit non-symlink file" >&2; exit 2; }; fi
+;; esac
+case ",$SOURCES," in *,chrome,*)
+  [ "$PRIVACY_MODE" != "off" ] || { echo "Chrome requires scrub or drop privacy" >&2; exit 2; }
+  [ "$VISIBILITY" = "private" ] || { echo "Chrome visibility must be private" >&2; exit 2; }
+  [ -n "$CHROME_HISTORY" ] || [ -n "$CHROME_BOOKMARKS" ] || { echo "Chrome requires an explicit history or bookmarks file" >&2; exit 2; }
+  if [ -n "$CHROME_HISTORY" ]; then [ -f "$CHROME_HISTORY" ] && [ ! -L "$CHROME_HISTORY" ] || { echo "Chrome history must be an explicit non-symlink file" >&2; exit 2; }; fi
+  if [ -n "$CHROME_BOOKMARKS" ]; then [ -f "$CHROME_BOOKMARKS" ] && [ ! -L "$CHROME_BOOKMARKS" ] || { echo "Chrome bookmarks must be an explicit non-symlink file" >&2; exit 2; }; fi
+;; esac
+case ",$SOURCES," in *,apple-notes,*)
+  [ "$PRIVACY_MODE" != "off" ] || { echo "Apple Notes requires scrub or drop privacy" >&2; exit 2; }
+  [ "$VISIBILITY" = "private" ] || { echo "Apple Notes visibility must be private" >&2; exit 2; }
+  [ -f "$APPLE_NOTES_DATABASE" ] && [ ! -L "$APPLE_NOTES_DATABASE" ] || { echo "Apple Notes database must be an explicit non-symlink file" >&2; exit 2; }
+;; esac
+case ",$SOURCES," in *,hermes,*)
+  [ "$PRIVACY_MODE" != "off" ] || { echo "Hermes requires scrub or drop privacy" >&2; exit 2; }
+  [ "$VISIBILITY" = "private" ] || { echo "Hermes visibility must be private" >&2; exit 2; }
+  [ -f "$HERMES_DATABASE" ] && [ ! -L "$HERMES_DATABASE" ] || { echo "Hermes database must be an explicit non-symlink file" >&2; exit 2; }
+  [ -n "$HERMES_SOURCES" ] || { echo "Hermes requires at least one explicit source selector" >&2; exit 2; }
+  case "$HERMES_SOURCES" in ,*|*,|*,,*) echo "Hermes source selectors are invalid" >&2; exit 2 ;; esac
+  SEEN_HERMES_SOURCES=""
+  for HERMES_SOURCE in $(echo "$HERMES_SOURCES" | tr ',' ' '); do
+    case "$HERMES_SOURCE" in ""|*[!A-Za-z0-9_.:@-]*) echo "Hermes source selectors are invalid" >&2; exit 2 ;; esac
+    case ",$SEEN_HERMES_SOURCES," in *,$HERMES_SOURCE,*) echo "Hermes source selectors are duplicated" >&2; exit 2 ;; esac
+    SEEN_HERMES_SOURCES="${SEEN_HERMES_SOURCES:+$SEEN_HERMES_SOURCES,}$HERMES_SOURCE"
+  done
+  if [ -n "$HERMES_ROLES" ]; then
+    case "$HERMES_ROLES" in ,*|*,|*,,*) echo "Hermes role selectors are invalid" >&2; exit 2 ;; esac
+    SEEN_HERMES_ROLES=""
+    for HERMES_ROLE in $(echo "$HERMES_ROLES" | tr ',' ' '); do
+      case "$HERMES_ROLE" in assistant|user) ;; *) echo "Hermes role selectors are invalid" >&2; exit 2 ;; esac
+      case ",$SEEN_HERMES_ROLES," in *,$HERMES_ROLE,*) echo "Hermes role selectors are duplicated" >&2; exit 2 ;; esac
+      SEEN_HERMES_ROLES="${SEEN_HERMES_ROLES:+$SEEN_HERMES_ROLES,}$HERMES_ROLE"
+    done
+  fi
+;; esac
 for SOURCE_NAME in $DISABLE_SOURCES; do
-  case "$SOURCE_NAME" in claude|claude-code|codex|chatgpt-codex-desktop|cowork|chatgpt-export|imessage|whatsapp|whatsapp-export|selected-text|obsidian) ;; *) echo "unsupported disable source: $SOURCE_NAME" >&2; exit 2 ;; esac
+  case "$SOURCE_NAME" in claude|claude-code|codex|chatgpt-codex-desktop|cowork|chatgpt-export|imessage|whatsapp|whatsapp-export|selected-text|obsidian|safari|chrome|apple-notes|notes|hermes) ;; *) echo "unsupported disable source: $SOURCE_NAME" >&2; exit 2 ;; esac
 done
 if [ -n "$EXPORT_INBOX" ]; then
   [ -d "$EXPORT_INBOX" ] && [ ! -L "$EXPORT_INBOX" ] || { echo "export inbox must be an explicit non-symlink directory" >&2; exit 2; }
@@ -314,20 +375,26 @@ write_local_connector_plist() {
     imessage) SOURCE_ID="imessage:mac:$HOST_ID"; LABEL="ai.parcha.recall.imessage"; SPOOL="$PREFIX/state/imessage.db" ;;
     whatsapp) SOURCE_ID="whatsapp:mac:$HOST_ID"; LABEL="ai.parcha.recall.whatsapp"; SPOOL="$PREFIX/state/whatsapp.db" ;;
     selected-text) SOURCE_ID="selected-text:mac:$HOST_ID"; LABEL="ai.parcha.recall.selected-text"; SPOOL="$PREFIX/state/selected-text.db" ;;
+    safari) SOURCE_ID="safari:mac:$HOST_ID"; LABEL="ai.parcha.recall.safari"; SPOOL="$PREFIX/state/safari.db" ;;
+    chrome) SOURCE_ID="chrome:mac:$HOST_ID"; LABEL="ai.parcha.recall.chrome"; SPOOL="$PREFIX/state/chrome.db" ;;
+    apple-notes) SOURCE_ID="notes:mac:$HOST_ID"; LABEL="ai.parcha.recall.apple-notes"; SPOOL="$PREFIX/state/apple-notes.db" ;;
+    hermes) SOURCE_ID="hermes:mac:$HOST_ID"; LABEL="ai.parcha.recall.hermes"; SPOOL="$PREFIX/state/hermes.db" ;;
     *) echo "unsupported local connector" >&2; exit 2 ;;
   esac
   PLIST="$LAUNCH_AGENTS/$LABEL.plist"
   if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
     stop_launch_agent "$LABEL"
   fi
-  "$RUNTIME" - "$PLIST" "$LABEL" "$RUNTIME" "$PREFIX/lib" "$ENDPOINT" "$SOURCE_ID" "$SPOOL" "$KEYCHAIN_SERVICE" "$PRIVACY_MODE" "$TYPE" "$IMESSAGE_DATABASE" "$WHATSAPP_EXPORT" "$WHATSAPP_CONVERSATION_ID" "$WHATSAPP_OWNER_NAME" "$WHATSAPP_DATE_ORDER" "$WHATSAPP_TIMEZONE" "$SELECTED_TEXT_ROOT" <<'PY'
+  "$RUNTIME" - "$PLIST" "$LABEL" "$RUNTIME" "$PREFIX/lib" "$ENDPOINT" "$SOURCE_ID" "$SPOOL" "$KEYCHAIN_SERVICE" "$PRIVACY_MODE" "$TYPE" "$IMESSAGE_DATABASE" "$WHATSAPP_EXPORT" "$WHATSAPP_CONVERSATION_ID" "$WHATSAPP_OWNER_NAME" "$WHATSAPP_DATE_ORDER" "$WHATSAPP_TIMEZONE" "$SELECTED_TEXT_ROOT" "$SAFARI_HISTORY" "$SAFARI_BOOKMARKS" "$CHROME_HISTORY" "$CHROME_BOOKMARKS" "$APPLE_NOTES_DATABASE" "$HERMES_DATABASE" "$HERMES_SOURCES" "$HERMES_ROLES" <<'PY'
 import plistlib
 import sys
 
 (path, label, program, pythonpath, endpoint, source_id, spool, service,
  privacy_mode, source_type, imessage_database, whatsapp_export,
  whatsapp_conversation_id, whatsapp_owner_name, whatsapp_date_order,
- whatsapp_timezone, selected_text_root) = sys.argv[1:]
+ whatsapp_timezone, selected_text_root, safari_history, safari_bookmarks,
+ chrome_history, chrome_bookmarks, apple_notes_database, hermes_database,
+ hermes_sources, hermes_roles) = sys.argv[1:]
 arguments = [
     program, "-m", "client.cli", "--placeholder",
 ]
@@ -353,6 +420,25 @@ elif source_type == "whatsapp":
 elif source_type == "selected-text":
     arguments[3] = "selected-text-sync"
     arguments.extend(common + ["--root", selected_text_root])
+elif source_type in {"safari", "chrome"}:
+    arguments[3] = "browser-sync"
+    arguments.extend(common + ["--browser", source_type])
+    history = safari_history if source_type == "safari" else chrome_history
+    bookmarks = safari_bookmarks if source_type == "safari" else chrome_bookmarks
+    if history:
+        arguments.extend(["--history", history])
+    if bookmarks:
+        arguments.extend(["--bookmarks", bookmarks])
+elif source_type == "apple-notes":
+    arguments[3] = "apple-notes-sync"
+    arguments.extend(common + ["--database", apple_notes_database])
+elif source_type == "hermes":
+    arguments[3] = "hermes-session-sync"
+    arguments.extend(common + ["--database", hermes_database])
+    for value in filter(None, hermes_sources.split(",")):
+        arguments.extend(["--source", value])
+    for value in filter(None, hermes_roles.split(",")):
+        arguments.extend(["--role", value])
 else:
     raise SystemExit("unsupported local connector")
 value = {
@@ -427,6 +513,10 @@ case ",$SOURCES," in *,cowork,*) write_cowork_plist ;; esac
 case ",$SOURCES," in *,imessage,*) write_local_connector_plist imessage ;; esac
 case ",$SOURCES," in *,whatsapp,*) write_local_connector_plist whatsapp ;; esac
 case ",$SOURCES," in *,selected-text,*) write_local_connector_plist selected-text ;; esac
+case ",$SOURCES," in *,safari,*) write_local_connector_plist safari ;; esac
+case ",$SOURCES," in *,chrome,*) write_local_connector_plist chrome ;; esac
+case ",$SOURCES," in *,apple-notes,*) write_local_connector_plist apple-notes ;; esac
+case ",$SOURCES," in *,hermes,*) write_local_connector_plist hermes ;; esac
 if [ -n "$EXPORT_INBOX" ]; then write_export_inbox_plist; fi
 if [ -n "$SUPERVISOR_CONFIG" ]; then write_supervisor_plist; fi
 if [ "$DISABLE_EXPORT_INBOX" -eq 1 ]; then
@@ -445,6 +535,10 @@ for SOURCE_NAME in $DISABLE_SOURCES; do
     imessage) LABEL="ai.parcha.recall.imessage" ;;
     whatsapp|whatsapp-export) LABEL="ai.parcha.recall.whatsapp" ;;
     selected-text|obsidian) LABEL="ai.parcha.recall.selected-text" ;;
+    safari) LABEL="ai.parcha.recall.safari" ;;
+    chrome) LABEL="ai.parcha.recall.chrome" ;;
+    apple-notes|notes) LABEL="ai.parcha.recall.apple-notes" ;;
+    hermes) LABEL="ai.parcha.recall.hermes" ;;
   esac
   if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
     stop_launch_agent "$LABEL"
