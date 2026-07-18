@@ -5,6 +5,7 @@ import json
 import os
 import re
 import secrets
+import threading
 import time
 import uuid
 from concurrent.futures import ProcessPoolExecutor
@@ -13,6 +14,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import psycopg
+from psycopg_pool import ConnectionPool
 from psycopg.rows import dict_row
 
 from . import PROJECTOR_VERSION
@@ -41,6 +43,39 @@ def semantic_candidate_limit(result_limit: int) -> int:
     return min(100, max(20, result_limit * 4))
 
 
+def optional_rescue_deadline(
+    *,
+    overall_deadline_at: float,
+    now: float,
+    search_deadline_ms: int,
+) -> float:
+    """Give all optional lexical rescues one strict sub-budget."""
+    budget_ms = min(800, max(100, round(search_deadline_ms * 0.3)))
+    return min(overall_deadline_at, now + budget_ms / 1000)
+
+
+def enough_session_anchors(rows: Iterable[dict], *, result_limit: int) -> bool:
+    """Stop rescues once ranking can fill the requested session slots."""
+    anchors = {
+        (row["source_id"], row["session_native_id"])
+        for row in rows
+    }
+    return len(anchors) >= max(1, result_limit - 1)
+
+
+def should_run_optional_rescue(
+    *,
+    exact_question_count: int,
+    rows: Iterable[dict],
+    result_limit: int,
+) -> bool:
+    """Rescue only when exact adjacency and session diversity are both absent."""
+    return (
+        exact_question_count == 0
+        and not enough_session_anchors(rows, result_limit=result_limit)
+    )
+
+
 def related_candidate_limit(result_limit: int) -> int:
     """Bound fast related lookups while leaving room for path filtering."""
     return min(400, max(100, result_limit * 20))
@@ -51,6 +86,8 @@ class BrainStore:
                  semantic_runtime: SemanticRuntime | None = None,
                  semantic_minimum_similarity: float | None = None):
         self.dsn = dsn
+        self._pool: ConnectionPool | None = None
+        self._pool_lock = threading.Lock()
         configured = search_deadline_ms if search_deadline_ms is not None else int(os.environ.get("RECALL_SEARCH_DEADLINE_MS", str(DEFAULT_SEARCH_DEADLINE_MS)))
         if not 10 <= configured <= 5000:
             raise ValueError("search deadline must be between 10 and 5000 milliseconds")
@@ -80,7 +117,25 @@ class BrainStore:
         self.semantic_runtime = semantic_runtime
 
     def connect(self):
-        return psycopg.connect(self.dsn, row_factory=dict_row)
+        if self._pool is None:
+            with self._pool_lock:
+                if self._pool is None:
+                    self._pool = ConnectionPool(
+                        self.dsn,
+                        kwargs={"row_factory": dict_row},
+                        min_size=1,
+                        max_size=4,
+                        timeout=5,
+                        max_idle=300,
+                        max_lifetime=1800,
+                        open=True,
+                        name="recall-brain",
+                    )
+        return self._pool.connection()
+
+    def close(self) -> None:
+        if self._pool is not None:
+            self._pool.close()
 
     def migrate(self) -> None:
         schema_dir = Path(__file__).resolve().parents[1] / "schema"
@@ -1246,6 +1301,9 @@ class BrainStore:
         deadline_at = database_started + self.search_deadline_ms / 1000
         leg_timings: list[dict[str, Any]] = []
         deadline_exceeded = False
+        rescue_deadline_at: float | None = None
+        rescue_exhausted = False
+        exact_question_count = 0
         dense_anchor_keys: list[tuple[str, str]] = []
         exact_rescue_scores: dict[tuple[str, str], tuple[int, int, float]] = {}
 
@@ -1275,8 +1333,8 @@ class BrainStore:
                         row["fusion_score"] = fusion_score
                         candidates[row["id"]] = row
 
-        def run_leg(name: str, operation) -> list[dict]:
-            nonlocal deadline_exceeded
+        def run_leg(name: str, operation, *, optional: bool = False) -> list[dict]:
+            nonlocal deadline_exceeded, rescue_exhausted
             leg_started = time.monotonic()
             try:
                 rows = operation()
@@ -1286,11 +1344,15 @@ class BrainStore:
                 })
                 return rows
             except SearchDeadlineExceeded:
-                deadline_exceeded = True
                 leg_timings.append({
                     "leg": name, "elapsed_ms": round((time.monotonic() - leg_started) * 1000, 3),
                     "n_results": 0, "timed_out": True,
                 })
+                if optional:
+                    conn.rollback()
+                    rescue_exhausted = True
+                    return []
+                deadline_exceeded = True
                 raise
 
         try:
@@ -1313,10 +1375,12 @@ class BrainStore:
                             break
                 else:
                     phrase_spec = phrase_query_spec(preferred_phrase_probes(engine.phrase_queries(query)))
-                    merge(run_leg("exact-question", lambda: self._exact_question_leg(
+                    exact_question_rows = run_leg("exact-question", lambda: self._exact_question_leg(
                         conn, query, filters, authorized_source=authorized_source,
                         routed_source_ids=routed_source_ids, deadline_at=deadline_at,
-                    )))
+                    ))
+                    exact_question_count = len(exact_question_rows)
+                    merge(exact_question_rows)
                     # Dense retrieval is the primary non-exact natural-language
                     # leg. Run it before broad phrase scans and optional rewrites.
                     # Those rescues run lazily only when dense evidence cannot
@@ -1336,19 +1400,34 @@ class BrainStore:
                                 if len(dense_anchor_keys) >= max(1, limit - 1):
                                     break
                         merge(semantic_rows)
+                    rescue_deadline_at = optional_rescue_deadline(
+                        overall_deadline_at=deadline_at,
+                        now=time.monotonic(),
+                        search_deadline_ms=self.search_deadline_ms,
+                    )
                     if (
                         phrase_spec and len(informative) >= 2
-                        and len(dense_anchor_keys) < max(1, limit - 1)
+                        and should_run_optional_rescue(
+                            exact_question_count=exact_question_count,
+                            rows=candidates.values(),
+                            result_limit=limit,
+                        )
                     ):
                         phrase_query, phrase_function = phrase_spec
                         merge(run_leg("phrase", lambda: self._lexical_leg(
                             conn, phrase_query, phrase_function, filters, "phrase", 3,
-                            limit=100, authorized_source=authorized_source, deadline_at=deadline_at,
+                            limit=100, authorized_source=authorized_source,
+                            deadline_at=rescue_deadline_at,
                             routed_source_ids=routed_source_ids,
-                        )))
+                        ), optional=True))
                     if (
                         self.semantic_runtime is not None
-                        and len(dense_anchor_keys) < max(1, limit - 1)
+                        and not rescue_exhausted
+                        and should_run_optional_rescue(
+                            exact_question_count=exact_question_count,
+                            rows=candidates.values(),
+                            result_limit=limit,
+                        )
                         and len(informative) > 1
                         and redact_text(query) == query
                     ):
@@ -1367,9 +1446,15 @@ class BrainStore:
                         # optional planner wait must not consume the remaining
                         # bounded SQL time for the rescue it produces.
                         deadline_at += planner_elapsed_ms / 1000
+                        rescue_deadline_at += planner_elapsed_ms / 1000
                     if (
                         plan is not None and plan.searchable and plan.phrases
-                        and len(dense_anchor_keys) < max(1, limit - 1)
+                        and not rescue_exhausted
+                        and should_run_optional_rescue(
+                            exact_question_count=exact_question_count,
+                            rows=candidates.values(),
+                            result_limit=limit,
+                        )
                     ):
                         # Rewrites may only add high-precision evidence. Broad OR
                         # rewrites let one generic model phrase reshuffle an
@@ -1377,13 +1462,21 @@ class BrainStore:
                         # rescue canonical labels without rewarding synonyms that
                         # are absent from the evidence.
                         for rewrite_index, rewrite_phrase in enumerate(plan.phrases):
+                            if (
+                                rescue_exhausted
+                                or enough_session_anchors(
+                                    candidates.values(), result_limit=limit,
+                                )
+                            ):
+                                break
                             if len(re.findall(r"[A-Za-z0-9_./#-]+", rewrite_phrase)) < 2:
                                 continue
                             rewrite_rows = run_leg(f"rewrite-{rewrite_index}", lambda rewrite_phrase=rewrite_phrase: self._lexical_leg(
                                 conn, rewrite_phrase, "phraseto_tsquery", filters, "rewrite", 2,
                                 exact=rewrite_phrase, limit=20, authorized_source=authorized_source,
-                                deadline_at=deadline_at, routed_source_ids=routed_source_ids,
-                            ))
+                                deadline_at=rescue_deadline_at,
+                                routed_source_ids=routed_source_ids,
+                            ), optional=True)
                             for rewrite_row in rewrite_rows:
                                 key = (rewrite_row["source_id"], rewrite_row["session_native_id"])
                                 score = (
@@ -1393,13 +1486,18 @@ class BrainStore:
                                 )
                                 exact_rescue_scores[key] = max(score, exact_rescue_scores.get(key, score))
                             merge(rewrite_rows)
-                    if phrase_spec and len(informative) == 1 and len(candidates) < limit:
+                    if (
+                        phrase_spec and len(informative) == 1
+                        and len(candidates) < limit and not rescue_exhausted
+                        and exact_question_count == 0
+                    ):
                         phrase_query, phrase_function = phrase_spec
                         merge(run_leg("phrase", lambda: self._lexical_leg(
                             conn, phrase_query, phrase_function, filters, "phrase", 3,
-                            limit=100, authorized_source=authorized_source, deadline_at=deadline_at,
+                            limit=100, authorized_source=authorized_source,
+                            deadline_at=rescue_deadline_at,
                             routed_source_ids=routed_source_ids,
-                        )))
+                        ), optional=True))
                     entity_values = [
                         part
                         for term in informative
