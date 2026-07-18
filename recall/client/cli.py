@@ -55,6 +55,13 @@ from connectors.portable_pim import (
     MailImportConnector,
 )
 from connectors.whatsapp_export import WhatsAppExportConnector
+from connectors.activation import (
+    ActivationError,
+    ActivationStore,
+    activation_catalog,
+    load_activation_config,
+    preview_activation_config,
+)
 from connectors.registry import (
     REGISTRY,
     ConnectorRegistryError,
@@ -180,6 +187,31 @@ def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description="Consent-first Recall Brain client")
     commands = root.add_subparsers(dest="command", required=True)
     commands.add_parser("integration-catalog")
+    commands.add_parser("integration-activation-catalog")
+    activation_preview = commands.add_parser("integration-activation-preview")
+    activation_preview.add_argument("--config", required=True)
+    activation_configure = commands.add_parser("integration-activation-configure")
+    activation_configure.add_argument("--config", required=True)
+    activation_configure.add_argument("--state", required=True)
+    activation_transition = commands.add_parser("integration-activation-transition")
+    activation_transition.add_argument("--state", required=True)
+    activation_transition.add_argument(
+        "--connector-id",
+        choices=tuple(item.connector_id for item in REGISTRY),
+        required=True,
+    )
+    activation_transition.add_argument(
+        "--action",
+        choices=("enable", "pause", "resume", "revoke", "uninstall"),
+        required=True,
+    )
+    activation_status = commands.add_parser("integration-activation-status")
+    activation_status.add_argument("--state", required=True)
+    activation_status.add_argument(
+        "--connector-id",
+        choices=tuple(item.connector_id for item in REGISTRY),
+        required=True,
+    )
     commands.add_parser("connector-registry-preview")
     registry_status = commands.add_parser("connector-registry-status")
     registry_status.add_argument("--connector-id", choices=tuple(item.connector_id for item in REGISTRY), required=True)
@@ -512,6 +544,53 @@ def main() -> None:
         return
     if args.command == "integration-catalog":
         print(json.dumps(integration_catalog(), sort_keys=True))
+        return
+    if args.command == "integration-activation-catalog":
+        print(json.dumps(activation_catalog(), sort_keys=True))
+        return
+    if args.command == "integration-activation-preview":
+        try:
+            result = preview_activation_config(
+                load_activation_config(Path(args.config))
+            )
+        except ActivationError as error:
+            raise SystemExit(str(error)) from None
+        print(json.dumps(result, sort_keys=True))
+        return
+    if args.command == "integration-activation-configure":
+        store = None
+        try:
+            config = load_activation_config(Path(args.config))
+            store = ActivationStore(Path(args.state))
+            result = store.configure(config)
+        except ActivationError as error:
+            raise SystemExit(str(error)) from None
+        finally:
+            if store is not None:
+                store.close()
+        print(json.dumps(result, sort_keys=True))
+        return
+    if args.command in {
+        "integration-activation-transition",
+        "integration-activation-status",
+    }:
+        store = None
+        try:
+            store = ActivationStore(
+                Path(args.state),
+                create=False,
+                read_only=args.command == "integration-activation-status",
+            )
+            if args.command == "integration-activation-transition":
+                result = store.transition(args.connector_id, args.action)
+            else:
+                result = store.status(args.connector_id)
+        except ActivationError as error:
+            raise SystemExit(str(error)) from None
+        finally:
+            if store is not None:
+                store.close()
+        print(json.dumps(result, sort_keys=True))
         return
     if args.command == "connector-registry-status":
         if len(args.authority) != len(set(args.authority)):
