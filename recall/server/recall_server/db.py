@@ -41,6 +41,11 @@ def semantic_candidate_limit(result_limit: int) -> int:
     return min(100, max(20, result_limit * 4))
 
 
+def related_candidate_limit(result_limit: int) -> int:
+    """Bound fast related lookups while leaving room for path filtering."""
+    return min(400, max(100, result_limit * 20))
+
+
 class BrainStore:
     def __init__(self, dsn: str, search_deadline_ms: int | None = None,
                  semantic_runtime: SemanticRuntime | None = None,
@@ -1845,28 +1850,47 @@ class BrainStore:
         else:
             source_scope_sql = "TRUE"
             source_scope_params = []
+        candidate_limit_sql = "LIMIT %s" if fast else ""
+        candidate_limit_params = (
+            [related_candidate_limit(limit)] if fast else []
+        )
         with self.connect() as conn:
             rows = conn.execute(
-                f"""SELECT s.source_id,s.native_id,s.metadata,s.ended_at,path.value AS path,evidence.receipt,
-                           ({' + '.join(score_parts)}) AS overlap
-                    FROM sessions s
+                f"""WITH candidates AS MATERIALIZED (
+                      SELECT s.source_id,s.native_id,s.metadata,s.ended_at,
+                             ({' + '.join(score_parts)}) AS overlap
+                      FROM sessions s
+                      WHERE ({' OR '.join(clauses)})
+                        AND {source_scope_sql}
+                      ORDER BY overlap DESC,s.ended_at DESC NULLS LAST
+                      {candidate_limit_sql}
+                    )
+                    SELECT candidate.source_id,candidate.native_id,
+                           candidate.metadata,candidate.ended_at,
+                           evidence.path,evidence.receipt,candidate.overlap
+                    FROM candidates candidate
                     JOIN LATERAL (
-                      SELECT envelope #>> '{{provenance,original_path}}' AS value
-                      FROM source_events se
-                      WHERE se.source_id=s.source_id AND COALESCE(se.native_parent_id,se.native_id)=s.native_id
-                        AND envelope #>> '{{provenance,original_path}}' IS NOT NULL
-                      ORDER BY se.id DESC LIMIT 1
-                    ) path ON true
-                    JOIN LATERAL (
-                      SELECT i.receipt FROM items i
-                      WHERE i.source_id=s.source_id AND i.session_native_id=s.native_id AND i.deleted_at IS NULL
+                      SELECT i.receipt,
+                             event.envelope #>> '{{provenance,original_path}}' AS path
+                      FROM items i
+                      JOIN source_events event ON event.id=i.event_id
+                      WHERE i.source_id=candidate.source_id
+                        AND i.session_native_id=candidate.native_id
+                        AND i.deleted_at IS NULL
+                        AND event.envelope #>> '{{provenance,original_path}}' IS NOT NULL
                       ORDER BY i.occurred_at DESC NULLS LAST,i.id DESC LIMIT 1
                     ) evidence ON true
-                    WHERE ({' OR '.join(clauses)})
-                      AND {source_scope_sql}
-                      {"AND path.value NOT LIKE '%%/subagents/%%'" if mains_only else ''}
-                    ORDER BY overlap DESC,s.ended_at DESC NULLS LAST LIMIT %s""",
-                [*score_params, *params, *source_scope_params, limit],
+                    {"WHERE evidence.path NOT LIKE '%%/subagents/%%'" if mains_only else ''}
+                    ORDER BY candidate.overlap DESC,
+                             candidate.ended_at DESC NULLS LAST
+                    LIMIT %s""",
+                [
+                    *score_params,
+                    *params,
+                    *source_scope_params,
+                    *candidate_limit_params,
+                    limit,
+                ],
             ).fetchall()
         return {"results": [{
             "source_id": row["source_id"], "session_native_id": row["native_id"],
