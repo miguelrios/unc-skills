@@ -205,6 +205,27 @@ format](https://slack.com/help/articles/220556107-How-to-read-Slack-data-exports
 archive
 guide](https://help.x.com/en/managing-your-account/how-to-download-your-x-archive).
 
+### RSS/Atom and closed JSONL
+
+`feed-sync` polls one explicit public HTTPS RSS 2.0 or Atom URL. It sends
+`If-None-Match` and `If-Modified-Since` only after the previous response cursor
+is Brain-acknowledged. Redirects, credentials in URLs, non-HTTPS/local
+destinations, DTD/entities, unsupported content types, oversized XML, and more
+than 500 entries fail closed. A 304 produces no records; a 200 response keeps
+stable entry identity across edits. Feed absence never means deletion.
+
+`jsonl-import-sync` reads `.jsonl` files below one explicitly selected local
+root. Each non-empty line must be the closed object
+`{"id","text","title"?,"occurred_at"?}`; unknown fields, aliases, links,
+duplicate identities, invalid timestamps, and file/tree/line/record bound
+violations fail closed. Stable identity is the selected-root-relative file plus
+record ID. Missing files never delete; explicit native IDs may be tombstoned.
+
+These sources implement the official [RSS 2.0
+specification](https://www.rssboard.org/rss-specification), [Atom
+RFC 4287](https://www.rfc-editor.org/info/rfc4287), and HTTP conditional
+request semantics from [RFC 7232](https://www.rfc-editor.org/info/rfc7232).
+
 ### iMessage local snapshot
 
 `IMessageConnector` reads one explicitly selected Messages `chat.db` through a

@@ -230,6 +230,8 @@ class MacPackageTest(unittest.TestCase):
         self.assertIn("lib/connectors/local_activity.py", packaged_paths)
         self.assertIn("lib/connectors/portable_pim.py", packaged_paths)
         self.assertIn("lib/connectors/portable_archives.py", packaged_paths)
+        self.assertIn("lib/connectors/feeds.py", packaged_paths)
+        self.assertIn("lib/connectors/selected_jsonl.py", packaged_paths)
         self.assertIn("lib/connectors/whatsapp_export.py", packaged_paths)
         self.assertIn("lib/contracts/connector_page_v1.json", packaged_paths)
         self.assertIn("lib/client/capture.py", packaged_paths)
