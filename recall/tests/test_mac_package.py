@@ -188,6 +188,8 @@ class MacPackageTest(unittest.TestCase):
         self.assertIn("lib/connectors/host.py", packaged_paths)
         self.assertIn("lib/connectors/workspace_rail.py", packaged_paths)
         self.assertIn("lib/contracts/connector_v2.json", packaged_paths)
+        self.assertIn("lib/connectors/kit.py", packaged_paths)
+        self.assertIn("lib/contracts/connector_page_v1.json", packaged_paths)
         self.assertIn("lib/client/capture.py", packaged_paths)
         self.assertIn("lib/client/mcp.py", packaged_paths)
         self.assertIn("lib/client/macos_utility.py", packaged_paths)

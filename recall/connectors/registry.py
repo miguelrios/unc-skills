@@ -47,9 +47,16 @@ SOURCE_FAMILIES = {
     "work_activity", "local_activity", "personal_media",
 }
 PLACEMENTS = {"source_local", "always_on_api", "either"}
+PLACEMENTS_V3 = {"source_local", "remote_worker", "either"}
+ACQUISITION_MODES = {"poll", "watch", "snapshot", "import", "webhook"}
+AUTH_KINDS = {"none", "oauth2", "api_token", "os_permission", "selected_export"}
 BACKFILL_MODES = {"full", "incremental", "export"}
 EDIT_SEMANTICS = {"content_revision", "immutable"}
 RETENTION_MODES = {"source_controlled", "bounded", "forever"}
+DELETION_SEMANTICS = {"explicit_upstream", "explicit_owner", "none"}
+SELECTION_FIELD = re.compile(r"[a-z][a-z0-9_]{1,63}\Z")
+SCOPE = re.compile(r"[A-Za-z][A-Za-z0-9+._:/-]{1,255}\Z")
+MAX_SELECTION_FIELDS = 32
 GOOGLE_READ_SCOPES = {
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/calendar.readonly",
@@ -67,6 +74,28 @@ def _closed_tuple(value: Any, label: str, allowed: set[str]) -> tuple[str, ...]:
         raise ConnectorRegistryError(f"invalid_{label}")
     result = tuple(value)
     if any(not isinstance(item, str) or item not in allowed for item in result):
+        raise ConnectorRegistryError(f"invalid_{label}")
+    if len(result) != len(set(result)):
+        raise ConnectorRegistryError(f"duplicate_{label}")
+    if result != tuple(sorted(result)):
+        raise ConnectorRegistryError(f"noncanonical_{label}")
+    return result
+
+
+def _closed_strings(
+    value: Any,
+    label: str,
+    *,
+    pattern: re.Pattern[str],
+    allow_empty: bool = False,
+    maximum: int = 64,
+) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)) or (not value and not allow_empty):
+        raise ConnectorRegistryError(f"invalid_{label}")
+    result = tuple(value)
+    if len(result) > maximum or any(
+        not isinstance(item, str) or not pattern.fullmatch(item) for item in result
+    ):
         raise ConnectorRegistryError(f"invalid_{label}")
     if len(result) != len(set(result)):
         raise ConnectorRegistryError(f"duplicate_{label}")
@@ -201,6 +230,294 @@ class ConnectorDefinitionV2(ConnectorDefinition):
             "retention_modes": list(self.retention_modes),
             "attachment_capability": self.attachment_capability,
             "default_privacy_mode": self.default_privacy_mode,
+        }
+
+
+@dataclass(frozen=True)
+class ConnectorPlacement:
+    execution: str
+    acquisition: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if self.execution not in PLACEMENTS_V3:
+            raise ConnectorRegistryError("invalid_execution_placement")
+        object.__setattr__(
+            self,
+            "acquisition",
+            _closed_tuple(self.acquisition, "acquisition", ACQUISITION_MODES),
+        )
+        if (
+            self.execution == "source_local" and "webhook" in self.acquisition
+        ) or (
+            self.execution == "remote_worker"
+            and set(self.acquisition) & {"snapshot", "watch"}
+        ):
+            raise ConnectorRegistryError("invalid_placement_acquisition")
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "ConnectorPlacement":
+        if not isinstance(value, Mapping) or set(value) != {"execution", "acquisition"}:
+            raise ConnectorRegistryError("invalid_placement_shape")
+        return cls(**dict(value))
+
+    def to_public(self) -> dict[str, Any]:
+        return {"execution": self.execution, "acquisition": list(self.acquisition)}
+
+
+@dataclass(frozen=True)
+class ConnectorAuth:
+    kind: str
+    minimum_scopes: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if self.kind not in AUTH_KINDS:
+            raise ConnectorRegistryError("invalid_auth_kind")
+        scopes = _closed_strings(
+            self.minimum_scopes,
+            "minimum_scopes",
+            pattern=SCOPE,
+            allow_empty=True,
+        )
+        object.__setattr__(self, "minimum_scopes", scopes)
+        if self.kind in {"oauth2", "api_token", "os_permission"} and not scopes:
+            raise ConnectorRegistryError("minimum_scopes_required")
+        if self.kind in {"none", "selected_export"} and scopes:
+            raise ConnectorRegistryError("minimum_scopes_not_allowed")
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "ConnectorAuth":
+        if not isinstance(value, Mapping) or set(value) != {"kind", "minimum_scopes"}:
+            raise ConnectorRegistryError("invalid_auth_shape")
+        return cls(**dict(value))
+
+    def to_public(self) -> dict[str, Any]:
+        return {"kind": self.kind, "minimum_scopes": list(self.minimum_scopes)}
+
+
+@dataclass(frozen=True)
+class ConnectorSync:
+    backfill_modes: tuple[str, ...]
+    checkpoint: str
+    edit_semantics: str
+    deletion_semantics: str
+    reconciliation: bool
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "backfill_modes",
+            _closed_tuple(self.backfill_modes, "backfill_modes", BACKFILL_MODES),
+        )
+        if self.checkpoint != "ack_cursor":
+            raise ConnectorRegistryError("invalid_checkpoint")
+        if self.edit_semantics not in EDIT_SEMANTICS:
+            raise ConnectorRegistryError("invalid_edit_semantics")
+        if self.deletion_semantics not in DELETION_SEMANTICS:
+            raise ConnectorRegistryError("invalid_deletion_semantics")
+        if not isinstance(self.reconciliation, bool):
+            raise ConnectorRegistryError("invalid_reconciliation")
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "ConnectorSync":
+        fields = {
+            "backfill_modes",
+            "checkpoint",
+            "edit_semantics",
+            "deletion_semantics",
+            "reconciliation",
+        }
+        if not isinstance(value, Mapping) or set(value) != fields:
+            raise ConnectorRegistryError("invalid_sync_shape")
+        return cls(**dict(value))
+
+    def to_public(self) -> dict[str, Any]:
+        return {
+            "backfill_modes": list(self.backfill_modes),
+            "checkpoint": self.checkpoint,
+            "edit_semantics": self.edit_semantics,
+            "deletion_semantics": self.deletion_semantics,
+            "reconciliation": self.reconciliation,
+        }
+
+
+@dataclass(frozen=True)
+class ConnectorPolicy:
+    visibility_modes: tuple[str, ...]
+    privacy_modes: tuple[str, ...]
+    default_privacy_mode: str
+    retention_modes: tuple[str, ...]
+    attachment_capability: bool
+
+    def __post_init__(self) -> None:
+        for value, label, allowed in (
+            (self.visibility_modes, "visibility_modes", VISIBILITIES),
+            (self.privacy_modes, "privacy_modes", PRIVACY_MODES),
+            (self.retention_modes, "retention_modes", RETENTION_MODES),
+        ):
+            object.__setattr__(self, label, _closed_tuple(value, label, allowed))
+        if self.visibility_modes != ("private",):
+            raise ConnectorRegistryError("invalid_visibility_modes")
+        if self.default_privacy_mode not in self.privacy_modes:
+            raise ConnectorRegistryError("invalid_default_privacy_mode")
+        if not isinstance(self.attachment_capability, bool):
+            raise ConnectorRegistryError("invalid_attachment_capability")
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "ConnectorPolicy":
+        fields = {
+            "visibility_modes",
+            "privacy_modes",
+            "default_privacy_mode",
+            "retention_modes",
+            "attachment_capability",
+        }
+        if not isinstance(value, Mapping) or set(value) != fields:
+            raise ConnectorRegistryError("invalid_policy_shape")
+        return cls(**dict(value))
+
+    def to_public(self) -> dict[str, Any]:
+        return {
+            "visibility_modes": list(self.visibility_modes),
+            "privacy_modes": list(self.privacy_modes),
+            "default_privacy_mode": self.default_privacy_mode,
+            "retention_modes": list(self.retention_modes),
+            "attachment_capability": self.attachment_capability,
+        }
+
+
+@dataclass(frozen=True)
+class ConnectorDefinitionV3:
+    """Composable manifest around the proven pull/page runner boundary."""
+
+    schema_version: int
+    connector_id: str
+    command: str
+    mode: str
+    authority_slots: tuple[str, ...]
+    source_family: str
+    record_kinds: tuple[str, ...]
+    placement: ConnectorPlacement
+    auth: ConnectorAuth
+    sync: ConnectorSync
+    policy: ConnectorPolicy
+    selection_fields: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 3 or isinstance(self.schema_version, bool):
+            raise ConnectorRegistryError("invalid_schema_version")
+        if not isinstance(self.connector_id, str) or not IDENTITY.fullmatch(self.connector_id):
+            raise ConnectorRegistryError("invalid_connector_id")
+        if not isinstance(self.command, str) or not COMMAND.fullmatch(self.command):
+            raise ConnectorRegistryError("invalid_command")
+        if self.mode != "pull":
+            raise ConnectorRegistryError("invalid_mode")
+        authorities = _closed_tuple(self.authority_slots, "authority_slots", AUTHORITIES)
+        if authorities != ("brain", "source"):
+            raise ConnectorRegistryError("authority_slots_mismatch")
+        object.__setattr__(self, "authority_slots", authorities)
+        if self.source_family not in SOURCE_FAMILIES:
+            raise ConnectorRegistryError("invalid_source_family")
+        object.__setattr__(
+            self,
+            "record_kinds",
+            _closed_tuple(self.record_kinds, "record_kinds", set(TYPED_RECORD_FIELDS)),
+        )
+        if not isinstance(self.placement, ConnectorPlacement):
+            raise ConnectorRegistryError("invalid_placement")
+        if not isinstance(self.auth, ConnectorAuth):
+            raise ConnectorRegistryError("invalid_auth")
+        if not isinstance(self.sync, ConnectorSync):
+            raise ConnectorRegistryError("invalid_sync")
+        if not isinstance(self.policy, ConnectorPolicy):
+            raise ConnectorRegistryError("invalid_policy")
+        selections = _closed_strings(
+            self.selection_fields,
+            "selection_fields",
+            pattern=SELECTION_FIELD,
+            allow_empty=True,
+            maximum=MAX_SELECTION_FIELDS,
+        )
+        object.__setattr__(self, "selection_fields", selections)
+        if self.auth.kind == "os_permission" and self.placement.execution != "source_local":
+            raise ConnectorRegistryError("os_permission_requires_source_local")
+        if self.auth.kind == "selected_export" and "import" not in self.placement.acquisition:
+            raise ConnectorRegistryError("selected_export_requires_import")
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "ConnectorDefinitionV3":
+        fields = {
+            "schema_version",
+            "connector_id",
+            "command",
+            "mode",
+            "authority_slots",
+            "source_family",
+            "record_kinds",
+            "placement",
+            "auth",
+            "sync",
+            "policy",
+            "selection_fields",
+        }
+        if not isinstance(value, Mapping) or set(value) != fields:
+            raise ConnectorRegistryError("invalid_definition_shape")
+        payload = dict(value)
+        payload["placement"] = ConnectorPlacement.from_mapping(payload["placement"])
+        payload["auth"] = ConnectorAuth.from_mapping(payload["auth"])
+        payload["sync"] = ConnectorSync.from_mapping(payload["sync"])
+        payload["policy"] = ConnectorPolicy.from_mapping(payload["policy"])
+        return cls(**payload)
+
+    @property
+    def execution_placement(self) -> str:
+        return self.placement.execution
+
+    @property
+    def acquisition_modes(self) -> tuple[str, ...]:
+        return self.placement.acquisition
+
+    @property
+    def minimum_external_scopes(self) -> tuple[str, ...]:
+        return self.auth.minimum_scopes
+
+    @property
+    def backfill_modes(self) -> tuple[str, ...]:
+        return self.sync.backfill_modes
+
+    @property
+    def checkpoint(self) -> str:
+        return self.sync.checkpoint
+
+    @property
+    def edit_semantics(self) -> str:
+        return self.sync.edit_semantics
+
+    @property
+    def visibility_modes(self) -> tuple[str, ...]:
+        return self.policy.visibility_modes
+
+    @property
+    def privacy_modes(self) -> tuple[str, ...]:
+        return self.policy.privacy_modes
+
+    @property
+    def default_privacy_mode(self) -> str:
+        return self.policy.default_privacy_mode
+
+    def to_public(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "connector_id": self.connector_id,
+            "command": self.command,
+            "mode": self.mode,
+            "authority_slots": list(self.authority_slots),
+            "source_family": self.source_family,
+            "record_kinds": list(self.record_kinds),
+            "placement": self.placement.to_public(),
+            "auth": self.auth.to_public(),
+            "sync": self.sync.to_public(),
+            "policy": self.policy.to_public(),
+            "selection_fields": list(self.selection_fields),
         }
 
 

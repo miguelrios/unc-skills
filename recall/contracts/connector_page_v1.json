@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://parcha.com/recall/contracts/connector_page_v1.json",
+  "title": "Recall connector page wire v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["api_version", "records", "next_cursor", "has_more"],
+  "properties": {
+    "api_version": {
+      "const": "recall.connector-page.v1"
+    },
+    "records": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "native_id",
+          "occurred_at",
+          "content",
+          "provenance",
+          "deleted"
+        ],
+        "properties": {
+          "schema_version": {
+            "enum": [1, 2]
+          },
+          "native_id": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 256
+          },
+          "native_parent_id": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 256
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "content": {
+            "type": "object"
+          },
+          "provenance": {
+            "type": "object",
+            "minProperties": 1
+          },
+          "deleted": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "next_cursor": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "has_more": {
+      "type": "boolean"
+    }
+  }
+}
