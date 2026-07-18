@@ -4,6 +4,10 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
+import platform
+import plistlib
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -95,6 +99,32 @@ class MacPackageTest(unittest.TestCase):
             check=check, text=True, capture_output=True,
         )
         return output if check else result
+
+    @staticmethod
+    def _use_host_runtime(package: Path) -> None:
+        """Replace the immutable Darwin fixture only for a Linux installer E2E."""
+
+        runtime = package / "runtime"
+        shutil.rmtree(runtime)
+        (runtime / "bin").mkdir(parents=True)
+        os.symlink(sys.executable, runtime / "bin" / "python3")
+        lock = json.loads((package / "RUNTIME_LOCK.json").read_text())
+        lock["version"] = sys.version.split()[0]
+        lock["capabilities"] = {
+            "implementation": platform.python_implementation(),
+            "language": {"zip_strict": True},
+            "machine": platform.machine(),
+            "stdlib_imports": ["ctypes", "ssl", "sqlite3"],
+            "system": platform.system(),
+            "sqlite": {"fts5": True},
+            "tls": {
+                "default_ca_certificates": "nonempty",
+                "default_verify_path": "existing",
+            },
+        }
+        (package / "RUNTIME_LOCK.json").write_text(
+            json.dumps(lock, sort_keys=True) + "\n"
+        )
 
     def test_production_runtime_lock_is_immutable_arm64_cpython_312(self) -> None:
         lock = json.loads((RECALL_ROOT / "client" / "macos" / "RUNTIME_LOCK.json").read_text())
@@ -192,6 +222,11 @@ class MacPackageTest(unittest.TestCase):
         self.assertIn("lib/connectors/conformance.py", packaged_paths)
         self.assertIn("lib/connectors/remote_api.py", packaged_paths)
         self.assertIn("lib/connectors/google_workspace.py", packaged_paths)
+        self.assertIn("lib/connectors/imessage.py", packaged_paths)
+        self.assertIn("lib/connectors/local_sqlite.py", packaged_paths)
+        self.assertIn("lib/connectors/local_file.py", packaged_paths)
+        self.assertIn("lib/connectors/local_files.py", packaged_paths)
+        self.assertIn("lib/connectors/whatsapp_export.py", packaged_paths)
         self.assertIn("lib/contracts/connector_page_v1.json", packaged_paths)
         self.assertIn("lib/client/capture.py", packaged_paths)
         self.assertIn("lib/client/mcp.py", packaged_paths)
@@ -213,8 +248,13 @@ class MacPackageTest(unittest.TestCase):
         self.assertIn('cp -R "$SOURCE/lib/contracts"', installer)
         self.assertIn('"client.cli", "export-inbox-sync"', installer)
         self.assertIn('"client.cli", "cowork-local-sync"', installer)
+        self.assertIn('arguments[3] = "imessage-sync"', installer)
+        self.assertIn('arguments[3] = "whatsapp-export-sync"', installer)
+        self.assertIn('arguments[3] = "selected-text-sync"', installer)
         self.assertIn('claude-code', installer)
         self.assertIn('cowork', installer)
+        self.assertIn('whatsapp|whatsapp-export) NORMALIZED=whatsapp', installer)
+        self.assertIn('selected-text|obsidian) NORMALIZED=selected-text', installer)
         self.assertIn('codex|chatgpt-codex-desktop) NORMALIZED=codex', installer)
         self.assertIn('mac-claude-surface-preview', cli)
         self.assertIn('--export-inbox', installer)
@@ -225,11 +265,16 @@ class MacPackageTest(unittest.TestCase):
         self.assertIn('if [ -n "$SOURCES" ]; then\n  case ",$SOURCES,"', installer)
         self.assertIn('"client.cli", "connector-supervisor-run"', installer)
         self.assertIn('"KeepAlive": True', installer)
-        self.assertEqual(installer.count('"Umask": 0o077'), 4)
+        self.assertEqual(installer.count('"Umask": 0o077'), 5)
         self.assertIn('while launchctl print "$TARGET"', installer)
         self.assertIn('launch agent stop did not converge', installer)
         self.assertIn('stop_launch_agent "$LABEL"', installer)
         uninstaller = (package / "uninstall.sh").read_text()
+        self.assertIn(
+            "claude codex cowork chatgpt-export imessage whatsapp selected-text "
+            "connector-supervisor",
+            uninstaller,
+        )
         self.assertIn('while launchctl print "$TARGET"', uninstaller)
         self.assertIn('launch agent stop did not converge', uninstaller)
         self.assertIn('--delete-state', uninstaller)
@@ -249,6 +294,101 @@ class MacPackageTest(unittest.TestCase):
         self.assertIn('"ProgramArguments": [', installer)
         self.assertIn('"-m", "client.cli", "collect"', installer)
         self.assertIn('"PYTHONPATH":', installer)
+
+    def test_packaged_local_connectors_install_status_disable_and_uninstall(self) -> None:
+        archive = self.build("lifecycle.tar.gz")
+        extracted = self.root / "lifecycle-package"
+        extracted.mkdir()
+        with tarfile.open(archive, "r:gz") as package_archive:
+            package_archive.extractall(extracted, filter="data")
+        package = extracted / "recall-brain-macos"
+        self._use_host_runtime(package)
+
+        prefix = self.root / "private-prefix-PATH-CANARY"
+        agents = self.root / "private-agents-PATH-CANARY"
+        imessage = self.root / "private-imessage-PATH-CANARY.db"
+        whatsapp = self.root / "private-whatsapp-PATH-CANARY.txt"
+        selected = self.root / "private-selected-PATH-CANARY"
+        imessage.write_bytes(b"synthetic")
+        whatsapp.write_text("17/07/2026, 12:00 - Synthetic: fixture\n")
+        selected.mkdir()
+        (selected / "fixture.md").write_text("synthetic")
+
+        installed = subprocess.run([
+            "sh", str(package / "install.sh"),
+            "--prefix", str(prefix), "--launch-agents", str(agents),
+            "--endpoint", "https://example.invalid", "--host-id", "synthetic-host",
+            "--keychain-service", "synthetic.reference", "--visibility", "private",
+            "--privacy-mode", "scrub",
+            "--sources", "imessage,whatsapp-export,obsidian",
+            "--imessage-database", str(imessage),
+            "--whatsapp-export", str(whatsapp),
+            "--whatsapp-conversation-id", "synthetic-conversation",
+            "--whatsapp-owner-name", "Synthetic Owner",
+            "--whatsapp-date-order", "dmy", "--whatsapp-timezone", "UTC",
+            "--selected-text-root", str(selected), "--no-load",
+        ], check=True, text=True, capture_output=True)
+        self.assertEqual(installed.stderr, "")
+        self.assertNotIn("PATH-CANARY", installed.stdout)
+
+        expected = {
+            "imessage": ("imessage-sync", "--database", str(imessage)),
+            "whatsapp": ("whatsapp-export-sync", "--export", str(whatsapp)),
+            "selected-text": ("selected-text-sync", "--root", str(selected)),
+        }
+        for name, (command, path_option, source_path) in expected.items():
+            path = agents / f"ai.parcha.recall.{name}.plist"
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            with path.open("rb") as source:
+                value = plistlib.load(source)
+            arguments = value["ProgramArguments"]
+            self.assertEqual(arguments[3], command)
+            self.assertEqual(arguments[arguments.index(path_option) + 1], source_path)
+            self.assertEqual(arguments[arguments.index("--privacy-mode") + 1], "scrub")
+            self.assertNotIn("--token", arguments)
+            self.assertEqual(value["Umask"], 0o077)
+            self.assertEqual(
+                value["EnvironmentVariables"]["RECALL_KEYCHAIN_REFERENCE"],
+                "Keychain service/account only",
+            )
+
+        wrapper = prefix / "bin" / "recall-brain"
+        status = subprocess.run([
+            str(wrapper), "mac-status", "--prefix", str(prefix),
+            "--launch-agents", str(agents), "--now", "200",
+        ], check=True, text=True, capture_output=True)
+        rendered = status.stdout + status.stderr
+        self.assertNotIn("PATH-CANARY", rendered)
+        status_value = json.loads(status.stdout)
+        self.assertEqual(status_value["enabled"], 3)
+        self.assertTrue(all(
+            status_value["sources"][name]["health"] == "starting"
+            for name in expected
+        ))
+
+        disabled = subprocess.run([
+            str(wrapper), "mac-disable", "--source", "whatsapp",
+            "--launch-agents", str(agents), "--no-load",
+        ], check=True, text=True, capture_output=True)
+        self.assertTrue(json.loads(disabled.stdout)["state_retained"])
+        self.assertFalse((agents / "ai.parcha.recall.whatsapp.plist").exists())
+        self.assertTrue((agents / "ai.parcha.recall.imessage.plist").exists())
+
+        retained = subprocess.run([
+            "sh", str(package / "uninstall.sh"), "--prefix", str(prefix),
+            "--launch-agents", str(agents), "--no-load",
+        ], check=True, text=True, capture_output=True)
+        self.assertTrue(json.loads(retained.stdout)["state_retained"])
+        self.assertTrue((prefix / "state").is_dir())
+        self.assertFalse((prefix / "lib").exists())
+        self.assertFalse(any(agents.glob("ai.parcha.recall.*.plist")))
+
+        deleted = subprocess.run([
+            "sh", str(package / "uninstall.sh"), "--prefix", str(prefix),
+            "--launch-agents", str(agents), "--delete-state", "--no-load",
+        ], check=True, text=True, capture_output=True)
+        self.assertFalse(json.loads(deleted.stdout)["state_retained"])
+        self.assertFalse(prefix.exists())
 
 
 if __name__ == "__main__":

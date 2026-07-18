@@ -11,6 +11,13 @@ SOURCES=""
 CLAUDE_ROOT="$HOME/.claude/projects"
 CODEX_ROOT="$HOME/.codex/sessions"
 COWORK_ROOT="$HOME/Library/Application Support/Claude/local-agent-mode-sessions"
+IMESSAGE_DATABASE=""
+WHATSAPP_EXPORT=""
+WHATSAPP_CONVERSATION_ID=""
+WHATSAPP_OWNER_NAME=""
+WHATSAPP_DATE_ORDER=""
+WHATSAPP_TIMEZONE=""
+SELECTED_TEXT_ROOT=""
 NO_LOAD=0
 PRIVACY_MODE="scrub"
 EXPORT_INBOX=""
@@ -31,6 +38,13 @@ while [ "$#" -gt 0 ]; do
     --claude-root) CLAUDE_ROOT=$2; shift 2 ;;
     --codex-root) CODEX_ROOT=$2; shift 2 ;;
     --cowork-root) COWORK_ROOT=$2; shift 2 ;;
+    --imessage-database) IMESSAGE_DATABASE=$2; shift 2 ;;
+    --whatsapp-export) WHATSAPP_EXPORT=$2; shift 2 ;;
+    --whatsapp-conversation-id) WHATSAPP_CONVERSATION_ID=$2; shift 2 ;;
+    --whatsapp-owner-name) WHATSAPP_OWNER_NAME=$2; shift 2 ;;
+    --whatsapp-date-order) WHATSAPP_DATE_ORDER=$2; shift 2 ;;
+    --whatsapp-timezone) WHATSAPP_TIMEZONE=$2; shift 2 ;;
+    --selected-text-root) SELECTED_TEXT_ROOT=$2; shift 2 ;;
     --privacy-mode) PRIVACY_MODE=$2; shift 2 ;;
     --export-inbox) EXPORT_INBOX=$2; shift 2 ;;
     --disable-export-inbox) DISABLE_EXPORT_INBOX=1; shift ;;
@@ -38,7 +52,7 @@ while [ "$#" -gt 0 ]; do
     --connector-supervisor-config) SUPERVISOR_CONFIG=$2; shift 2 ;;
     --disable-connector-supervisor) DISABLE_SUPERVISOR=1; shift ;;
     --no-load) NO_LOAD=1; shift ;;
-    *) echo "usage: install.sh [--endpoint URL --host-id ID --keychain-service SERVICE --visibility private|shared] [--sources claude-code,codex|chatgpt-codex-desktop,cowork] [--export-inbox PATH | --disable-export-inbox] [--disable-source claude-code|codex|chatgpt-codex-desktop|cowork|chatgpt-export] [--connector-supervisor-config FILE | --disable-connector-supervisor] [--privacy-mode off|scrub|drop] [--claude-root PATH] [--codex-root PATH] [--cowork-root PATH] [--prefix PATH] [--launch-agents PATH] [--no-load]" >&2; exit 2 ;;
+    *) echo "usage: install.sh [connection] [--sources claude-code,codex,cowork,imessage,whatsapp,selected-text] [explicit source paths and selectors] [disable/lifecycle options]" >&2; exit 2 ;;
   esac
 done
 
@@ -67,6 +81,9 @@ for SOURCE_NAME in $(echo "$SOURCES" | tr ',' ' '); do
     claude|claude-code) NORMALIZED=claude ;;
     codex|chatgpt-codex-desktop) NORMALIZED=codex ;;
     cowork) NORMALIZED=cowork ;;
+    imessage) NORMALIZED=imessage ;;
+    whatsapp|whatsapp-export) NORMALIZED=whatsapp ;;
+    selected-text|obsidian) NORMALIZED=selected-text ;;
     *) echo "unsupported source: $SOURCE_NAME" >&2; exit 2 ;;
   esac
   case ",$NORMALIZED_SOURCES," in *,$NORMALIZED,*) echo "invalid duplicate or empty source selection" >&2; exit 2 ;; esac
@@ -77,8 +94,26 @@ case ",$SOURCES," in *,cowork,*)
   [ "$PRIVACY_MODE" != "off" ] || { echo "Cowork requires scrub or drop privacy" >&2; exit 2; }
   [ -d "$COWORK_ROOT" ] && [ ! -L "$COWORK_ROOT" ] || { echo "Cowork root must be an explicit non-symlink directory" >&2; exit 2; }
 ;; esac
+case ",$SOURCES," in *,imessage,*)
+  [ "$PRIVACY_MODE" != "off" ] || { echo "iMessage requires scrub or drop privacy" >&2; exit 2; }
+  [ "$VISIBILITY" = "private" ] || { echo "iMessage visibility must be private" >&2; exit 2; }
+  [ -f "$IMESSAGE_DATABASE" ] && [ ! -L "$IMESSAGE_DATABASE" ] || { echo "iMessage database must be an explicit non-symlink file" >&2; exit 2; }
+;; esac
+case ",$SOURCES," in *,whatsapp,*)
+  [ "$PRIVACY_MODE" != "off" ] || { echo "WhatsApp requires scrub or drop privacy" >&2; exit 2; }
+  [ "$VISIBILITY" = "private" ] || { echo "WhatsApp visibility must be private" >&2; exit 2; }
+  [ -f "$WHATSAPP_EXPORT" ] && [ ! -L "$WHATSAPP_EXPORT" ] || { echo "WhatsApp export must be an explicit non-symlink file" >&2; exit 2; }
+  [ -n "$WHATSAPP_CONVERSATION_ID" ] || { echo "WhatsApp conversation id is required" >&2; exit 2; }
+  case "$WHATSAPP_DATE_ORDER" in dmy|mdy) ;; *) echo "WhatsApp date order must be dmy or mdy" >&2; exit 2 ;; esac
+  [ -n "$WHATSAPP_TIMEZONE" ] || { echo "WhatsApp timezone is required" >&2; exit 2; }
+;; esac
+case ",$SOURCES," in *,selected-text,*)
+  [ "$PRIVACY_MODE" != "off" ] || { echo "selected text requires scrub or drop privacy" >&2; exit 2; }
+  [ "$VISIBILITY" = "private" ] || { echo "selected text visibility must be private" >&2; exit 2; }
+  [ -d "$SELECTED_TEXT_ROOT" ] && [ ! -L "$SELECTED_TEXT_ROOT" ] || { echo "selected text root must be an explicit non-symlink directory" >&2; exit 2; }
+;; esac
 for SOURCE_NAME in $DISABLE_SOURCES; do
-  case "$SOURCE_NAME" in claude|claude-code|codex|chatgpt-codex-desktop|cowork|chatgpt-export) ;; *) echo "unsupported disable source: $SOURCE_NAME" >&2; exit 2 ;; esac
+  case "$SOURCE_NAME" in claude|claude-code|codex|chatgpt-codex-desktop|cowork|chatgpt-export|imessage|whatsapp|whatsapp-export|selected-text|obsidian) ;; *) echo "unsupported disable source: $SOURCE_NAME" >&2; exit 2 ;; esac
 done
 if [ -n "$EXPORT_INBOX" ]; then
   [ -d "$EXPORT_INBOX" ] && [ ! -L "$EXPORT_INBOX" ] || { echo "export inbox must be an explicit non-symlink directory" >&2; exit 2; }
@@ -273,6 +308,76 @@ PY
   fi
 }
 
+write_local_connector_plist() {
+  TYPE=$1
+  case "$TYPE" in
+    imessage) SOURCE_ID="imessage:mac:$HOST_ID"; LABEL="ai.parcha.recall.imessage"; SPOOL="$PREFIX/state/imessage.db" ;;
+    whatsapp) SOURCE_ID="whatsapp:mac:$HOST_ID"; LABEL="ai.parcha.recall.whatsapp"; SPOOL="$PREFIX/state/whatsapp.db" ;;
+    selected-text) SOURCE_ID="selected-text:mac:$HOST_ID"; LABEL="ai.parcha.recall.selected-text"; SPOOL="$PREFIX/state/selected-text.db" ;;
+    *) echo "unsupported local connector" >&2; exit 2 ;;
+  esac
+  PLIST="$LAUNCH_AGENTS/$LABEL.plist"
+  if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
+    stop_launch_agent "$LABEL"
+  fi
+  "$RUNTIME" - "$PLIST" "$LABEL" "$RUNTIME" "$PREFIX/lib" "$ENDPOINT" "$SOURCE_ID" "$SPOOL" "$KEYCHAIN_SERVICE" "$PRIVACY_MODE" "$TYPE" "$IMESSAGE_DATABASE" "$WHATSAPP_EXPORT" "$WHATSAPP_CONVERSATION_ID" "$WHATSAPP_OWNER_NAME" "$WHATSAPP_DATE_ORDER" "$WHATSAPP_TIMEZONE" "$SELECTED_TEXT_ROOT" <<'PY'
+import plistlib
+import sys
+
+(path, label, program, pythonpath, endpoint, source_id, spool, service,
+ privacy_mode, source_type, imessage_database, whatsapp_export,
+ whatsapp_conversation_id, whatsapp_owner_name, whatsapp_date_order,
+ whatsapp_timezone, selected_text_root) = sys.argv[1:]
+arguments = [
+    program, "-m", "client.cli", "--placeholder",
+]
+common = [
+    "--endpoint", endpoint, "--source-id", source_id,
+    "--principal-id", "owner", "--keychain-service", service,
+    "--keychain-account", source_id, "--privacy-mode", privacy_mode,
+    "--spool", spool,
+]
+if source_type == "imessage":
+    arguments[3] = "imessage-sync"
+    arguments.extend(common + ["--database", imessage_database])
+elif source_type == "whatsapp":
+    arguments[3] = "whatsapp-export-sync"
+    arguments.extend(common + [
+        "--export", whatsapp_export,
+        "--conversation-id", whatsapp_conversation_id,
+        "--date-order", whatsapp_date_order,
+        "--timezone", whatsapp_timezone,
+    ])
+    if whatsapp_owner_name:
+        arguments.extend(["--owner-name", whatsapp_owner_name])
+elif source_type == "selected-text":
+    arguments[3] = "selected-text-sync"
+    arguments.extend(common + ["--root", selected_text_root])
+else:
+    raise SystemExit("unsupported local connector")
+value = {
+    "Label": label,
+    "ProgramArguments": arguments,
+    "EnvironmentVariables": {
+        "PYTHONPATH": pythonpath,
+        "RECALL_KEYCHAIN_REFERENCE": "Keychain service/account only",
+    },
+    "RunAtLoad": True,
+    "StartInterval": 60,
+    "ProcessType": "Background",
+    "Umask": 0o077,
+    "StandardOutPath": spool + ".stdout.log",
+    "StandardErrorPath": spool + ".stderr.log",
+}
+with open(path, "wb") as output:
+    plistlib.dump(value, output, sort_keys=True)
+PY
+  chmod 600 "$PLIST"
+  if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
+    launchctl bootstrap "gui/$(id -u)" "$PLIST"
+  fi
+}
+
 write_supervisor_plist() {
   LABEL="ai.parcha.recall.connector-supervisor"
   PLIST="$LAUNCH_AGENTS/$LABEL.plist"
@@ -319,6 +424,9 @@ PY
 case ",$SOURCES," in *,claude,*) write_plist claude "$CLAUDE_ROOT" ;; esac
 case ",$SOURCES," in *,codex,*) write_plist codex "$CODEX_ROOT" ;; esac
 case ",$SOURCES," in *,cowork,*) write_cowork_plist ;; esac
+case ",$SOURCES," in *,imessage,*) write_local_connector_plist imessage ;; esac
+case ",$SOURCES," in *,whatsapp,*) write_local_connector_plist whatsapp ;; esac
+case ",$SOURCES," in *,selected-text,*) write_local_connector_plist selected-text ;; esac
 if [ -n "$EXPORT_INBOX" ]; then write_export_inbox_plist; fi
 if [ -n "$SUPERVISOR_CONFIG" ]; then write_supervisor_plist; fi
 if [ "$DISABLE_EXPORT_INBOX" -eq 1 ]; then
@@ -334,6 +442,9 @@ for SOURCE_NAME in $DISABLE_SOURCES; do
     codex|chatgpt-codex-desktop) LABEL="ai.parcha.recall.codex" ;;
     cowork) LABEL="ai.parcha.recall.cowork" ;;
     chatgpt-export) LABEL="ai.parcha.recall.chatgpt-export" ;;
+    imessage) LABEL="ai.parcha.recall.imessage" ;;
+    whatsapp|whatsapp-export) LABEL="ai.parcha.recall.whatsapp" ;;
+    selected-text|obsidian) LABEL="ai.parcha.recall.selected-text" ;;
   esac
   if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
     stop_launch_agent "$LABEL"
@@ -347,7 +458,7 @@ if [ "$DISABLE_SUPERVISOR" -eq 1 ]; then
   fi
   rm -f "$LAUNCH_AGENTS/$LABEL.plist"
 fi
-echo "installed Recall Brain Mac client in $PREFIX"
+echo "installed Recall Brain Mac client"
 echo "selected sources: $SOURCES; visibility: $VISIBILITY; privacy: $PRIVACY_MODE"
 if [ -n "$SOURCES" ] || [ -n "$EXPORT_INBOX" ]; then
   echo "Keychain accounts use each selected source id as the account"
