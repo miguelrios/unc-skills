@@ -49,7 +49,7 @@ class FrozenRegistryTest(unittest.TestCase):
 
     def test_builtin_registry_is_exact_immutable_and_no_discovery(self):
         self.assertEqual(tuple(item.connector_id for item in REGISTRY), (
-            "recall.capture", "openai.export-inbox", "grep.ai",
+            "recall.capture", "custom.webhook", "openai.export-inbox", "grep.ai",
             "google.gmail", "google.calendar", "google.contacts", "google.drive",
             "github.activity", "linear.activity", "slack.messages",
             "notion.workspace", "x.activity", "apple.imessage",
@@ -60,6 +60,10 @@ class FrozenRegistryTest(unittest.TestCase):
             "portable.feed", "portable.jsonl",
         ))
         self.assertEqual(definition("grep.ai").authority_slots, ("brain", "source"))
+        webhook = definition("custom.webhook")
+        self.assertEqual(webhook.mode, "push")
+        self.assertEqual(webhook.acquisition_modes, ("webhook",))
+        self.assertEqual(webhook.checkpoint, "none")
         with self.assertRaises(ConnectorRegistryError):
             definition("entrypoint.from.cwd")
         with self.assertRaisesRegex(ConnectorRegistryError, "duplicate_connector_id"):
@@ -164,7 +168,7 @@ class RegistryPreviewAndStatusTest(unittest.TestCase):
         self.assertEqual(value["source_reads"], 0)
         self.assertEqual(value["network_requests"], 0)
         self.assertEqual(value["writes"], 0)
-        self.assertEqual(len(value["connectors"]), 27)
+        self.assertEqual(len(value["connectors"]), 28)
 
     def test_status_health_is_bounded_read_only_and_content_free(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -8,7 +8,6 @@ collector/
 connectors/
 evals/
 legacy/
-privacy/
 scripts/
 spikes/
 *.env

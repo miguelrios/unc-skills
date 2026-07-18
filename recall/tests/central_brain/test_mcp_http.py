@@ -505,6 +505,7 @@ class RemoteMcpContractTest(unittest.TestCase):
                 ("GET", "/v1/receipts/resolve?receipt=synthetic"),
                 ("POST", "/v1/search"),
                 ("POST", "/v1/ingest/batches"),
+                ("POST", "/webhooks/v1/events"),
                 ("DELETE", "/mcp"),
             ):
                 with self.subTest(method=method, path=path):

@@ -79,6 +79,31 @@ def _valid_typed_value(value: Any, specification: dict[str, Any]) -> bool:
     )
 
 
+def validate_typed_connector_content(
+    content: Any,
+    *,
+    deleted: bool = False,
+) -> dict[str, Any]:
+    if not isinstance(content, dict):
+        raise ValueError("invalid typed connector record")
+    schema = TYPED_RECORD_FIELDS.get(content.get("kind"))
+    if schema is None:
+        raise ValueError("invalid typed connector record")
+    fields = set(content)
+    required = {"kind"} if deleted else schema["required"]
+    optional = set() if deleted else schema["optional"]
+    if (
+        required - fields
+        or fields - required - optional
+        or any(
+            not _valid_typed_value(content[field], schema["properties"][field])
+            for field in fields
+        )
+    ):
+        raise ValueError("invalid typed connector record")
+    return content
+
+
 def redact_text(value: str) -> str:
     safe = legacy_engine().clean_text(value)
     return safe.replace("[redacted-private-key-block]", "[REDACTED-PRIVATE-KEY]").replace(
@@ -185,19 +210,9 @@ def validate_envelope(envelope: dict) -> dict:
             raise ValueError("unsupported connector schema_version")
         if connector_schema_version == 2 and envelope["kind"] != "tombstone":
             content = envelope["content"]
-            schema = TYPED_RECORD_FIELDS.get(content.get("kind")) if isinstance(content, dict) else None
-            fields = set(content) if isinstance(content, dict) else set()
-            if envelope["kind"] != "connector_record" or schema is None:
+            if envelope["kind"] != "connector_record":
                 raise ValueError("invalid typed connector record")
-            if (
-                schema["required"] - fields
-                or fields - schema["required"] - schema["optional"]
-                or any(
-                    not _valid_typed_value(content[field], schema["properties"][field])
-                    for field in fields
-                )
-            ):
-                raise ValueError("invalid typed connector record")
+            validate_typed_connector_content(content)
     claimed = envelope["content_sha256"]
     if not isinstance(claimed, str) or not CONTENT_SHA256_RE.fullmatch(claimed):
         raise ValueError("invalid content_sha256")

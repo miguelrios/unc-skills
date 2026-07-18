@@ -310,7 +310,7 @@ class ConnectorSync:
             "backfill_modes",
             _closed_tuple(self.backfill_modes, "backfill_modes", BACKFILL_MODES),
         )
-        if self.checkpoint != "ack_cursor":
+        if self.checkpoint not in CHECKPOINTS:
             raise ConnectorRegistryError("invalid_checkpoint")
         if self.edit_semantics not in EDIT_SEMANTICS:
             raise ConnectorRegistryError("invalid_edit_semantics")
@@ -411,7 +411,7 @@ class ConnectorDefinitionV3:
             raise ConnectorRegistryError("invalid_connector_id")
         if not isinstance(self.command, str) or not COMMAND.fullmatch(self.command):
             raise ConnectorRegistryError("invalid_command")
-        if self.mode != "pull":
+        if self.mode not in MODES:
             raise ConnectorRegistryError("invalid_mode")
         authorities = _closed_tuple(self.authority_slots, "authority_slots", AUTHORITIES)
         if authorities != ("brain", "source"):
@@ -444,6 +444,18 @@ class ConnectorDefinitionV3:
             raise ConnectorRegistryError("os_permission_requires_source_local")
         if self.auth.kind == "selected_export" and "import" not in self.placement.acquisition:
             raise ConnectorRegistryError("selected_export_requires_import")
+        if self.mode == "push":
+            if (
+                self.placement.execution != "remote_worker"
+                or self.placement.acquisition != ("webhook",)
+                or self.auth.kind != "api_token"
+                or self.sync.checkpoint != "none"
+                or self.sync.backfill_modes != ("incremental",)
+                or self.sync.reconciliation
+            ):
+                raise ConnectorRegistryError("invalid_push_definition")
+        elif self.sync.checkpoint != "ack_cursor":
+            raise ConnectorRegistryError("invalid_pull_checkpoint")
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "ConnectorDefinitionV3":
@@ -947,6 +959,38 @@ REGISTRY = (
         "mode": "push", "authority_slots": ["brain"],
         "visibility_modes": ["private", "shared"], "privacy_modes": ["drop", "off", "scrub"],
         "checkpoint": "none", "deletion": "explicit_receipt",
+    }),
+    ConnectorDefinitionV3.from_mapping({
+        "schema_version": 3,
+        "connector_id": "custom.webhook",
+        "command": "webhook-serve",
+        "mode": "push",
+        "authority_slots": ["brain", "source"],
+        "source_family": "deliberate_capture",
+        "record_kinds": sorted(TYPED_RECORD_FIELDS),
+        "placement": {
+            "execution": "remote_worker",
+            "acquisition": ["webhook"],
+        },
+        "auth": {
+            "kind": "api_token",
+            "minimum_scopes": ["webhook"],
+        },
+        "sync": {
+            "backfill_modes": ["incremental"],
+            "checkpoint": "none",
+            "edit_semantics": "content_revision",
+            "deletion_semantics": "explicit_upstream",
+            "reconciliation": False,
+        },
+        "policy": {
+            "visibility_modes": ["private"],
+            "privacy_modes": ["drop", "scrub"],
+            "default_privacy_mode": "scrub",
+            "retention_modes": ["source_controlled"],
+            "attachment_capability": False,
+        },
+        "selection_fields": [],
     }),
     ConnectorDefinition.from_mapping({
         "schema_version": 1, "connector_id": "openai.export-inbox", "command": "export-inbox-sync",

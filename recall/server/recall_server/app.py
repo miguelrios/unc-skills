@@ -21,6 +21,7 @@ from .mcp import (
     error_response as mcp_error_response,
 )
 from .semantic import SemanticRuntime
+from .webhooks import WEBHOOK_PATH, WebhookError, build_webhook_event
 
 LOG = logging.getLogger("recall.brainstore")
 MAX_BODY_BYTES = 12 * 1024 * 1024
@@ -148,9 +149,10 @@ class Handler(BaseHTTPRequestHandler):
                 "source_id": credential["source_id"],
                 "principal_id": credential.get("principal_id"),
                 "capture_origin": credential.get("capture_origin"),
+                "webhook_privacy_mode": credential.get("webhook_privacy_mode"),
                 "scopes": list(credential.get("scopes", [])),
             }
-            if credential.get("principal_id"):
+            if credential.get("principal_id") and scope == "read":
                 principal["authorized_sources"] = self.store.authorized_source_ids(
                     credential["principal_id"]
                 )
@@ -259,14 +261,20 @@ class Handler(BaseHTTPRequestHandler):
     def public_mcp_profile() -> bool:
         return os.environ.get("RECALL_HTTP_PROFILE") == "public-mcp"
 
+    @staticmethod
+    def public_edge_profile() -> bool:
+        return os.environ.get("RECALL_HTTP_PROFILE") == "public-edge"
+
     def hide_non_public_route(self, method: str, path: str) -> bool:
-        if not self.public_mcp_profile():
+        if not (self.public_mcp_profile() or self.public_edge_profile()):
             return False
         allowed = (
             method == "POST" and path == "/mcp"
         ) or (
             method == "GET" and path in {"/mcp", "/healthz", "/readyz"}
         )
+        if self.public_edge_profile():
+            allowed = allowed or (method == "POST" and path == WEBHOOK_PATH)
         if allowed:
             return False
         self.send_json(404, {"error": "not found"})
@@ -329,6 +337,57 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urlsplit(self.path).path
         if self.hide_non_public_route("POST", path):
+            return
+        if path == WEBHOOK_PATH:
+            principal = self.require("webhook")
+            if not principal:
+                return
+            content_type = (
+                self.headers.get("Content-Type", "").split(";", 1)[0].strip().casefold()
+            )
+            if content_type != "application/json":
+                self.send_json(415, {"error": "unsupported content type"})
+                return
+            length = self.body_length(256 * 1024)
+            if length is None:
+                return
+            try:
+                body = json.loads(self.rfile.read(length))
+                prepared = build_webhook_event(body, principal)
+                if prepared.event is None:
+                    self.send_json(
+                        202,
+                        {
+                            "status": "privacy_filtered",
+                            "receipt": None,
+                            "replay": False,
+                            "privacy": prepared.privacy,
+                        },
+                    )
+                    return
+                acknowledgement, replay = self.store.ingest(
+                    prepared.idempotency_key,
+                    [prepared.event],
+                )
+                receipts = acknowledgement.get("receipts")
+                if not isinstance(receipts, list) or len(receipts) != 1:
+                    raise RuntimeError("webhook acknowledgement invalid")
+                self.send_json(
+                    200 if replay else 201,
+                    {
+                        "status": acknowledgement.get("status", "committed"),
+                        "receipt": receipts[0],
+                        "replay": replay,
+                        "privacy": prepared.privacy,
+                    },
+                )
+            except (json.JSONDecodeError, WebhookError):
+                self.send_json(400, {"error": "invalid webhook"})
+            except IdempotencyConflict:
+                self.send_json(409, {"error": "webhook conflict"})
+            except Exception as exc:
+                LOG.error("webhook failed type=%s", type(exc).__name__)
+                self.send_json(500, {"error": "webhook failed"})
             return
         if path == "/mcp":
             if not self.valid_mcp_origin():
@@ -520,13 +579,13 @@ class Handler(BaseHTTPRequestHandler):
 
 def validate_http_profile() -> None:
     profile = os.environ.get("RECALL_HTTP_PROFILE", "")
-    if profile not in {"", "public-mcp"}:
+    if profile not in {"", "public-edge", "public-mcp"}:
         raise RuntimeError("unsupported HTTP profile")
-    if profile == "public-mcp":
+    if profile in {"public-edge", "public-mcp"}:
         if os.environ.get("RECALL_AUTH_REQUIRED", "0") != "1":
-            raise RuntimeError("public MCP profile requires authentication")
+            raise RuntimeError("public HTTP profile requires authentication")
         if os.environ.get("RECALL_TRUST_TAILSCALE_HEADERS", "0") == "1":
-            raise RuntimeError("public MCP profile forbids trusted identity headers")
+            raise RuntimeError("public HTTP profile forbids trusted identity headers")
 
 
 def serve(dsn: str, host: str = "127.0.0.1", port: int = 8788) -> None:

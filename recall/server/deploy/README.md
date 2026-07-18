@@ -22,6 +22,29 @@ addresses as `/32` entries, prove the hosted service can reach PlanetScale, then
 egress entries. Dedicated outbound IPs do not restrict inbound MCP traffic; bearer capabilities
 and the MCP-only application surface remain mandatory.
 
+`RECALL_HTTP_PROFILE=public-edge` is the opt-in superset for custom incoming evidence. It adds only
+`POST /webhooks/v1/events` to the public-MCP route set. The endpoint requires a separate
+webhook-capability bearer bound to one source, principal, and `scrub` or `drop` policy; it never
+exposes the generic batch-ingest, credential, migration, metrics, doctor, debug, or administrative
+surfaces. Use `public-mcp` when no incoming webhook is required.
+
+Create one webhook-only credential through an administrative process and write the one-time value
+directly to a new private file:
+
+```bash
+recall-server token-create source-webhook \
+  --source webhook:service:instance \
+  --principal owner \
+  --scopes webhook \
+  --webhook-privacy-mode scrub \
+  --output /approved/private/webhook-credential.json
+```
+
+The sending service loads that value through its secret manager. It sends only the closed
+`WebhookEventV1` body from `openapi.yaml`; source, principal, visibility, provenance, and privacy
+mode are not request fields. Rotate by creating a replacement credential, updating the sender's
+secret reference, proving one synthetic event, and revoking the prior credential.
+
 ## Managed Core preview
 
 `recall-core` is the existing API, projection, and retrieval runtime packaged as one
@@ -38,7 +61,7 @@ infrastructure. The example is synthetic; a live manifest belongs in a private m
 location and contains references, never credential values.
 
 The production database gate requires a standard PostgreSQL URL with
-`sslmode=verify-full` and an explicit trust root, schema migrations 1 through 17,
+`sslmode=verify-full` and an explicit trust root, schema migrations 1 through 18,
 pgvector 0.8.0 or newer, and a runtime role without superuser, database/role creation,
 replication, or RLS-bypass privilege:
 

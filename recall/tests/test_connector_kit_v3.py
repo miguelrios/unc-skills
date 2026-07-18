@@ -167,6 +167,42 @@ class ConnectorDefinitionV3Test(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ConnectorRegistryError):
                 ConnectorDefinitionV3.from_mapping(value)
 
+    def test_push_webhook_is_the_only_valid_v3_push_shape(self):
+        manifest = manifest_mapping()
+        manifest.update({
+            "mode": "push",
+            "source_family": "deliberate_capture",
+            "record_kinds": ["communication_message.v1"],
+            "placement": {
+                "execution": "remote_worker",
+                "acquisition": ["webhook"],
+            },
+            "auth": {
+                "kind": "api_token",
+                "minimum_scopes": ["webhook"],
+            },
+            "sync": {
+                "backfill_modes": ["incremental"],
+                "checkpoint": "none",
+                "edit_semantics": "content_revision",
+                "deletion_semantics": "explicit_upstream",
+                "reconciliation": False,
+            },
+        })
+        item = ConnectorDefinitionV3.from_mapping(manifest)
+        self.assertEqual(item.mode, "push")
+        self.assertEqual(item.acquisition_modes, ("webhook",))
+        for mutation in (
+            {"placement": {"execution": "remote_worker", "acquisition": ["poll"]}},
+            {"auth": {"kind": "oauth2", "minimum_scopes": ["webhook"]}},
+            {"sync": {**manifest["sync"], "checkpoint": "ack_cursor"}},
+        ):
+            invalid = {**manifest, **mutation}
+            with self.subTest(mutation=mutation), self.assertRaises(
+                ConnectorRegistryError
+            ):
+                ConnectorDefinitionV3.from_mapping(invalid)
+
     def test_lists_are_sorted_unique_and_bounded(self):
         for field, value in (
             ("selection_fields", ["labels", "account"]),
