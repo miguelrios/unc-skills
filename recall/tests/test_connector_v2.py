@@ -104,7 +104,7 @@ class ConnectorRecordV2Test(unittest.TestCase):
 
 
 class ConnectorManifestV2Test(unittest.TestCase):
-    def test_google_definitions_are_static_v2_and_content_free(self):
+    def test_google_definitions_are_static_v3_and_content_free(self):
         expected = {
             "google.gmail": ("communications", ("communication_message.v1",)),
             "google.calendar": ("schedule", ("calendar_event.v1",)),
@@ -113,10 +113,10 @@ class ConnectorManifestV2Test(unittest.TestCase):
         }
         for connector_id, (family, kinds) in expected.items():
             item = definition(connector_id)
-            self.assertEqual(item.schema_version, 2)
+            self.assertEqual(item.schema_version, 3)
             self.assertEqual(item.source_family, family)
             self.assertEqual(item.record_kinds, kinds)
-            self.assertEqual(item.execution_placement, "always_on_api")
+            self.assertEqual(item.execution_placement, "remote_worker")
             self.assertEqual(item.authority_slots, ("brain", "source"))
             self.assertEqual(item.default_privacy_mode, "scrub")
         value = preview()

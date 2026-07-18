@@ -504,6 +504,10 @@ class ConnectorDefinitionV3:
     def default_privacy_mode(self) -> str:
         return self.policy.default_privacy_mode
 
+    @property
+    def deletion(self) -> str:
+        return "explicit_receipt"
+
     def to_public(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
@@ -519,6 +523,157 @@ class ConnectorDefinitionV3:
             "policy": self.policy.to_public(),
             "selection_fields": list(self.selection_fields),
         }
+
+
+def _remote_v3(
+    *,
+    connector_id: str,
+    command: str,
+    source_family: str,
+    record_kinds: list[str],
+    acquisition: list[str],
+    auth_kind: str,
+    scopes: list[str],
+    selection_fields: list[str],
+) -> ConnectorDefinitionV3:
+    return ConnectorDefinitionV3.from_mapping({
+        "schema_version": 3,
+        "connector_id": connector_id,
+        "command": command,
+        "mode": "pull",
+        "authority_slots": ["brain", "source"],
+        "source_family": source_family,
+        "record_kinds": record_kinds,
+        "placement": {
+            "execution": "remote_worker",
+            "acquisition": acquisition,
+        },
+        "auth": {
+            "kind": auth_kind,
+            "minimum_scopes": scopes,
+        },
+        "sync": {
+            "backfill_modes": ["full", "incremental"],
+            "checkpoint": "ack_cursor",
+            "edit_semantics": "content_revision",
+            "deletion_semantics": "explicit_upstream",
+            "reconciliation": True,
+        },
+        "policy": {
+            "visibility_modes": ["private"],
+            "privacy_modes": ["drop", "scrub"],
+            "default_privacy_mode": "scrub",
+            "retention_modes": ["source_controlled"],
+            "attachment_capability": False,
+        },
+        "selection_fields": selection_fields,
+    })
+
+
+REMOTE_API_REGISTRY = (
+    _remote_v3(
+        connector_id="google.gmail",
+        command="workspace-sync",
+        source_family="communications",
+        record_kinds=["communication_message.v1"],
+        acquisition=["poll"],
+        auth_kind="oauth2",
+        scopes=["https://www.googleapis.com/auth/gmail.readonly"],
+        selection_fields=["account", "include_spam_trash", "label_ids", "query"],
+    ),
+    _remote_v3(
+        connector_id="google.calendar",
+        command="workspace-sync",
+        source_family="schedule",
+        record_kinds=["calendar_event.v1"],
+        acquisition=["poll"],
+        auth_kind="oauth2",
+        scopes=["https://www.googleapis.com/auth/calendar.readonly"],
+        selection_fields=["account", "calendar_ids", "time_max", "time_min"],
+    ),
+    _remote_v3(
+        connector_id="google.contacts",
+        command="workspace-sync",
+        source_family="contacts",
+        record_kinds=["contact_identity.v1"],
+        acquisition=["poll"],
+        auth_kind="oauth2",
+        scopes=["https://www.googleapis.com/auth/contacts.readonly"],
+        selection_fields=["account"],
+    ),
+    _remote_v3(
+        connector_id="google.drive",
+        command="workspace-sync",
+        source_family="documents",
+        record_kinds=["document.v1"],
+        acquisition=["poll"],
+        auth_kind="oauth2",
+        scopes=["https://www.googleapis.com/auth/drive.readonly"],
+        selection_fields=["account", "drive_ids", "mime_types"],
+    ),
+    _remote_v3(
+        connector_id="github.activity",
+        command="remote-api-sync",
+        source_family="work_activity",
+        record_kinds=["document.v1"],
+        acquisition=["poll"],
+        auth_kind="api_token",
+        scopes=["contents:read", "issues:read", "metadata:read", "pull_requests:read"],
+        selection_fields=["account", "organizations", "repositories"],
+    ),
+    _remote_v3(
+        connector_id="linear.activity",
+        command="remote-api-sync",
+        source_family="work_activity",
+        record_kinds=["document.v1"],
+        acquisition=["poll", "webhook"],
+        auth_kind="oauth2",
+        scopes=["read"],
+        selection_fields=["account", "teams"],
+    ),
+    _remote_v3(
+        connector_id="slack.messages",
+        command="remote-api-sync",
+        source_family="communications",
+        record_kinds=["communication_message.v1"],
+        acquisition=["poll"],
+        auth_kind="oauth2",
+        scopes=[
+            "channels:history",
+            "channels:read",
+            "groups:history",
+            "groups:read",
+            "users:read",
+        ],
+        selection_fields=["account", "channels"],
+    ),
+    _remote_v3(
+        connector_id="notion.workspace",
+        command="remote-api-sync",
+        source_family="documents",
+        record_kinds=["document.v1"],
+        acquisition=["poll"],
+        auth_kind="oauth2",
+        scopes=["read_content"],
+        selection_fields=["account", "data_sources", "pages"],
+    ),
+    _remote_v3(
+        connector_id="x.activity",
+        command="remote-api-sync",
+        source_family="social",
+        record_kinds=["social_post.v1"],
+        acquisition=["poll"],
+        auth_kind="oauth2",
+        scopes=["bookmark.read", "offline.access", "tweet.read", "users.read"],
+        selection_fields=[
+            "account",
+            "include_bookmarks",
+            "include_home_timeline",
+            "include_mentions",
+            "include_own_posts",
+        ],
+    ),
+)
 
 
 REGISTRY = (
@@ -540,56 +695,9 @@ REGISTRY = (
         "visibility_modes": ["private"], "privacy_modes": ["drop", "scrub"],
         "checkpoint": "ack_cursor", "deletion": "explicit_receipt",
     }),
-    ConnectorDefinitionV2.from_mapping({
-        "schema_version": 2, "connector_id": "google.gmail", "command": "workspace-sync",
-        "mode": "pull", "authority_slots": ["brain", "source"],
-        "visibility_modes": ["private"], "privacy_modes": ["drop", "scrub"],
-        "checkpoint": "ack_cursor", "deletion": "explicit_receipt",
-        "source_family": "communications", "record_kinds": ["communication_message.v1"],
-        "execution_placement": "always_on_api",
-        "minimum_external_scopes": ["https://www.googleapis.com/auth/gmail.readonly"],
-        "backfill_modes": ["full", "incremental"], "edit_semantics": "content_revision",
-        "retention_modes": ["source_controlled"], "attachment_capability": True,
-        "default_privacy_mode": "scrub",
-    }),
-    ConnectorDefinitionV2.from_mapping({
-        "schema_version": 2, "connector_id": "google.calendar", "command": "workspace-sync",
-        "mode": "pull", "authority_slots": ["brain", "source"],
-        "visibility_modes": ["private"], "privacy_modes": ["drop", "scrub"],
-        "checkpoint": "ack_cursor", "deletion": "explicit_receipt",
-        "source_family": "schedule", "record_kinds": ["calendar_event.v1"],
-        "execution_placement": "always_on_api",
-        "minimum_external_scopes": ["https://www.googleapis.com/auth/calendar.readonly"],
-        "backfill_modes": ["full", "incremental"], "edit_semantics": "content_revision",
-        "retention_modes": ["source_controlled"], "attachment_capability": False,
-        "default_privacy_mode": "scrub",
-    }),
-    ConnectorDefinitionV2.from_mapping({
-        "schema_version": 2, "connector_id": "google.contacts", "command": "workspace-sync",
-        "mode": "pull", "authority_slots": ["brain", "source"],
-        "visibility_modes": ["private"], "privacy_modes": ["drop", "scrub"],
-        "checkpoint": "ack_cursor", "deletion": "explicit_receipt",
-        "source_family": "contacts", "record_kinds": ["contact_identity.v1"],
-        "execution_placement": "always_on_api",
-        "minimum_external_scopes": ["https://www.googleapis.com/auth/contacts.readonly"],
-        "backfill_modes": ["full", "incremental"], "edit_semantics": "content_revision",
-        "retention_modes": ["source_controlled"], "attachment_capability": False,
-        "default_privacy_mode": "scrub",
-    }),
-    ConnectorDefinitionV2.from_mapping({
-        "schema_version": 2, "connector_id": "google.drive", "command": "workspace-sync",
-        "mode": "pull", "authority_slots": ["brain", "source"],
-        "visibility_modes": ["private"], "privacy_modes": ["drop", "scrub"],
-        "checkpoint": "ack_cursor", "deletion": "explicit_receipt",
-        "source_family": "documents", "record_kinds": ["document.v1"],
-        "execution_placement": "always_on_api",
-        "minimum_external_scopes": ["https://www.googleapis.com/auth/drive.readonly"],
-        "backfill_modes": ["full", "incremental"], "edit_semantics": "content_revision",
-        "retention_modes": ["source_controlled"], "attachment_capability": True,
-        "default_privacy_mode": "scrub",
-    }),
+    *REMOTE_API_REGISTRY,
 )
-def _index(items: tuple[ConnectorDefinition, ...]) -> dict[str, ConnectorDefinition]:
+def _index(items: tuple[Any, ...]) -> dict[str, Any]:
     result = {item.connector_id: item for item in items}
     if len(result) != len(items):
         raise ConnectorRegistryError("duplicate_connector_id")
@@ -599,7 +707,7 @@ def _index(items: tuple[ConnectorDefinition, ...]) -> dict[str, ConnectorDefinit
 _BY_ID = _index(REGISTRY)
 
 
-def definition(connector_id: str) -> ConnectorDefinition:
+def definition(connector_id: str) -> Any:
     try:
         return _BY_ID[connector_id]
     except (KeyError, TypeError):
@@ -607,7 +715,7 @@ def definition(connector_id: str) -> ConnectorDefinition:
 
 
 def validate_policy(connector_id: str, *, visibility: str, privacy_mode: str,
-                    authorities: set[str]) -> ConnectorDefinition:
+                    authorities: set[str]) -> Any:
     item = definition(connector_id)
     if visibility not in item.visibility_modes:
         raise ConnectorRegistryError("visibility_not_allowed")

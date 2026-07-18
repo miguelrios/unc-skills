@@ -54,6 +54,19 @@ never includes source IDs, cursors, paths, exception text, records, or provider
 payloads. A publisher should make this matrix part of its own test suite before
 asking for a connector to be bundled.
 
+### Remote API rail
+
+`BoundedJsonRail` is the shared transport for bundled remote connectors. Each
+connector supplies an immutable in-code map of `RemoteOperation` values and one
+exact HTTPS origin. Runtime configuration can select a bundled connector and
+its bounded selectors, but it cannot provide an origin, method, path, operation
+map, executable, or recipe.
+
+Authority bytes are loaded only when an operation runs, from a private regular
+file under a private directory. Redirects, unknown operations or parameters,
+non-JSON responses, oversized bodies, revoked authority, and rate limits fail
+with stable content-free conditions. The rail never discovers connector code.
+
 Connectors are explicit Python objects. Recall does not discover or execute
 plugins, recipes, entry points, or code from the current directory.
 
