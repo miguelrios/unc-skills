@@ -43,6 +43,18 @@ SOURCE_SPECS = {
     "selected-text": SourceSpec(
         "ai.parcha.recall.selected-text", "selected-text.db", "selected-markdown-obsidian-root"
     ),
+    "safari": SourceSpec(
+        "ai.parcha.recall.safari", "safari.db", "selected-safari-history-bookmarks"
+    ),
+    "chrome": SourceSpec(
+        "ai.parcha.recall.chrome", "chrome.db", "selected-chrome-history-bookmarks"
+    ),
+    "apple-notes": SourceSpec(
+        "ai.parcha.recall.apple-notes", "apple-notes.db", "apple-notes-pinned-snippet-schema"
+    ),
+    "hermes": SourceSpec(
+        "ai.parcha.recall.hermes", "hermes.db", "hermes-session-schema-v22"
+    ),
 }
 
 

@@ -29,6 +29,11 @@ from connectors.cowork_local import CoworkLocalConnector
 from connectors.export_inbox import ExportInboxConnector
 from connectors.grep_ai import GrepAIConnector, load_private_api_key, validate_api_key
 from connectors.imessage import IMessageConnector
+from connectors.local_activity import (
+    AppleNotesConnector,
+    BrowserActivityConnector,
+    HermesSessionConnector,
+)
 from connectors.local_files import SelectedTextConnector
 from connectors.whatsapp_export import WhatsAppExportConnector
 from connectors.registry import (
@@ -243,6 +248,39 @@ def parser() -> argparse.ArgumentParser:
     selected_text.add_argument("--max-depth", type=int, default=8)
     selected_text.add_argument("--spool", required=True)
     selected_text.add_argument("--page-size", type=int, default=500)
+
+    browser = commands.add_parser("browser-sync")
+    _private_connection(browser)
+    _privacy(browser, choices=("scrub", "drop"), default="scrub")
+    browser.add_argument("--browser", choices=("chrome", "safari"), required=True)
+    browser.add_argument("--history")
+    browser.add_argument("--bookmarks")
+    browser.add_argument("--date-min")
+    browser.add_argument("--date-max")
+    browser.add_argument("--spool", required=True)
+    browser.add_argument("--page-size", type=int, default=500)
+
+    notes = commands.add_parser("apple-notes-sync")
+    _private_connection(notes)
+    _privacy(notes, choices=("scrub", "drop"), default="scrub")
+    notes.add_argument("--database", required=True)
+    notes.add_argument("--date-min")
+    notes.add_argument("--date-max")
+    notes.add_argument("--spool", required=True)
+    notes.add_argument("--page-size", type=int, default=500)
+
+    hermes = commands.add_parser("hermes-session-sync")
+    _private_connection(hermes)
+    _privacy(hermes, choices=("scrub", "drop"), default="scrub")
+    hermes.add_argument("--database", required=True)
+    hermes.add_argument("--source", action="append", required=True)
+    hermes.add_argument(
+        "--role", action="append", choices=("assistant", "user"), default=[]
+    )
+    hermes.add_argument("--date-min")
+    hermes.add_argument("--date-max")
+    hermes.add_argument("--spool", required=True)
+    hermes.add_argument("--page-size", type=int, default=500)
 
     mac_status_parser = commands.add_parser("mac-status")
     mac_status_parser.add_argument(
@@ -595,6 +633,22 @@ def main() -> None:
             "local.selected-text", visibility="private",
             privacy_mode=args.privacy_mode, authorities={"brain", "source"},
         )
+    elif args.command == "browser-sync":
+        _registry_policy(
+            "apple.safari" if args.browser == "safari" else "google.chrome",
+            visibility="private",
+            privacy_mode=args.privacy_mode, authorities={"brain", "source"},
+        )
+    elif args.command == "apple-notes-sync":
+        _registry_policy(
+            "apple.notes", visibility="private",
+            privacy_mode=args.privacy_mode, authorities={"brain", "source"},
+        )
+    elif args.command == "hermes-session-sync":
+        _registry_policy(
+            "hermes.sessions", visibility="private",
+            privacy_mode=args.privacy_mode, authorities={"brain", "source"},
+        )
     token = _token(args)
     common = {
         "endpoint": args.endpoint,
@@ -606,7 +660,8 @@ def main() -> None:
     privacy = _privacy_policy(args) if args.command in {
         "collect", "cowork-local-sync", "export", "put", "export-inbox-sync",
         "mcp-serve", "grep-ai-sync", "imessage-sync", "whatsapp-export-sync",
-        "selected-text-sync",
+        "selected-text-sync", "browser-sync", "apple-notes-sync",
+        "hermes-session-sync",
     } else PrivacyPolicy(mode="off")
     if args.command == "mcp-serve":
         backend = CaptureClient(**common, privacy=privacy)
@@ -683,6 +738,58 @@ def main() -> None:
             source_id=args.source_id,
             extensions=tuple(sorted(args.extension or (".md", ".markdown", ".txt"))),
             max_depth=args.max_depth,
+            page_size=args.page_size,
+        )
+        runner = ConnectorRunner(
+            connector=connector, brain=BrainClient(**common),
+            spool_path=Path(args.spool), privacy=privacy,
+        )
+        try:
+            result = {"sync": runner.run_once(), "doctor": runner.doctor()}
+        finally:
+            runner.close()
+    elif args.command == "browser-sync":
+        connector = BrowserActivityConnector(
+            browser=args.browser,
+            history=Path(args.history) if args.history else None,
+            bookmarks=Path(args.bookmarks) if args.bookmarks else None,
+            source_id=args.source_id,
+            date_min=args.date_min,
+            date_max=args.date_max,
+            page_size=args.page_size,
+        )
+        runner = ConnectorRunner(
+            connector=connector, brain=BrainClient(**common),
+            spool_path=Path(args.spool), privacy=privacy,
+        )
+        try:
+            result = {"sync": runner.run_once(), "doctor": runner.doctor()}
+        finally:
+            runner.close()
+    elif args.command == "apple-notes-sync":
+        connector = AppleNotesConnector(
+            database=Path(args.database),
+            source_id=args.source_id,
+            date_min=args.date_min,
+            date_max=args.date_max,
+            page_size=args.page_size,
+        )
+        runner = ConnectorRunner(
+            connector=connector, brain=BrainClient(**common),
+            spool_path=Path(args.spool), privacy=privacy,
+        )
+        try:
+            result = {"sync": runner.run_once(), "doctor": runner.doctor()}
+        finally:
+            runner.close()
+    elif args.command == "hermes-session-sync":
+        connector = HermesSessionConnector(
+            database=Path(args.database),
+            source_id=args.source_id,
+            sources=tuple(sorted(args.source)),
+            roles=tuple(sorted(args.role or ("assistant", "user"))),
+            date_min=args.date_min,
+            date_max=args.date_max,
             page_size=args.page_size,
         )
         runner = ConnectorRunner(

@@ -29,6 +29,12 @@ def main() -> None:
     imessage = args.workspace / "private-imessage-PATH-CANARY.db"
     whatsapp = args.workspace / "private-whatsapp-PATH-CANARY.txt"
     selected = args.workspace / "private-selected-PATH-CANARY"
+    safari_history = args.workspace / "private-safari-history-PATH-CANARY.db"
+    safari_bookmarks = args.workspace / "private-safari-bookmarks-PATH-CANARY.plist"
+    chrome_history = args.workspace / "private-chrome-history-PATH-CANARY.db"
+    chrome_bookmarks = args.workspace / "private-chrome-bookmarks-PATH-CANARY.json"
+    notes = args.workspace / "private-notes-PATH-CANARY.db"
+    hermes = args.workspace / "private-hermes-PATH-CANARY.db"
     installed = False
     result = None
     try:
@@ -37,6 +43,11 @@ def main() -> None:
         whatsapp.write_text("17/07/2026, 12:00 - Synthetic: fixture\n")
         selected.mkdir()
         (selected / "fixture.md").write_text("synthetic")
+        for path in (
+            safari_history, safari_bookmarks, chrome_history, chrome_bookmarks,
+            notes, hermes,
+        ):
+            path.write_bytes(b"synthetic")
         install = run([
             str(args.bundle_root / "install.sh"),
             "--prefix", str(prefix), "--launch-agents", str(launch_agents),
@@ -44,13 +55,22 @@ def main() -> None:
             "--host-id", "synthetic-local-lifecycle",
             "--keychain-service", "synthetic.reference",
             "--visibility", "private", "--privacy-mode", "scrub",
-            "--sources", "imessage,whatsapp-export,obsidian",
+            "--sources",
+            "imessage,whatsapp-export,obsidian,safari,chrome,apple-notes,hermes",
             "--imessage-database", str(imessage),
             "--whatsapp-export", str(whatsapp),
             "--whatsapp-conversation-id", "synthetic-conversation",
             "--whatsapp-owner-name", "Synthetic Owner",
             "--whatsapp-date-order", "dmy", "--whatsapp-timezone", "UTC",
-            "--selected-text-root", str(selected), "--no-load",
+            "--selected-text-root", str(selected),
+            "--safari-history", str(safari_history),
+            "--safari-bookmarks", str(safari_bookmarks),
+            "--chrome-history", str(chrome_history),
+            "--chrome-bookmarks", str(chrome_bookmarks),
+            "--apple-notes-database", str(notes),
+            "--hermes-database", str(hermes),
+            "--hermes-sources", "cli,slack",
+            "--hermes-roles", "assistant,user", "--no-load",
         ])
         installed = True
         assert "PATH-CANARY" not in install.stdout
@@ -59,6 +79,10 @@ def main() -> None:
             "imessage": ("imessage-sync", "--database", str(imessage)),
             "whatsapp": ("whatsapp-export-sync", "--export", str(whatsapp)),
             "selected-text": ("selected-text-sync", "--root", str(selected)),
+            "safari": ("browser-sync", "--history", str(safari_history)),
+            "chrome": ("browser-sync", "--history", str(chrome_history)),
+            "apple-notes": ("apple-notes-sync", "--database", str(notes)),
+            "hermes": ("hermes-session-sync", "--database", str(hermes)),
         }
         for name, (command, path_option, source_path) in expected.items():
             plist_path = launch_agents / f"ai.parcha.recall.{name}.plist"
@@ -79,7 +103,7 @@ def main() -> None:
         ])
         assert "PATH-CANARY" not in status.stdout
         status_value = json.loads(status.stdout)
-        assert status_value["enabled"] == 3
+        assert status_value["enabled"] == 7
         assert all(
             status_value["sources"][name]["health"] == "starting"
             for name in expected
@@ -115,8 +139,8 @@ def main() -> None:
             "status": "pass",
             "summary": {
                 "architecture": "Darwin-arm64",
-                "packaged_sources": 3,
-                "private_launch_agents": 3,
+                "packaged_sources": 7,
+                "private_launch_agents": 7,
                 "plaintext_credentials": 0,
                 "content_path_bytes_rendered": 0,
                 "state_retained_on_pause": True,
