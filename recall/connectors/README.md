@@ -39,6 +39,21 @@ worker launcher. Publishers can develop and conformance-test separate workers;
 operators must explicitly pin and run them outside Core until a later signed
 distribution contract is approved.
 
+### Conformance fixtures
+
+`run_connector_conformance(factory)` runs the same aggregate-only matrix for
+remote polling, local snapshots, imports, and future acquisition shapes. A
+fixture factory exposes a v3 manifest, one synthetic source ID, and a
+`build(scenario)` method. The fixed scenarios pin first-page ACK, pagination,
+empty terminal pages, lost-ACK recovery, revisions, explicit tombstones,
+acknowledged replay, privacy-before-spool, rate limits, malformed pages, source
+identity, and wire parity.
+
+The report contains only the connector ID, fixed cell names, and counts. It
+never includes source IDs, cursors, paths, exception text, records, or provider
+payloads. A publisher should make this matrix part of its own test suite before
+asking for a connector to be bundled.
+
 Connectors are explicit Python objects. Recall does not discover or execute
 plugins, recipes, entry points, or code from the current directory.
 
