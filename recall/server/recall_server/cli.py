@@ -23,6 +23,11 @@ from .managed_apply import (
     load_approvals,
     reconcile_infrastructure,
 )
+from .mcp_conformance import (
+    ConformanceError,
+    McpConformanceConfig,
+    run_conformance,
+)
 from .semantic import SemanticRuntime
 
 
@@ -70,6 +75,8 @@ def main() -> None:
     backfill_embeddings.add_argument("--source-id")
     backfill_embeddings.add_argument("--surface")
     sub.add_parser("export")
+    conformance = sub.add_parser("mcp-conformance")
+    conformance.add_argument("--config", type=Path, required=True)
     create_token = sub.add_parser("token-create")
     create_token.add_argument("name")
     create_token.add_argument("--source")
@@ -175,6 +182,19 @@ def main() -> None:
             )
             print(
                 json.dumps({"status": "rejected", "code": code}),
+                file=sys.stderr,
+            )
+            raise SystemExit(2) from None
+        return
+    if args.command == "mcp-conformance":
+        try:
+            report = run_conformance(McpConformanceConfig.load(args.config))
+            print(json.dumps(report, sort_keys=True))
+        except ConformanceError:
+            print(
+                json.dumps(
+                    {"status": "rejected", "code": "mcp_conformance_failed"}
+                ),
                 file=sys.stderr,
             )
             raise SystemExit(2) from None
