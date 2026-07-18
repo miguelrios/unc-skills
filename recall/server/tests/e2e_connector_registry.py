@@ -41,10 +41,10 @@ def main() -> None:
         "google.calendar": "e2e_google_workspace_connectors.py",
         "google.contacts": "e2e_google_workspace_connectors.py",
         "google.drive": "e2e_google_workspace_connectors.py",
-        "github.activity": "e2e_remote_api_foundation.py",
-        "linear.activity": "e2e_remote_api_foundation.py",
-        "slack.messages": "e2e_remote_api_foundation.py",
-        "notion.workspace": "e2e_remote_api_foundation.py",
+        "github.activity": "e2e_work_api_connectors.py",
+        "linear.activity": "e2e_work_api_connectors.py",
+        "slack.messages": "e2e_work_api_connectors.py",
+        "notion.workspace": "e2e_work_api_connectors.py",
         "x.activity": "e2e_remote_api_foundation.py",
     }
     results = {}

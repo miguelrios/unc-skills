@@ -40,6 +40,16 @@ from .google_workspace import (
     GoogleContactsConnector,
     GoogleDriveConnector,
 )
+from .work_apis import (
+    GitHubActivityConnector,
+    LinearActivityConnector,
+    NotionWorkspaceConnector,
+    SlackMessagesConnector,
+    github_rail,
+    linear_rail,
+    notion_rail,
+    slack_rail,
+)
 from .supervisor import (
     ConnectorSupervisor,
     ScheduleDefinition,
@@ -83,6 +93,14 @@ __all__ = [
     "GoogleCalendarConnector",
     "GoogleContactsConnector",
     "GoogleDriveConnector",
+    "GitHubActivityConnector",
+    "LinearActivityConnector",
+    "NotionWorkspaceConnector",
+    "SlackMessagesConnector",
+    "github_rail",
+    "linear_rail",
+    "notion_rail",
+    "slack_rail",
     "ConnectorSupervisor",
     "ScheduleDefinition",
     "ScheduledJob",
