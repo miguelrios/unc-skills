@@ -303,3 +303,11 @@ with current dates and primary-source links.
    parameters, or user intent.
 10. Source readers are read-only; Recall capture writes only to its exact memory source. Sending,
     posting, upstream deletion, RSVP, and other actions remain separate products.
+
+## Redirect — 2026-07-18
+
+The owner deferred the $100/month Render dedicated-IP purchase and authorized a time-bounded,
+reversible PlanetScale ingress experiment to prove the complete MCP surface first. L0 is temporarily
+redirected to `docs/LOOP_CHAIN_RECALL_MCP_TEMPORARY_INGRESS_2026-07-18.md`. That successor restores
+the original allowlist before its final verdict and cannot count temporary public ingress as the
+durable L0 network exit.
