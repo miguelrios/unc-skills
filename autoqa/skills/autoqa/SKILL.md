@@ -5,9 +5,9 @@ description: Self-QA a repo's running application end-to-end — discover how it
 
 # autoqa — QA any repo against its own running app
 
-You are the QA engineer for this repo. The output is a **witnessed** report: every verdict
-points at an artifact (an HTTP response, a page snapshot, a log line, a DB row). A check
-without a witness is not a check — rerun it or mark it UNTESTED, never infer a pass.
+You are the QA engineer for this repo. Every verdict is **witnessed** — it points at an
+artifact (an HTTP response, a page snapshot, a log line, a DB row) that *shows* the result,
+not merely a file that exists. The full witness contract is in Hard rules below.
 
 ## Phase 0 — RESOLVE
 
@@ -40,50 +40,61 @@ each traced to the file that taught you it.
 
 ## Phase 2 — PLAN
 
-Write the test matrix to a scratch file before executing anything: one row per feature,
-columns = modality, check, pass criterion, witness to capture.
+First write the **feature inventory** — a numbered list of every feature discovery found.
+Then build the matrix from it: one row per feature, columns = modality, entry point, check,
+pass criterion, witness to capture. The matrix must have ≥1 row per inventory item; the
+report states the coverage arithmetic (`N discovered / M rows / K untested`) so a reader
+sees nothing was silently dropped.
 
-- **Every feature in the inventory gets a row.** When the repo ships a feature catalog,
-  the matrix enumerates *all* of it, each row landing on one disposition: DEEP (run the
-  end-to-end check), SMOKE (load the surface, assert its key content), UNTESTED (needs a
-  fixture you don't have), SKIPPED (the branch predates the feature). A run that covers
-  only the headline features is a smoke pass — say so in the report rather than implying
-  full coverage.
+- **Entry point is a gating column, decided here — not at execute time.** For each feature,
+  name the path a user takes to reach it: the button, link, route, or client API call. A
+  feature whose entry point you cannot trace is not tested — its disposition is
+  `SKIPPED (unreachable — candidate dead code)`, and it never executes. Reachability is a
+  planning property; deciding it now is what stops you from running a router endpoint
+  nothing navigates to and mistaking its breakage for a bug.
+- **Disposition per row**: DEEP (run the end-to-end check), SMOKE (load the surface, assert
+  its key content), UNTESTED (needs a fixture you don't have), SKIPPED (unreachable, or the
+  branch predates the feature). A run that covers only headline features is a smoke pass —
+  the report says so rather than implying full coverage.
 - **Modalities**: API (endpoint calls), UI (browser tooling — chrome-devtools MCP,
   Playwright, or whatever the session has), CLI (the repo's own binaries). Cover every
   modality the app actually has; a web app QA'd only through its API is half-tested.
-- **Prefer the user's path.** Drive each feature the way a user reaches it — through the
-  UI, or the API call the client actually issues. An endpoint you found in the router may
-  be dead code; a check that only you can trigger proves little.
+- **Drive each feature by its traced entry point** — through the UI, or the API call the
+  client actually issues — not by a raw endpoint you found in the router.
 - **Pass criteria are concrete**: status codes, visible text, row counts, terminal job
   states — never "looks right".
 - Order rows: boot/health/auth first (everything else depends on them), then core money
   paths, then edge/regression rows.
 
-Done when: the matrix exists on disk, every inventory feature has a row, and every row
-carries all four columns.
+Done when: the inventory list exists, the matrix has ≥1 row per inventory item, every row
+carries all five columns, and every executable row names a traced entry point.
 
 ## Phase 3 — EXECUTE
 
-Run the matrix top to bottom against the live instance.
+Execute only rows whose entry point was traced in PLAN. Run the matrix top to bottom
+against the live instance.
 
 - Instance not up? Bring it up exactly as discovery taught — respect the repo's own
-  runbook (secret-injection wrappers, port maps) over generic docker commands.
-- Capture the witness for every row as you go into an evidence directory (default
-  `<scratch>/autoqa-evidence/`): curl output with status codes, page snapshots or
-  screenshots, log excerpts. Name files by row.
+  runbook (secret-injection wrappers, port maps) over generic docker commands. If it
+  cannot be brought up at all (missing secrets, port conflict, boot crash), the whole run
+  is `BLOCKED` — report what failed to boot and stop; never force a ship/don't-ship verdict
+  on an app you never ran.
+- Write the report and evidence side by side: report at `<scratch>/autoqa-report.md`,
+  evidence in `<scratch>/autoqa-evidence/`, witness paths relative to that shared parent so
+  they resolve. Name witness files by row: curl output with status codes, page snapshots or
+  screenshots, log excerpts.
 - A failing row gets one diagnosis pass: is it the app, the env, or your check? Fix
-  env/check mistakes and rerun; app failures stay failed and get a one-line cause.
-- **Before filing a failure, prove the feature is reachable.** Trace the entry point a
-  user would take — the button, link, or route that leads here. A break behind a path
-  nothing navigates to is dead code, and the finding is "remove this", not "fix this".
-- Async work (jobs, builds) is polled to a terminal state — "still running" at report time
-  is UNTESTED with a note, not a pass.
+  env/check mistakes and rerun; app failures stay failed and get a one-line cause. (Rows
+  whose entry point couldn't be traced were already SKIPPED in PLAN — you never reach here
+  for dead code.)
+- Async work (jobs, builds) is polled to a terminal state, capped at a stated timeout; on
+  expiry the row is UNTESTED with the elapsed time — never a pass, never an infinite poll.
 - Leave the instance as healthy as you found it; if you restarted anything, re-verify
   health before reporting.
 
-Done when: every matrix row is PASS, FAIL (with cause), or UNTESTED (with reason), each
-with a witness file.
+Done when: every matrix row is PASS, FAIL (with cause), UNTESTED (with reason), or SKIPPED —
+each with a witness that shows the asserted result — or the run is BLOCKED with the boot
+failure recorded.
 
 ## Phase 4 — REPORT
 
@@ -92,12 +103,19 @@ Write the report from the template in
 modality, result, witness path), failure triage (release blocker vs env quirk vs test
 bug), and the one-paragraph bottom line a release owner can act on.
 
-Done when: the report file exists, every table row's witness path resolves, and the bottom
-line states ship / don't-ship / ship-with-caveats.
+Done when: the report file exists next to the evidence dir, every table row's witness path
+resolves, and the bottom line states ship / don't-ship / ship-with-caveats / blocked.
 
 ## Hard rules
 
-- **No witness, no verdict.** Reruns beat inference.
+- **No witness, no verdict.** A witness must *show* the asserted result — the 200 in the
+  captured status line, the expected text in the snapshot — not merely exist. A named file
+  that doesn't show the result is not a witness. Reruns beat inference.
+- **Reachability is decided in PLAN, not blamed in EXECUTE** — a feature whose user entry
+  point you can't trace is SKIPPED before it runs; a break behind a path nothing navigates
+  to is dead code to remove, not a bug to fix.
+- **Coverage is counted, not claimed** — the report shows `discovered / rows / untested` so
+  a dropped feature is visible arithmetic, not a silent gap.
 - **The repo's runbook outranks your habits** — a project whose docs wrap startup in a
   secret-injection command never gets a bare `docker compose up`.
 - **Report failures as found** — a QA pass that only reports greens is a failed QA pass;

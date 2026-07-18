@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills" / "autoqa" / "SKILL.md"
 
 
-class SelfqaPackageTest(unittest.TestCase):
+class AutoqaPackageTest(unittest.TestCase):
     def test_skill_has_required_frontmatter(self):
         text = SKILL.read_text()
         self.assertTrue(text.startswith("---\n"))

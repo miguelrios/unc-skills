@@ -7,21 +7,22 @@
 
 ## Bottom line
 
-<One paragraph: ship / don't-ship / ship-with-caveats, and why. Written for the release
-owner, no jargon invented during the run.>
+<One paragraph: ship / don't-ship / ship-with-caveats / blocked, and why. Written for the
+release owner, no jargon invented during the run. If BLOCKED, state what failed to boot.>
 
 ## Verdict table
 
-| # | Feature | Modality | Check | Result | Witness |
-|---|---------|----------|-------|--------|---------|
-| 1 | Health/boot | API | GET /health → 200 | PASS | evidence/01-health.txt |
-| 2 | <feature> | UI | <check> | FAIL | evidence/02-<slug>.png |
-| 3 | <feature> | — | <not run> | UNTESTED | needs <fixture> |
+| # | Feature | Modality | Entry point | Check | Result | Witness |
+|---|---------|----------|-------------|-------|--------|---------|
+| 1 | Health/boot | API | GET /health | → 200 | PASS | evidence/01-health.txt |
+| 2 | <feature> | UI | <button/route> | <check> | FAIL | evidence/02-<slug>.png |
+| 3 | <feature> | — | <traced> | <not run> | UNTESTED | needs <fixture> |
+| 4 | <feature> | — | none found | — | SKIPPED | unreachable (dead code) |
 | … | | | | | |
 
 Results are exactly PASS / FAIL / UNTESTED / SKIPPED. Every row has a witness path that
-resolves. State the tier plainly: full-catalog coverage, or a smoke pass over headline
-features.
+resolves and shows the asserted result. State coverage arithmetic: `N discovered / M rows /
+K untested`, and whether this is full-catalog coverage or a smoke pass over headline features.
 
 ## Failures — triage
 
