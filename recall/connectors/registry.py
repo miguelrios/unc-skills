@@ -802,6 +802,54 @@ LOCAL_MAC_REGISTRY = (
     ),
 )
 
+PORTABLE_IMPORT_REGISTRY = (
+    _local_v3(
+        connector_id="portable.mail",
+        command="mail-import-sync",
+        source_family="communications",
+        record_kinds=["communication_message.v1"],
+        scopes=[],
+        selection_fields=[
+            "archive_id", "owner_identifiers", "removed_native_ids",
+        ],
+        deletion_semantics="explicit_owner",
+        acquisition=["import"],
+        auth_kind="selected_export",
+        backfill_modes=["export"],
+        reconciliation=False,
+    ),
+    _local_v3(
+        connector_id="portable.calendar",
+        command="calendar-import-sync",
+        source_family="schedule",
+        record_kinds=["calendar_event.v1"],
+        scopes=[],
+        selection_fields=[
+            "archive_id", "owner_identifiers", "removed_native_ids",
+        ],
+        deletion_semantics="explicit_owner",
+        acquisition=["import"],
+        auth_kind="selected_export",
+        backfill_modes=["export"],
+        reconciliation=False,
+    ),
+    _local_v3(
+        connector_id="portable.contacts",
+        command="contact-import-sync",
+        source_family="contacts",
+        record_kinds=["contact_identity.v1"],
+        scopes=[],
+        selection_fields=[
+            "archive_id", "owner_identifiers", "removed_native_ids",
+        ],
+        deletion_semantics="explicit_owner",
+        acquisition=["import"],
+        auth_kind="selected_export",
+        backfill_modes=["export"],
+        reconciliation=False,
+    ),
+)
+
 
 REGISTRY = (
     ConnectorDefinition.from_mapping({
@@ -824,6 +872,7 @@ REGISTRY = (
     }),
     *REMOTE_API_REGISTRY,
     *LOCAL_MAC_REGISTRY,
+    *PORTABLE_IMPORT_REGISTRY,
 )
 def _index(items: tuple[Any, ...]) -> dict[str, Any]:
     result = {item.connector_id: item for item in items}

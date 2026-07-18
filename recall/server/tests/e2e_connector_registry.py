@@ -39,6 +39,9 @@ def main() -> None:
         "google.chrome": ("private", "scrub", {"brain", "source"}),
         "apple.notes": ("private", "scrub", {"brain", "source"}),
         "hermes.sessions": ("private", "scrub", {"brain", "source"}),
+        "portable.mail": ("private", "scrub", {"brain", "source"}),
+        "portable.calendar": ("private", "scrub", {"brain", "source"}),
+        "portable.contacts": ("private", "scrub", {"brain", "source"}),
     }
     tests = {
         "recall.capture": "e2e_capture_mcp.py",
@@ -60,6 +63,9 @@ def main() -> None:
         "google.chrome": "e2e_local_activity_connectors.py",
         "apple.notes": "e2e_local_activity_connectors.py",
         "hermes.sessions": "e2e_local_activity_connectors.py",
+        "portable.mail": "e2e_portable_pim_imports.py",
+        "portable.calendar": "e2e_portable_pim_imports.py",
+        "portable.contacts": "e2e_portable_pim_imports.py",
     }
     results = {}
     for item in REGISTRY:

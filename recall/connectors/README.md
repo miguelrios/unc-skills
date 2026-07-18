@@ -153,6 +153,35 @@ A provider failure changes only that job's backoff. Supervisor state and spools
 survive image restarts; an unchanged provider cycle advances a bounded private
 cycle generation without creating another acknowledged content version.
 
+### Portable mail, calendar, and contacts
+
+The first portable-import pack reads one explicitly selected file: EML or
+[RFC 4155 MBOX](https://www.rfc-editor.org/info/rfc4155/),
+[RFC 5545 iCalendar](https://www.rfc-editor.org/info/rfc5545/), or
+[RFC 6350 vCard](https://www.rfc-editor.org/info/rfc6350/). It uses only the
+Python standard library, never discovers an export directory, and never follows
+links. Files, lines, records, decoded text, pages, and total output are bounded.
+Attachments and binary/encoded properties remain off.
+
+Every import requires a stable owner-chosen `--archive-id`, so moving the same
+export does not change native IDs. Re-importing identical content is suppressed
+by the acknowledged-record ledger; a changed message, event, or contact becomes
+one content revision. File or record absence never means deletion. A tombstone
+requires an explicit bounded `--remove-native-id` that matches that connector's
+native-ID namespace.
+
+```bash
+recall-brain mail-import-sync ... \
+  --input /explicit/export/mail.mbox --archive-id personal-mail \
+  --owner-identifier owner@example.com --spool /private/mail.db
+recall-brain calendar-import-sync ... \
+  --input /explicit/export/calendar.ics --archive-id personal-calendar \
+  --spool /private/calendar.db
+recall-brain contact-import-sync ... \
+  --input /explicit/export/contacts.vcf --archive-id personal-contacts \
+  --spool /private/contacts.db
+```
+
 ### iMessage local snapshot
 
 `IMessageConnector` reads one explicitly selected Messages `chat.db` through a
