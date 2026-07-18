@@ -182,6 +182,32 @@ recall-brain imessage-sync \
   --spool "$HOME/Library/Application Support/RecallBrain/state/imessage.db"
 ```
 
+### WhatsApp export and selected text
+
+`WhatsAppExportConnector` watches one user-selected UTF-8 text export. It has no
+network client, linked-device credential, QR/session surface, attachment
+reader, or send operation. The user supplies the stable conversation ID,
+owner-name set, date order, and IANA timezone. Bounded iOS and Android export
+lines become typed messages; multiline text is retained. Identity is based on
+conversation, timestamp, author, and same-timestamp ordinal, so content changes
+become revisions while file disappearance never becomes deletion.
+
+`SelectedTextConnector` reads one explicit Markdown/text or Obsidian root. Its
+closed extensions are `.md`, `.markdown`, and `.txt`; recursion depth, file
+count, per-file bytes, and total bytes are bounded. Hidden trees such as
+`.obsidian`, non-UTF-8 input, NUL data, symlinks, hard links, replacement races,
+and paths outside the selected root are never ingested. Stable relative-path
+identities make edits revisions. Rename or absence is deliberately not a
+tombstone.
+
+Both commands are private-only and require pre-spool `scrub` or `drop`:
+
+```bash
+recall-brain whatsapp-export-sync --export /selected/chat.txt \
+  --conversation-id selected-chat --date-order mdy --timezone UTC ...
+recall-brain selected-text-sync --root /selected/notes --max-depth 8 ...
+```
+
 ```python
 from connectors.sdk import ConnectorPage, ConnectorRecord, ConnectorRunner
 

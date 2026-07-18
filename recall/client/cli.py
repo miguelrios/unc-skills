@@ -29,6 +29,8 @@ from connectors.cowork_local import CoworkLocalConnector
 from connectors.export_inbox import ExportInboxConnector
 from connectors.grep_ai import GrepAIConnector, load_private_api_key, validate_api_key
 from connectors.imessage import IMessageConnector
+from connectors.local_files import SelectedTextConnector
+from connectors.whatsapp_export import WhatsAppExportConnector
 from connectors.registry import (
     REGISTRY,
     ConnectorRegistryError,
@@ -217,6 +219,30 @@ def parser() -> argparse.ArgumentParser:
     imessage.add_argument("--chat-id", action="append", default=[])
     imessage.add_argument("--date-min")
     imessage.add_argument("--date-max")
+
+    whatsapp = commands.add_parser("whatsapp-export-sync")
+    _private_connection(whatsapp)
+    _privacy(whatsapp, choices=("scrub", "drop"), default="scrub")
+    whatsapp.add_argument("--export", required=True)
+    whatsapp.add_argument("--conversation-id", required=True)
+    whatsapp.add_argument("--owner-name", action="append", default=[])
+    whatsapp.add_argument("--date-order", choices=("dmy", "mdy"), required=True)
+    whatsapp.add_argument("--timezone", required=True)
+    whatsapp.add_argument("--spool", required=True)
+    whatsapp.add_argument("--page-size", type=int, default=500)
+
+    selected_text = commands.add_parser("selected-text-sync")
+    _private_connection(selected_text)
+    _privacy(selected_text, choices=("scrub", "drop"), default="scrub")
+    selected_text.add_argument("--root", required=True)
+    selected_text.add_argument(
+        "--extension",
+        choices=(".md", ".markdown", ".txt"),
+        action="append",
+    )
+    selected_text.add_argument("--max-depth", type=int, default=8)
+    selected_text.add_argument("--spool", required=True)
+    selected_text.add_argument("--page-size", type=int, default=500)
 
     mac_status_parser = commands.add_parser("mac-status")
     mac_status_parser.add_argument(
@@ -559,6 +585,16 @@ def main() -> None:
             "apple.imessage", visibility="private",
             privacy_mode=args.privacy_mode, authorities={"brain", "source"},
         )
+    elif args.command == "whatsapp-export-sync":
+        _registry_policy(
+            "whatsapp.export", visibility="private",
+            privacy_mode=args.privacy_mode, authorities={"brain", "source"},
+        )
+    elif args.command == "selected-text-sync":
+        _registry_policy(
+            "local.selected-text", visibility="private",
+            privacy_mode=args.privacy_mode, authorities={"brain", "source"},
+        )
     token = _token(args)
     common = {
         "endpoint": args.endpoint,
@@ -569,7 +605,8 @@ def main() -> None:
     }
     privacy = _privacy_policy(args) if args.command in {
         "collect", "cowork-local-sync", "export", "put", "export-inbox-sync",
-        "mcp-serve", "grep-ai-sync", "imessage-sync",
+        "mcp-serve", "grep-ai-sync", "imessage-sync", "whatsapp-export-sync",
+        "selected-text-sync",
     } else PrivacyPolicy(mode="off")
     if args.command == "mcp-serve":
         backend = CaptureClient(**common, privacy=privacy)
@@ -613,6 +650,40 @@ def main() -> None:
             chat_ids=tuple(args.chat_id),
             date_min=args.date_min,
             date_max=args.date_max,
+        )
+        runner = ConnectorRunner(
+            connector=connector, brain=BrainClient(**common),
+            spool_path=Path(args.spool), privacy=privacy,
+        )
+        try:
+            result = {"sync": runner.run_once(), "doctor": runner.doctor()}
+        finally:
+            runner.close()
+    elif args.command == "whatsapp-export-sync":
+        connector = WhatsAppExportConnector(
+            export=Path(args.export),
+            source_id=args.source_id,
+            conversation_id=args.conversation_id,
+            owner_names=tuple(args.owner_name),
+            date_order=args.date_order,
+            timezone_name=args.timezone,
+            page_size=args.page_size,
+        )
+        runner = ConnectorRunner(
+            connector=connector, brain=BrainClient(**common),
+            spool_path=Path(args.spool), privacy=privacy,
+        )
+        try:
+            result = {"sync": runner.run_once(), "doctor": runner.doctor()}
+        finally:
+            runner.close()
+    elif args.command == "selected-text-sync":
+        connector = SelectedTextConnector(
+            root=Path(args.root),
+            source_id=args.source_id,
+            extensions=tuple(sorted(args.extension or (".md", ".markdown", ".txt"))),
+            max_depth=args.max_depth,
+            page_size=args.page_size,
         )
         runner = ConnectorRunner(
             connector=connector, brain=BrainClient(**common),
