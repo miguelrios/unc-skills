@@ -687,6 +687,10 @@ def _local_v3(
     scopes: list[str],
     selection_fields: list[str],
     deletion_semantics: str,
+    acquisition: list[str] | None = None,
+    auth_kind: str = "os_permission",
+    backfill_modes: list[str] | None = None,
+    reconciliation: bool = True,
 ) -> ConnectorDefinitionV3:
     return ConnectorDefinitionV3.from_mapping({
         "schema_version": 3,
@@ -698,18 +702,18 @@ def _local_v3(
         "record_kinds": record_kinds,
         "placement": {
             "execution": "source_local",
-            "acquisition": ["snapshot"],
+            "acquisition": acquisition or ["snapshot"],
         },
         "auth": {
-            "kind": "os_permission",
+            "kind": auth_kind,
             "minimum_scopes": scopes,
         },
         "sync": {
-            "backfill_modes": ["full", "incremental"],
+            "backfill_modes": backfill_modes or ["full", "incremental"],
             "checkpoint": "ack_cursor",
             "edit_semantics": "content_revision",
             "deletion_semantics": deletion_semantics,
-            "reconciliation": True,
+            "reconciliation": reconciliation,
         },
         "policy": {
             "visibility_modes": ["private"],
@@ -731,6 +735,31 @@ LOCAL_MAC_REGISTRY = (
         scopes=["macos.full_disk_access"],
         selection_fields=["chat_ids", "date_max", "date_min"],
         deletion_semantics="explicit_upstream",
+    ),
+    _local_v3(
+        connector_id="whatsapp.export",
+        command="local-export-sync",
+        source_family="communications",
+        record_kinds=["communication_message.v1"],
+        scopes=[],
+        selection_fields=[
+            "conversation_id", "date_order", "owner_names", "timezone",
+        ],
+        deletion_semantics="none",
+        acquisition=["import", "watch"],
+        auth_kind="selected_export",
+        backfill_modes=["export", "incremental"],
+        reconciliation=False,
+    ),
+    _local_v3(
+        connector_id="local.selected-text",
+        command="local-file-sync",
+        source_family="documents",
+        record_kinds=["document.v1"],
+        scopes=["macos.user_selected_files"],
+        selection_fields=["extensions", "max_depth", "root"],
+        deletion_semantics="none",
+        acquisition=["snapshot", "watch"],
     ),
 )
 

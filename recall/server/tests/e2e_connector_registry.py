@@ -33,6 +33,8 @@ def main() -> None:
         "notion.workspace": ("private", "scrub", {"brain", "source"}),
         "x.activity": ("private", "scrub", {"brain", "source"}),
         "apple.imessage": ("private", "scrub", {"brain", "source"}),
+        "whatsapp.export": ("private", "scrub", {"brain", "source"}),
+        "local.selected-text": ("private", "scrub", {"brain", "source"}),
     }
     tests = {
         "recall.capture": "e2e_capture_mcp.py",
@@ -48,6 +50,8 @@ def main() -> None:
         "notion.workspace": "e2e_work_api_connectors.py",
         "x.activity": "e2e_x_connector.py",
         "apple.imessage": "e2e_imessage_connector.py",
+        "whatsapp.export": "e2e_local_file_connectors.py",
+        "local.selected-text": "e2e_local_file_connectors.py",
     }
     results = {}
     for item in REGISTRY:
