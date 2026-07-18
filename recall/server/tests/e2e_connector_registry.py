@@ -42,6 +42,9 @@ def main() -> None:
         "portable.mail": ("private", "scrub", {"brain", "source"}),
         "portable.calendar": ("private", "scrub", {"brain", "source"}),
         "portable.contacts": ("private", "scrub", {"brain", "source"}),
+        "portable.slack": ("private", "scrub", {"brain", "source"}),
+        "portable.notion": ("private", "scrub", {"brain", "source"}),
+        "portable.x": ("private", "scrub", {"brain", "source"}),
     }
     tests = {
         "recall.capture": "e2e_capture_mcp.py",
@@ -66,6 +69,9 @@ def main() -> None:
         "portable.mail": "e2e_portable_pim_imports.py",
         "portable.calendar": "e2e_portable_pim_imports.py",
         "portable.contacts": "e2e_portable_pim_imports.py",
+        "portable.slack": "e2e_portable_service_archives.py",
+        "portable.notion": "e2e_portable_service_archives.py",
+        "portable.x": "e2e_portable_service_archives.py",
     }
     results = {}
     for item in REGISTRY:

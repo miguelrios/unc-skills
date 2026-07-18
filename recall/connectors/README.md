@@ -182,6 +182,29 @@ recall-brain contact-import-sync ... \
   --spool /private/contacts.db
 ```
 
+### Slack, Notion, and X archives
+
+`slack-archive-sync`, `notion-archive-sync`, and `x-archive-sync` read one
+explicitly selected ZIP export. They never discover export folders, extract
+archive members to disk, infer deletion from a missing member, or ingest
+attachments. ZIP paths, member types, counts, sizes, expansion, and compression
+ratios are bounded before projection.
+
+- Slack follows the official JSON export layout and projects dated channel
+  message files.
+- Notion projects UTF-8 Markdown and CSV members from the official workspace
+  export.
+- X projects own posts from the account archive `data/tweet*.js` files.
+
+Every import requires a stable owner-selected `archive_id`. Re-importing the
+same export converges; an edited source record becomes one new revision.
+Deletion is accepted only through an explicit `--remove-native-id` tombstone.
+See the official [Slack export
+format](https://slack.com/help/articles/220556107-How-to-read-Slack-data-exports),
+[Notion export guide](https://www.notion.com/help/export-your-content), and [X
+archive
+guide](https://help.x.com/en/managing-your-account/how-to-download-your-x-archive).
+
 ### iMessage local snapshot
 
 `IMessageConnector` reads one explicitly selected Messages `chat.db` through a
