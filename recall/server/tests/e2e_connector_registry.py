@@ -32,6 +32,7 @@ def main() -> None:
         "slack.messages": ("private", "scrub", {"brain", "source"}),
         "notion.workspace": ("private", "scrub", {"brain", "source"}),
         "x.activity": ("private", "scrub", {"brain", "source"}),
+        "apple.imessage": ("private", "scrub", {"brain", "source"}),
     }
     tests = {
         "recall.capture": "e2e_capture_mcp.py",
@@ -46,6 +47,7 @@ def main() -> None:
         "slack.messages": "e2e_work_api_connectors.py",
         "notion.workspace": "e2e_work_api_connectors.py",
         "x.activity": "e2e_x_connector.py",
+        "apple.imessage": "e2e_imessage_connector.py",
     }
     results = {}
     for item in REGISTRY:
