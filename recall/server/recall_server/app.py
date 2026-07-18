@@ -16,6 +16,7 @@ from .db import BrainStore, IdempotencyConflict
 from .mcp import (
     SUPPORTED_PROTOCOL_VERSIONS,
     McpProtocolError,
+    bound_response as bound_mcp_response,
     dispatch as dispatch_mcp,
     error_response as mcp_error_response,
 )
@@ -392,7 +393,7 @@ class Handler(BaseHTTPRequestHandler):
             if response is None:
                 self.send_empty(202)
             else:
-                self.send_json(200, response)
+                self.send_json(200, bound_mcp_response(response, request_id))
             return
         if path in {"/v1/search", "/v1/show", "/v1/related", "/v1/session-export"}:
             principal = self.require("read")

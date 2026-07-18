@@ -742,7 +742,7 @@ def run_conformance(config: McpConformanceConfig) -> dict[str, Any]:
             config.owner_token,
             latest,
             "recall_show",
-            {"target": receipt},
+            {"target": receipt, "tail": 1},
         )
     executed.add("lifecycle:receipt_resolution")
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -768,7 +768,7 @@ def run_conformance(config: McpConformanceConfig) -> dict[str, Any]:
         config.owner_token,
         latest,
         "recall_show",
-        {"target": first_receipt, "prompts": True},
+        {"target": first_receipt, "tail": 1, "prompts": True},
     )
     executed.add("lifecycle:show_prompts")
     _mark_tool(executed, "recall_show")

@@ -272,6 +272,8 @@ class LoopbackStore:
         }
 
     def show(self, target, *, around, tail, prompts, authorized_source):
+        if around is None and tail == 0:
+            raise RuntimeError("unbounded synthetic show")
         if target == "recall://synthetic:history/item-1?rev=1":
             return {"chunks": [{"text": "synthetic evidence"}]}
         return None
