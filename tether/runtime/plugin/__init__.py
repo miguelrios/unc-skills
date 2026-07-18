@@ -286,7 +286,7 @@ def _install_slack_bridge_prefilter():
     original_restart = getattr(SlackAdapter, "_restart_socket_mode", None)
 
     @functools.wraps(original)
-    async def bridged_handle(self, event):
+    async def bridged_handle(self, event, *args, **kwargs):
         if not event.get("_tether_polled"):
             state.last_inbound_at = time.monotonic()
             state.slack_transport_connected = True
@@ -312,7 +312,7 @@ def _install_slack_bridge_prefilter():
                     return None
         except Exception:
             log.exception("Could not evaluate a Slack bridge thread before the mention gate")
-        return await original(self, event)
+        return await original(self, event, *args, **kwargs)
 
     SlackAdapter._handle_slack_message = bridged_handle
 

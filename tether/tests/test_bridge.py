@@ -1005,8 +1005,8 @@ class PluginRoutingTest(unittest.TestCase):
                 self.sent.append((channel, content, metadata))
                 return {"ok": True}
 
-            async def _handle_slack_message(self, event):
-                return event.get("thread_ts") in self._bot_message_ts
+            async def _handle_slack_message(self, event, payload=None):
+                return event.get("thread_ts") in self._bot_message_ts, payload
 
         modules = {
             "plugins": types.ModuleType("plugins"),
@@ -1018,15 +1018,16 @@ class PluginRoutingTest(unittest.TestCase):
         with mock.patch.dict(sys.modules, modules), mock.patch.object(self.plugin, "_ensure_reply_poller"):
             self.plugin._install_slack_bridge_prefilter()
             adapter = SlackAdapter()
-            admitted = asyncio.run(adapter._handle_slack_message({
+            admitted, payload = asyncio.run(adapter._handle_slack_message({
                 "ts": "111.1", "thread_ts": "123.456", "channel": "C12345678",
-            }))
-            ignored = asyncio.run(adapter._handle_slack_message({
+            }, {"team_id": "T12345678"}))
+            ignored, _ = asyncio.run(adapter._handle_slack_message({
                 "ts": "111.2", "thread_ts": "999.999", "channel": "C12345678",
             }))
             suppressed = asyncio.run(adapter.send("C12345678", "NO_REPLY"))
             delivered = asyncio.run(adapter.send("C12345678", "NO_REPLY is a control token"))
         self.assertTrue(admitted)
+        self.assertEqual(payload, {"team_id": "T12345678"})
         self.assertFalse(ignored)
         self.assertTrue(suppressed["suppressed"])
         self.assertEqual(len(adapter.sent), 1)
