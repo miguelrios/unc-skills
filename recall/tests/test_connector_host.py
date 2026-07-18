@@ -122,7 +122,22 @@ class FrozenHostConfigTest(unittest.TestCase):
 
 class ClosedFactoryTest(unittest.TestCase):
     def test_factory_registry_is_closed_and_has_no_discovery_surface(self) -> None:
-        self.assertEqual(tuple(HOSTED_FACTORIES), ("openai.export-inbox", "grep.ai"))
+        self.assertEqual(
+            tuple(HOSTED_FACTORIES),
+            (
+                "openai.export-inbox",
+                "grep.ai",
+                "google.gmail",
+                "google.calendar",
+                "google.contacts",
+                "google.drive",
+                "github.activity",
+                "linear.activity",
+                "slack.messages",
+                "notion.workspace",
+                "x.activity",
+            ),
+        )
         with self.assertRaises(TypeError):
             HOSTED_FACTORIES["runtime.plugin"] = object()
         self.assertFalse(set(HOSTED_FACTORIES) & {"entrypoint", "module", "command"})

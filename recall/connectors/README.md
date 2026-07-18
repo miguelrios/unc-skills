@@ -122,6 +122,37 @@ Removing a bookmark, deleting a post, or losing visibility is not inferred from
 list absence and therefore does not create a tombstone. Partial provider error
 responses fail the page without advancing any stream watermark.
 
+### Remote worker profile
+
+The remote worker runs all nine bundled API connectors under the existing
+durable supervisor. Its one private config contains only source IDs, schedules,
+Brain endpoints, mode-0600 authority-file references, provider selectors, and
+private spool paths. It cannot name modules, entry points, executables, origins,
+HTTP methods, headers, GraphQL, or request recipes.
+
+Preview validates the complete profile without reading an authority or source,
+opening the network, or writing state:
+
+```bash
+python -m client.cli remote-worker-config-preview \
+  --config /var/lib/recall/private/worker.json
+```
+
+The packaged `Dockerfile.remote-worker` is a non-root, listener-free worker
+image. It includes the checksum-pinned Google Workspace CLI and defaults to the
+continuous supervisor:
+
+```bash
+python -m client.cli remote-worker-run \
+  --config /var/lib/recall/private/worker.json \
+  --state /var/lib/recall/supervisor.db
+```
+
+Each job has separate source and Brain authorities and its own ACK-gated spool.
+A provider failure changes only that job's backoff. Supervisor state and spools
+survive image restarts; an unchanged provider cycle advances a bounded private
+cycle generation without creating another acknowledged content version.
+
 ```python
 from connectors.sdk import ConnectorPage, ConnectorRecord, ConnectorRunner
 

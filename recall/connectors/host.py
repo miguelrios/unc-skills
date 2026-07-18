@@ -19,6 +19,12 @@ from urllib.parse import urlparse
 from client.mac import BrainClient, load_file_token, load_keychain_token
 from connectors.export_inbox import ExportInboxConnector
 from connectors.grep_ai import GrepAIConnector, load_private_api_key, validate_api_key
+from connectors.google_workspace import (
+    GmailConnector,
+    GoogleCalendarConnector,
+    GoogleContactsConnector,
+    GoogleDriveConnector,
+)
 from connectors.registry import ConnectorRegistryError, validate_policy
 from connectors.sdk import SOURCE_ID, ConnectorRunner
 from connectors.supervisor import (
@@ -28,6 +34,19 @@ from connectors.supervisor import (
     SupervisorStore,
 )
 from privacy.policy import PrivacyPolicy
+from connectors.work_apis import (
+    GitHubActivityConnector,
+    LinearActivityConnector,
+    NotionWorkspaceConnector,
+    SlackMessagesConnector,
+    github_rail,
+    linear_rail,
+    notion_rail,
+    slack_rail,
+    x_rail,
+)
+from connectors.workspace_rail import WorkspaceRail
+from connectors.x_activity import ALLOWED_STREAMS, XActivityConnector
 
 
 HOST_SCHEMA_VERSION = 1
@@ -158,13 +177,130 @@ class GrepOptions:
         }
 
 
+REMOTE_SELECTOR_FIELDS = {
+    "google.gmail": {
+        "include_spam_trash", "label_ids", "own_addresses", "query",
+    },
+    "google.calendar": {"calendar_id", "time_max", "time_min"},
+    "google.contacts": set(),
+    "google.drive": {"drive_id", "include_document_text", "mime_types"},
+    "github.activity": {"owner", "repository"},
+    "linear.activity": {"team_id"},
+    "slack.messages": {"channel_id"},
+    "notion.workspace": set(),
+    "x.activity": {"streams", "user_id"},
+}
+
+
+def _selector_string(value: Any, label: str, *, optional: bool = False) -> str | None:
+    if value is None and optional:
+        return None
+    if not isinstance(value, str) or not value or len(value.encode()) > 4_096:
+        raise ConnectorHostError("invalid_remote_selectors")
+    return value
+
+
+def _selector_strings(value: Any, label: str, *, allowed_empty: bool = True) -> list[str]:
+    if not isinstance(value, list) or (not value and not allowed_empty) or len(value) > 64:
+        raise ConnectorHostError("invalid_remote_selectors")
+    for item in value:
+        _selector_string(item, label)
+    if len(value) != len(set(value)) or value != sorted(value):
+        raise ConnectorHostError("invalid_remote_selectors")
+    return value
+
+
+def _remote_selectors(connector_id: str, value: Any) -> Mapping[str, Any]:
+    expected = REMOTE_SELECTOR_FIELDS.get(connector_id)
+    if expected is None or not isinstance(value, Mapping) or set(value) != expected:
+        raise ConnectorHostError("invalid_remote_selectors")
+    selected = dict(value)
+    if connector_id == "google.gmail":
+        _selector_strings(selected["own_addresses"], "own_addresses")
+        _selector_strings(selected["label_ids"], "label_ids")
+        _selector_string(selected["query"], "query", optional=True)
+        if type(selected["include_spam_trash"]) is not bool:
+            raise ConnectorHostError("invalid_remote_selectors")
+    elif connector_id == "google.calendar":
+        _selector_string(selected["calendar_id"], "calendar_id")
+        _selector_string(selected["time_min"], "time_min", optional=True)
+        _selector_string(selected["time_max"], "time_max", optional=True)
+    elif connector_id == "google.drive":
+        _selector_string(selected["drive_id"], "drive_id", optional=True)
+        _selector_strings(selected["mime_types"], "mime_types")
+        if type(selected["include_document_text"]) is not bool:
+            raise ConnectorHostError("invalid_remote_selectors")
+    elif connector_id == "github.activity":
+        _selector_string(selected["owner"], "owner")
+        _selector_string(selected["repository"], "repository")
+    elif connector_id == "linear.activity":
+        _selector_string(selected["team_id"], "team_id")
+    elif connector_id == "slack.messages":
+        _selector_string(selected["channel_id"], "channel_id")
+    elif connector_id == "x.activity":
+        user_id = _selector_string(selected["user_id"], "user_id")
+        if not user_id.isascii() or not user_id.isdigit() or len(user_id) > 19:
+            raise ConnectorHostError("invalid_remote_selectors")
+        streams = _selector_strings(selected["streams"], "streams", allowed_empty=False)
+        if tuple(streams) != tuple(item for item in ALLOWED_STREAMS if item in streams):
+            raise ConnectorHostError("invalid_remote_selectors")
+    try:
+        copied = json.loads(json.dumps(selected, allow_nan=False))
+    except (TypeError, ValueError):
+        raise ConnectorHostError("invalid_remote_selectors") from None
+    return MappingProxyType(copied)
+
+
+@dataclass(frozen=True)
+class RemoteOptions:
+    connector_id: str
+    source_authority: AuthorityReference
+    spool: Path
+    page_size: int
+    timeout_seconds: int
+    selectors: Mapping[str, Any]
+
+    @classmethod
+    def from_mapping(
+        cls,
+        connector_id: str,
+        value: Mapping[str, Any],
+    ) -> "RemoteOptions":
+        fields = {
+            "source_authority", "spool", "page_size", "timeout_seconds", "selectors",
+        }
+        if not isinstance(value, Mapping) or set(value) != fields:
+            raise ConnectorHostError("invalid_remote_options")
+        authority = AuthorityReference.from_mapping(value["source_authority"])
+        if authority.kind != "file":
+            raise ConnectorHostError("remote_source_authority_must_be_file")
+        minimum_page = 5 if connector_id == "x.activity" else 1
+        return cls(
+            connector_id=connector_id,
+            source_authority=authority,
+            spool=_absolute_path(value["spool"], "spool"),
+            page_size=_integer(value["page_size"], "page_size", minimum_page, 100),
+            timeout_seconds=_integer(value["timeout_seconds"], "timeout_seconds", 1, 60),
+            selectors=_remote_selectors(connector_id, value["selectors"]),
+        )
+
+    def to_mapping(self) -> dict[str, Any]:
+        return {
+            "source_authority": self.source_authority.to_mapping(),
+            "spool": str(self.spool),
+            "page_size": self.page_size,
+            "timeout_seconds": self.timeout_seconds,
+            "selectors": dict(self.selectors),
+        }
+
+
 @dataclass(frozen=True)
 class HostedConnectorFactory:
-    parse_options: Callable[[Mapping[str, Any]], ExportOptions | GrepOptions]
+    parse_options: Callable[[Mapping[str, Any]], Any]
     authority_slots: tuple[str, ...]
-    source_authority: Callable[[ExportOptions | GrepOptions], AuthorityReference | None]
-    durable_paths: Callable[[ExportOptions | GrepOptions], tuple[Path, ...]]
-    build: Callable[[ExportOptions | GrepOptions, str, str, Any], tuple[Any, Path]]
+    source_authority: Callable[[Any], AuthorityReference | None]
+    durable_paths: Callable[[Any], tuple[Path, ...]]
+    build: Callable[[Any, str, str, Any], tuple[Any, Path]]
 
 
 def _no_source_authority(_options: ExportOptions | GrepOptions) -> None:
@@ -185,6 +321,18 @@ def _export_paths(options: ExportOptions | GrepOptions) -> tuple[Path, ...]:
 
 def _grep_paths(options: ExportOptions | GrepOptions) -> tuple[Path, ...]:
     if not isinstance(options, GrepOptions):
+        raise ConnectorHostError("invalid_factory_options")
+    return (options.spool,)
+
+
+def _remote_source_authority(options: Any) -> AuthorityReference:
+    if not isinstance(options, RemoteOptions):
+        raise ConnectorHostError("invalid_factory_options")
+    return options.source_authority
+
+
+def _remote_paths(options: Any) -> tuple[Path, ...]:
+    if not isinstance(options, RemoteOptions):
         raise ConnectorHostError("invalid_factory_options")
     return (options.spool,)
 
@@ -214,6 +362,86 @@ def _build_grep(options: ExportOptions | GrepOptions, source_id: str,
     return connector, options.spool
 
 
+def _build_remote(
+    connector_id: str,
+    options: Any,
+    source_id: str,
+    _privacy_mode: str,
+    injected_rails: Any,
+) -> tuple[Any, Path]:
+    if not isinstance(options, RemoteOptions) or options.connector_id != connector_id:
+        raise ConnectorHostError("invalid_factory_options")
+    rail = (
+        injected_rails.get(connector_id)
+        if isinstance(injected_rails, Mapping)
+        else None
+    )
+    authority_path = options.source_authority.path
+    selectors = dict(options.selectors)
+    if connector_id.startswith("google."):
+        rail = rail or WorkspaceRail(
+            credential_path=authority_path,
+            timeout_seconds=options.timeout_seconds,
+        )
+        connector_types = {
+            "google.gmail": GmailConnector,
+            "google.calendar": GoogleCalendarConnector,
+            "google.contacts": GoogleContactsConnector,
+            "google.drive": GoogleDriveConnector,
+        }
+        connector_type = connector_types[connector_id]
+        if connector_id == "google.gmail":
+            selectors["own_addresses"] = tuple(selectors["own_addresses"])
+            selectors["label_ids"] = tuple(selectors["label_ids"])
+        elif connector_id == "google.drive":
+            selectors["mime_types"] = tuple(selectors["mime_types"])
+    else:
+        factories = {
+            "github.activity": github_rail,
+            "linear.activity": linear_rail,
+            "slack.messages": slack_rail,
+            "notion.workspace": notion_rail,
+            "x.activity": x_rail,
+        }
+        connector_types = {
+            "github.activity": GitHubActivityConnector,
+            "linear.activity": LinearActivityConnector,
+            "slack.messages": SlackMessagesConnector,
+            "notion.workspace": NotionWorkspaceConnector,
+            "x.activity": XActivityConnector,
+        }
+        connector_type = connector_types[connector_id]
+        rail = rail or factories[connector_id](
+            authority_path=authority_path,
+            timeout_seconds=options.timeout_seconds,
+        )
+        if connector_id == "x.activity":
+            selectors["streams"] = tuple(selectors["streams"])
+    connector = connector_type(
+        rail=rail,
+        source_id=source_id,
+        page_size=options.page_size,
+        **selectors,
+    )
+    return connector, options.spool
+
+
+def _remote_factory(connector_id: str) -> HostedConnectorFactory:
+    return HostedConnectorFactory(
+        parse_options=lambda value: RemoteOptions.from_mapping(connector_id, value),
+        authority_slots=("brain", "source"),
+        source_authority=_remote_source_authority,
+        durable_paths=_remote_paths,
+        build=lambda options, source_id, privacy_mode, rails: _build_remote(
+            connector_id,
+            options,
+            source_id,
+            privacy_mode,
+            rails,
+        ),
+    )
+
+
 HOSTED_FACTORIES: Mapping[str, HostedConnectorFactory] = MappingProxyType({
     "openai.export-inbox": HostedConnectorFactory(
         parse_options=ExportOptions.from_mapping,
@@ -229,6 +457,10 @@ HOSTED_FACTORIES: Mapping[str, HostedConnectorFactory] = MappingProxyType({
         durable_paths=_grep_paths,
         build=_build_grep,
     ),
+    **{
+        connector_id: _remote_factory(connector_id)
+        for connector_id in REMOTE_SELECTOR_FIELDS
+    },
 })
 
 
@@ -239,7 +471,7 @@ class HostedJobDefinition:
     endpoint: str
     brain_authority: AuthorityReference
     privacy_mode: str
-    connector: ExportOptions | GrepOptions
+    connector: ExportOptions | GrepOptions | RemoteOptions
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "HostedJobDefinition":
@@ -333,6 +565,19 @@ class ConnectorHostConfig:
         ):
             if len(values) != len(set(values)):
                 raise ConnectorHostError(f"duplicate_{label}")
+        durable_paths = {
+            path
+            for job in jobs
+            for path in job.durable_paths
+        }
+        authority_paths = {
+            reference.path
+            for job in jobs
+            for reference in (job.brain_authority, job.source_authority)
+            if reference is not None and reference.kind == "file"
+        }
+        if durable_paths & authority_paths:
+            raise ConnectorHostError("authority_durable_path_alias")
         return cls(schema_version=1, jobs=jobs)
 
     def to_mapping(self) -> dict[str, Any]:
@@ -432,7 +677,13 @@ class ConnectorHost:
         self.store.close()
 
 
-def build_host(config: ConnectorHostConfig, *, state_path: Path, grep_transport: Any = None) -> ConnectorHost:
+def build_host(
+    config: ConnectorHostConfig,
+    *,
+    state_path: Path,
+    grep_transport: Any = None,
+    remote_rails: Mapping[str, Any] | None = None,
+) -> ConnectorHost:
     if not isinstance(config, ConnectorHostConfig):
         raise ConnectorHostError("invalid_config")
     store = SupervisorStore(state_path)
@@ -447,8 +698,13 @@ def build_host(config: ConnectorHostConfig, *, state_path: Path, grep_transport:
                 source_id=item.source_id, principal_id="owner", visibility="private",
             )
             factory = HOSTED_FACTORIES[item.schedule.connector_id]
+            transport = (
+                grep_transport
+                if item.schedule.connector_id == "grep.ai"
+                else remote_rails
+            )
             connector, spool = factory.build(
-                item.connector, item.source_id, item.privacy_mode, grep_transport,
+                item.connector, item.source_id, item.privacy_mode, transport,
             )
             runner = ConnectorRunner(
                 connector=connector, brain=brain, spool_path=spool, privacy=privacy,
@@ -471,10 +727,16 @@ def build_host(config: ConnectorHostConfig, *, state_path: Path, grep_transport:
     )
 
 
-def run_host_once(config_path: Path, state_path: Path, *,
-                  clock=time.time) -> dict[str, Any]:
+def run_host_once(
+    config_path: Path,
+    state_path: Path,
+    *,
+    clock=time.time,
+    config_loader: Callable[[Path], ConnectorHostConfig] | None = None,
+) -> dict[str, Any]:
     try:
-        host = build_host(load_host_config(config_path), state_path=state_path)
+        loader = load_host_config if config_loader is None else config_loader
+        host = build_host(loader(config_path), state_path=state_path)
     except ConnectorHostError:
         raise
     except PermissionError:
@@ -488,8 +750,15 @@ def run_host_once(config_path: Path, state_path: Path, *,
         host.close()
 
 
-def run_host_daemon(config_path: Path, state_path: Path, *, max_wait_seconds: int = 30,
-                    max_cycles: int | None = None, clock=time.time) -> dict[str, Any]:
+def run_host_daemon(
+    config_path: Path,
+    state_path: Path,
+    *,
+    max_wait_seconds: int = 30,
+    max_cycles: int | None = None,
+    clock=time.time,
+    config_loader: Callable[[Path], ConnectorHostConfig] | None = None,
+) -> dict[str, Any]:
     """Reload the private config between bounded C8F loop cycles."""
     if not isinstance(max_wait_seconds, int) or isinstance(max_wait_seconds, bool) or not 1 <= max_wait_seconds <= 300:
         raise ConnectorHostError("invalid_max_wait")
@@ -514,10 +783,11 @@ def run_host_daemon(config_path: Path, state_path: Path, *, max_wait_seconds: in
         previous[number] = signal.getsignal(number)
         signal.signal(number, handler)
     cycles = 0
+    loader = load_host_config if config_loader is None else config_loader
     try:
         while not stop_event.is_set() and (max_cycles is None or cycles < max_cycles):
             try:
-                host = build_host(load_host_config(config_path), state_path=state_path)
+                host = build_host(loader(config_path), state_path=state_path)
             except ConnectorHostError:
                 raise
             except PermissionError:
