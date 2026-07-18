@@ -59,6 +59,7 @@ from connectors.registry import (
     REGISTRY,
     ConnectorRegistryError,
     aggregate_status,
+    catalog as integration_catalog,
     preview as registry_preview,
     validate_policy,
 )
@@ -178,6 +179,7 @@ def _registry_policy(connector_id: str, *, visibility: str, privacy_mode: str,
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description="Consent-first Recall Brain client")
     commands = root.add_subparsers(dest="command", required=True)
+    commands.add_parser("integration-catalog")
     commands.add_parser("connector-registry-preview")
     registry_status = commands.add_parser("connector-registry-status")
     registry_status.add_argument("--connector-id", choices=tuple(item.connector_id for item in REGISTRY), required=True)
@@ -507,6 +509,9 @@ def main() -> None:
         return
     if args.command == "connector-registry-preview":
         print(json.dumps(registry_preview(), sort_keys=True))
+        return
+    if args.command == "integration-catalog":
+        print(json.dumps(integration_catalog(), sort_keys=True))
         return
     if args.command == "connector-registry-status":
         if len(args.authority) != len(set(args.authority)):

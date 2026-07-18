@@ -15,6 +15,7 @@ from connectors.registry import (
     ConnectorDefinition,
     ConnectorRegistryError,
     aggregate_status,
+    catalog,
     definition,
     _index,
     validate_policy,
@@ -89,6 +90,64 @@ class FrozenRegistryTest(unittest.TestCase):
 
 
 class RegistryPreviewAndStatusTest(unittest.TestCase):
+    def test_catalog_groups_every_connector_exactly_once_without_io(self):
+        with mock.patch("client.cli.load_file_token") as token, \
+             mock.patch("client.cli.load_private_api_key") as source_key, \
+             mock.patch("sqlite3.connect") as sqlite_connect, \
+             mock.patch("urllib.request.urlopen") as network:
+            value = catalog()
+        token.assert_not_called(); source_key.assert_not_called()
+        sqlite_connect.assert_not_called(); network.assert_not_called()
+        self.assertEqual(value["schema_version"], 1)
+        self.assertEqual(value["mode"], "integration-catalog")
+        self.assertEqual(value["credential_reads"], 0)
+        self.assertEqual(value["source_reads"], 0)
+        self.assertEqual(value["network_requests"], 0)
+        self.assertEqual(value["writes"], 0)
+        self.assertEqual(
+            set(value["groups"]),
+            {"deliberate_capture", "local", "portable", "remote"},
+        )
+        entries = [
+            entry
+            for group in value["groups"].values()
+            for entry in group["connectors"]
+        ]
+        self.assertEqual(len(entries), len(REGISTRY))
+        self.assertEqual(
+            {entry["connector_id"] for entry in entries},
+            {item.connector_id for item in REGISTRY},
+        )
+        self.assertEqual(
+            sum(group["count"] for group in value["groups"].values()),
+            len(REGISTRY),
+        )
+        self.assertTrue(all(
+            set(entry) == {
+                "acquisition", "auth", "connector_id", "execution",
+                "record_kinds", "source_family",
+            }
+            for entry in entries
+        ))
+
+    def test_catalog_cli_is_static_and_content_free(self):
+        output = io.StringIO()
+        with mock.patch("sys.argv", ["recall-brain", "integration-catalog"]), \
+             mock.patch("sys.stdout", output), \
+             mock.patch("client.cli.load_file_token") as token, \
+             mock.patch("client.cli.load_private_api_key") as source_key, \
+             mock.patch("sqlite3.connect") as sqlite_connect, \
+             mock.patch("urllib.request.urlopen") as network:
+            client_cli.main()
+        token.assert_not_called(); source_key.assert_not_called()
+        sqlite_connect.assert_not_called(); network.assert_not_called()
+        value = json.loads(output.getvalue())
+        self.assertEqual(value["mode"], "integration-catalog")
+        self.assertEqual(
+            sum(group["count"] for group in value["groups"].values()),
+            len(REGISTRY),
+        )
+
     def test_preview_is_static_content_free_and_zero_io(self):
         output = io.StringIO()
         with mock.patch("sys.argv", ["recall-brain", "connector-registry-preview"]), \

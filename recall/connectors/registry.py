@@ -1005,6 +1005,83 @@ def preview() -> dict[str, Any]:
     }
 
 
+def _catalog_entry(item: ConnectorDefinition) -> tuple[str, dict[str, Any]]:
+    if isinstance(item, ConnectorDefinitionV3):
+        if item.execution_placement == "remote_worker":
+            group = "remote"
+        elif (
+            item.execution_placement == "either"
+            or item.auth.kind == "selected_export"
+        ):
+            group = "portable"
+        else:
+            group = "local"
+        return group, {
+            "connector_id": item.connector_id,
+            "source_family": item.source_family,
+            "execution": item.execution_placement,
+            "acquisition": list(item.acquisition_modes),
+            "auth": item.auth.kind,
+            "record_kinds": list(item.record_kinds),
+        }
+    if item.mode == "push":
+        return "deliberate_capture", {
+            "connector_id": item.connector_id,
+            "source_family": "deliberate_capture",
+            "execution": "edge_client",
+            "acquisition": ["push"],
+            "auth": "none",
+            "record_kinds": [],
+        }
+    if item.authority_slots == ("brain",):
+        return "portable", {
+            "connector_id": item.connector_id,
+            "source_family": "user_export",
+            "execution": "source_local",
+            "acquisition": ["import"],
+            "auth": "selected_export",
+            "record_kinds": [],
+        }
+    return "remote", {
+        "connector_id": item.connector_id,
+        "source_family": "third_party_research",
+        "execution": "remote_worker",
+        "acquisition": ["poll"],
+        "auth": "api_token",
+        "record_kinds": [],
+    }
+
+
+def catalog() -> dict[str, Any]:
+    groups: dict[str, list[dict[str, Any]]] = {
+        "deliberate_capture": [],
+        "local": [],
+        "portable": [],
+        "remote": [],
+    }
+    for item in REGISTRY:
+        group, entry = _catalog_entry(item)
+        groups[group].append(entry)
+    return {
+        "schema_version": 1,
+        "mode": "integration-catalog",
+        "credential_reads": 0,
+        "source_reads": 0,
+        "network_requests": 0,
+        "writes": 0,
+        "groups": {
+            name: {
+                "count": len(entries),
+                "connectors": sorted(
+                    entries,
+                    key=lambda entry: entry["connector_id"],
+                ),
+            }
+            for name, entries in groups.items()
+        },
+    }
+
+
 def _base_status(item: ConnectorDefinition, enabled: bool, privacy_mode: str,
                  authorities: set[str]) -> dict[str, Any]:
     if not isinstance(enabled, bool):
