@@ -32,8 +32,11 @@ from recall_server.app import Handler, serve, serve_unix, validate_http_profile
 from recall_server.capture import build_capture_event
 from recall_server.db import (
     BrainStore,
+    enough_session_anchors,
+    optional_rescue_deadline,
     related_candidate_limit,
     semantic_candidate_limit,
+    should_run_optional_rescue,
 )
 from recall_server.federation import SOURCE_FAMILIES, SourceProfile
 from recall_server.projectors import advisory_lock_key, canonical_json, effective_session_id, partial_lexical_probes, phrase_query_spec, preferred_phrase_probe, preferred_phrase_probes, project, redact_text, validate_envelope
@@ -684,6 +687,65 @@ class RelatedRetrievalContractTest(unittest.TestCase):
 
 
 class SemanticRetrievalContractTest(unittest.TestCase):
+    @mock.patch("recall_server.db.ConnectionPool")
+    def test_brainstore_reuses_a_bounded_connection_pool(self, pool_type) -> None:
+        pool = pool_type.return_value
+        first = object()
+        second = object()
+        pool.connection.side_effect = [first, second]
+        store = BrainStore("postgresql://synthetic.invalid/recall")
+
+        self.assertIs(store.connect(), first)
+        self.assertIs(store.connect(), second)
+        pool_type.assert_called_once()
+        self.assertEqual(pool_type.call_args.kwargs["min_size"], 1)
+        self.assertEqual(pool_type.call_args.kwargs["max_size"], 4)
+
+        store.close()
+        pool.close.assert_called_once_with()
+
+    def test_optional_rescues_share_a_strict_sub_budget(self) -> None:
+        self.assertEqual(
+            optional_rescue_deadline(
+                overall_deadline_at=20.0,
+                now=10.0,
+                search_deadline_ms=5000,
+            ),
+            10.8,
+        )
+        self.assertEqual(
+            optional_rescue_deadline(
+                overall_deadline_at=10.4,
+                now=10.0,
+                search_deadline_ms=5000,
+            ),
+            10.4,
+        )
+
+    def test_rescue_stops_after_enough_distinct_session_anchors(self) -> None:
+        rows = [
+            {"source_id": "one", "session_native_id": "a"},
+            {"source_id": "one", "session_native_id": "a"},
+            {"source_id": "one", "session_native_id": "b"},
+            {"source_id": "two", "session_native_id": "a"},
+            {"source_id": "two", "session_native_id": "b"},
+        ]
+        self.assertTrue(enough_session_anchors(rows, result_limit=5))
+        self.assertFalse(enough_session_anchors(rows[:3], result_limit=5))
+
+    def test_exact_prior_question_skips_optional_lexical_rescues(self) -> None:
+        sparse = [{"source_id": "one", "session_native_id": "a"}]
+        self.assertFalse(should_run_optional_rescue(
+            exact_question_count=1,
+            rows=sparse,
+            result_limit=5,
+        ))
+        self.assertTrue(should_run_optional_rescue(
+            exact_question_count=0,
+            rows=sparse,
+            result_limit=5,
+        ))
+
     def test_similarity_threshold_is_applied_after_bounded_hnsw_retrieval(self) -> None:
         runtime = mock.Mock(
             model="voyage-4",

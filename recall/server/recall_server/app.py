@@ -540,7 +540,11 @@ def serve(dsn: str, host: str = "127.0.0.1", port: int = 8788) -> None:
     Handler.store = BrainStore(dsn, semantic_runtime=SemanticRuntime.from_env())
     server = ThreadingHTTPServer((host, port), Handler)
     LOG.info("brainstore listening host=%s port=%s", host, port)
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+        Handler.store.close()
 
 
 class ThreadingUnixHTTPServer(
@@ -568,6 +572,7 @@ def serve_unix(dsn: str, path: str) -> None:
         server.serve_forever()
     finally:
         server.server_close()
+        Handler.store.close()
         try:
             os.unlink(path)
         except FileNotFoundError:
