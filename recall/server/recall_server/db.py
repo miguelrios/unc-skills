@@ -295,7 +295,7 @@ class BrainStore:
             "privacy": privacy,
         }
         if acknowledgement.get("receipts"):
-            result["receipt"] = acknowledgement["receipts"][0]
+            result["receipt"] = acknowledgement["receipts"][0] + "#item=0"
         return result
 
     def forget_capture(self, principal: dict, receipt: str) -> dict:
