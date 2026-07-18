@@ -2245,7 +2245,10 @@ class BrainStore:
                     "SELECT target_item_id,last_item_id,completed_at FROM projection_backfills WHERE name='entities-v2'"
                 ).fetchone()
             finally:
-                conn.execute("SELECT pg_advisory_unlock(hashtextextended('recall:entity-backfill',0))")
+                try:
+                    conn.execute("DROP TABLE IF EXISTS entity_backfill_stage")
+                finally:
+                    conn.execute("SELECT pg_advisory_unlock(hashtextextended('recall:entity-backfill',0))")
         return {
             "batches": batches, "items_scanned": scanned, "entity_rows_attempted": inserted,
             "target_item_id": state["target_item_id"], "last_item_id": state["last_item_id"],
