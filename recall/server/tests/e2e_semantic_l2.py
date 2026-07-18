@@ -234,7 +234,7 @@ def main() -> None:
             ("user", anchor["occurred_at"], anchor["id"]),
         ).fetchone()["QUERY PLAN"][0]["Plan"]
 
-        def index_names(node):
+        def index_names(node: dict) -> set[str]:
             names = {node["Index Name"]} if "Index Name" in node else set()
             for child in node.get("Plans", []):
                 names.update(index_names(child))
