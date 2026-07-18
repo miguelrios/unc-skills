@@ -9,7 +9,14 @@ from pathlib import Path
 from unittest import mock
 
 from client.cli import parser
-from client.macos_utility import SOURCE_SPECS, disable_source, mac_status
+from client.macos_utility import (
+    SOURCE_SPECS,
+    disable_source,
+    mac_status,
+    reset_local_source,
+    revoke_source,
+    support_report,
+)
 
 
 class MacUtilityLifecycleTest(unittest.TestCase):
@@ -133,6 +140,88 @@ class MacUtilityLifecycleTest(unittest.TestCase):
         self.assertEqual(run.call_args_list[0].args[0][0], "/bin/launchctl")
         self.assertEqual(run.call_args_list[1].args[0][0], "/bin/launchctl")
 
+    def test_revoke_disables_source_deletes_only_its_keychain_reference(self) -> None:
+        self._enable("cowork")
+        path = self.agents / f"{SOURCE_SPECS['cowork'].label}.plist"
+        with path.open("wb") as output:
+            plistlib.dump({"ProgramArguments": [
+                "runtime", "-m", "client.cli", "cowork-local-sync",
+                "--keychain-service", "synthetic.service",
+                "--keychain-account", "cowork:mac:synthetic",
+                "--privacy-mode", "scrub",
+            ]}, output)
+
+        with mock.patch("client.mac.delete_keychain_token", return_value=True) as delete:
+            result = revoke_source(
+                "cowork", launch_agents=self.agents, no_load=True,
+            )
+
+        delete.assert_called_once_with("synthetic.service", "cowork:mac:synthetic")
+        self.assertEqual(result, {
+            "schema_version": 1, "mode": "mac-revoke", "source": "cowork",
+            "enabled": False, "credential_revoked": True, "state_retained": True,
+        })
+        self.assertFalse(path.exists())
+
+    def test_local_reset_requires_exact_confirmation_and_never_claims_central_delete(self) -> None:
+        self._enable("cowork")
+        self._state("cowork", {"last_scan_at": "190"})
+        spool = self.prefix / "state" / SOURCE_SPECS["cowork"].spool_name
+        for suffix in ("-wal", "-shm", ".stdout.log", ".stderr.log"):
+            Path(str(spool) + suffix).write_text("PRIVATE-CANARY")
+        untouched = self.prefix / "state" / SOURCE_SPECS["codex"].spool_name
+        untouched.write_text("UNTOUCHED")
+
+        with self.assertRaisesRegex(ValueError, "confirmation_mismatch"):
+            reset_local_source(
+                "cowork", prefix=self.prefix, launch_agents=self.agents,
+                confirmation="codex", no_load=True,
+            )
+        result = reset_local_source(
+            "cowork", prefix=self.prefix, launch_agents=self.agents,
+            confirmation="cowork", no_load=True,
+        )
+
+        self.assertEqual(result, {
+            "schema_version": 1, "mode": "mac-reset-local", "source": "cowork",
+            "enabled": False, "local_state_retained": False,
+            "central_evidence_retained": True,
+        })
+        self.assertFalse(spool.exists())
+        self.assertFalse(any(Path(str(spool) + suffix).exists() for suffix in (
+            "-wal", "-shm", ".stdout.log", ".stderr.log",
+        )))
+        self.assertEqual(untouched.read_text(), "UNTOUCHED")
+        self.assertNotIn("CANARY", json.dumps(result))
+
+    def test_support_report_is_content_free_and_reports_integrity_aggregates(self) -> None:
+        self._enable("cowork")
+        self._state("cowork", {"last_scan_at": "190"})
+        manifest = {
+            "format": "recall-macos-v2",
+            "files": [{
+                "path": "lib/client/synthetic.py", "type": "file",
+                "bytes": 9,
+                "sha256": __import__("hashlib").sha256(b"synthetic").hexdigest(),
+            }],
+        }
+        (self.prefix / "lib" / "client").mkdir(parents=True)
+        (self.prefix / "lib" / "client" / "synthetic.py").write_bytes(b"synthetic")
+        (self.prefix / "MANIFEST.json").write_text(json.dumps(manifest))
+
+        result = support_report(
+            prefix=self.prefix, launch_agents=self.agents, now=200,
+        )
+
+        self.assertEqual(result["mode"], "mac-support")
+        self.assertEqual(result["package_integrity"], {
+            "status": "verified", "checked_files": 1, "mismatches": 0,
+        })
+        self.assertEqual(result["enabled"], 1)
+        rendered = json.dumps(result, sort_keys=True)
+        for forbidden in (str(self.home), "CANARY", "synthetic.py"):
+            self.assertNotIn(forbidden, rendered)
+
     def test_cli_has_safe_defaults_and_closed_source_choices(self) -> None:
         cowork = parser().parse_args([
             "cowork-local-sync", "--endpoint", "https://brain.example.invalid:9443",
@@ -147,6 +236,15 @@ class MacUtilityLifecycleTest(unittest.TestCase):
         self.assertTrue(status.launch_agents.endswith("LaunchAgents"))
         disabled = parser().parse_args(["mac-disable", "--source", "cowork", "--no-load"])
         self.assertEqual(disabled.source, "cowork")
+        revoked = parser().parse_args(["mac-revoke", "--source", "cowork", "--no-load"])
+        self.assertEqual(revoked.source, "cowork")
+        reset = parser().parse_args([
+            "mac-reset-local", "--source", "cowork",
+            "--confirm-source", "cowork", "--no-load",
+        ])
+        self.assertEqual(reset.confirm_source, "cowork")
+        support = parser().parse_args(["mac-support"])
+        self.assertTrue(support.prefix.endswith("RecallBrain"))
         with self.assertRaises(SystemExit):
             parser().parse_args([
                 "cowork-local-sync", "--endpoint", "https://brain.example.invalid:9443",

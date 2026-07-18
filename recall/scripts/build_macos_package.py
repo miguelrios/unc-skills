@@ -6,6 +6,7 @@ import gzip
 import hashlib
 import io
 import json
+import os
 import posixpath
 import stat
 import tarfile
@@ -190,6 +191,11 @@ def application_payloads(source_root: Path, runtime_lock_data: bytes) -> dict[st
             data=source.read_bytes(),
             executable=destination in {"bin/recall-brain", "install.sh", "uninstall.sh"},
         )
+    for module in ("client", "collector", "connectors", "privacy"):
+        for source in sorted((source_root / module).glob("*.py")):
+            selected[f"lib/{module}/{source.name}"] = Payload(data=source.read_bytes())
+    for source in sorted((source_root / "contracts").glob("*.json")):
+        selected[f"lib/contracts/{source.name}"] = Payload(data=source.read_bytes())
     selected["RUNTIME_LOCK.json"] = Payload(data=runtime_lock_data)
     return selected
 
@@ -215,6 +221,32 @@ def manifest(payloads: dict[str, Payload], lock: dict[str, Any]) -> bytes:
         "files": entries,
     }
     return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+
+
+def refresh_manifest(package_root: Path) -> None:
+    """Refresh manifest file entries for a deliberately modified test/package root."""
+
+    manifest_path = package_root / "MANIFEST.json"
+    value = json.loads(manifest_path.read_text(encoding="utf-8"))
+    entries = []
+    for path in sorted(package_root.rglob("*")):
+        relative = path.relative_to(package_root).as_posix()
+        if relative == "MANIFEST.json" or path.is_dir():
+            continue
+        if path.is_symlink():
+            entries.append({
+                "path": relative, "type": "symlink", "target": os.readlink(path),
+            })
+        else:
+            data = path.read_bytes()
+            entries.append({
+                "path": relative, "type": "file", "bytes": len(data),
+                "sha256": sha256(data),
+            })
+    value["files"] = entries
+    manifest_path.write_text(
+        json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
 def render_package(payloads: dict[str, Payload]) -> bytes:

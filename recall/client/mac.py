@@ -296,6 +296,45 @@ def store_keychain_token(service: str, account: str, token: str) -> None:
         raise RuntimeError(f"Keychain write failed with OSStatus {status}")
 
 
+def delete_keychain_token(service: str, account: str) -> bool:
+    """Delete one generic password by reference without reading its secret bytes."""
+
+    if platform.system() != "Darwin":
+        raise RuntimeError("Keychain deletion is available only on macOS")
+    if not service or not account:
+        raise ValueError("Keychain service and account are required")
+    import ctypes
+    import ctypes.util
+
+    framework = ctypes.util.find_library("Security")
+    if not framework:
+        raise RuntimeError("macOS Security framework is unavailable")
+    security = ctypes.CDLL(framework)
+    security.SecKeychainFindGenericPassword.restype = ctypes.c_int32
+    security.SecKeychainItemDelete.restype = ctypes.c_int32
+    service_bytes = service.encode()
+    account_bytes = account.encode()
+    item = ctypes.c_void_p()
+    status = security.SecKeychainFindGenericPassword(
+        None,
+        len(service_bytes), ctypes.c_char_p(service_bytes),
+        len(account_bytes), ctypes.c_char_p(account_bytes),
+        None, None, ctypes.byref(item),
+    )
+    if status == -25300:  # errSecItemNotFound
+        return False
+    if status != 0:
+        raise RuntimeError(f"Keychain lookup failed with OSStatus {status}")
+    try:
+        status = security.SecKeychainItemDelete(item)
+        if status != 0:
+            raise RuntimeError(f"Keychain deletion failed with OSStatus {status}")
+        return True
+    finally:
+        core = ctypes.CDLL(ctypes.util.find_library("CoreFoundation"))
+        core.CFRelease(item)
+
+
 def _envelope(*, source_id: str, native_id: str, kind: str, content: Any,
               principal_id: str, visibility: str, provenance: dict,
               occurred_at: str | None = None, parent: str | None = None) -> dict:

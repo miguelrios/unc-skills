@@ -19,7 +19,15 @@ from client.mac import (
 from collector.collector import Collector
 from client.capture import CaptureClient, ORIGIN
 from client.mcp import McpServer, serve as serve_mcp
-from client.macos_utility import SOURCE_SPECS, MacUtilityError, disable_source, mac_status
+from client.macos_utility import (
+    SOURCE_SPECS,
+    MacUtilityError,
+    disable_source,
+    mac_status,
+    reset_local_source,
+    revoke_source,
+    support_report,
+)
 from client.local_surfaces import (
     LocalSurfaceError,
     mac_claude_surface_preview,
@@ -298,6 +306,33 @@ def parser() -> argparse.ArgumentParser:
     )
     mac_disable.add_argument("--no-load", action="store_true")
 
+    mac_revoke = commands.add_parser("mac-revoke")
+    mac_revoke.add_argument("--source", choices=tuple(SOURCE_SPECS), required=True)
+    mac_revoke.add_argument(
+        "--launch-agents", default=str(Path.home() / "Library" / "LaunchAgents")
+    )
+    mac_revoke.add_argument("--no-load", action="store_true")
+
+    mac_reset = commands.add_parser("mac-reset-local")
+    mac_reset.add_argument("--source", choices=tuple(SOURCE_SPECS), required=True)
+    mac_reset.add_argument("--confirm-source", required=True)
+    mac_reset.add_argument(
+        "--prefix", default=str(Path.home() / "Library" / "Application Support" / "RecallBrain")
+    )
+    mac_reset.add_argument(
+        "--launch-agents", default=str(Path.home() / "Library" / "LaunchAgents")
+    )
+    mac_reset.add_argument("--no-load", action="store_true")
+
+    mac_support = commands.add_parser("mac-support")
+    mac_support.add_argument(
+        "--prefix", default=str(Path.home() / "Library" / "Application Support" / "RecallBrain")
+    )
+    mac_support.add_argument(
+        "--launch-agents", default=str(Path.home() / "Library" / "LaunchAgents")
+    )
+    mac_support.add_argument("--now", type=float)
+
     export = commands.add_parser("export")
     _connection(export)
     _privacy(export)
@@ -393,6 +428,36 @@ def main() -> None:
         try:
             result = disable_source(
                 args.source, launch_agents=Path(args.launch_agents), no_load=args.no_load,
+            )
+        except MacUtilityError as error:
+            raise SystemExit(str(error)) from None
+        print(json.dumps(result, sort_keys=True))
+        return
+    if args.command == "mac-revoke":
+        try:
+            result = revoke_source(
+                args.source, launch_agents=Path(args.launch_agents), no_load=args.no_load,
+            )
+        except MacUtilityError as error:
+            raise SystemExit(str(error)) from None
+        print(json.dumps(result, sort_keys=True))
+        return
+    if args.command == "mac-reset-local":
+        try:
+            result = reset_local_source(
+                args.source, prefix=Path(args.prefix),
+                launch_agents=Path(args.launch_agents),
+                confirmation=args.confirm_source, no_load=args.no_load,
+            )
+        except MacUtilityError as error:
+            raise SystemExit(str(error)) from None
+        print(json.dumps(result, sort_keys=True))
+        return
+    if args.command == "mac-support":
+        try:
+            result = support_report(
+                prefix=Path(args.prefix), launch_agents=Path(args.launch_agents),
+                now=time.time() if args.now is None else args.now,
             )
         except MacUtilityError as error:
             raise SystemExit(str(error)) from None
