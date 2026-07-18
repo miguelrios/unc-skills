@@ -226,6 +226,29 @@ specification](https://www.rssboard.org/rss-specification), [Atom
 RFC 4287](https://www.rfc-editor.org/info/rfc4287), and HTTP conditional
 request semantics from [RFC 7232](https://www.rfc-editor.org/info/rfc7232).
 
+### Optional managed-auth adapter
+
+`connectors.managed_auth` is a provider-neutral, disabled-by-default adapter
+contract for a managed auth/sync service. It is exported by the connector kit,
+but no managed provider, endpoint, credential, webhook listener, registry
+entry, or background job is installed or enabled.
+
+The contract follows Nango's sync shape without coupling Recall to Nango:
+HMAC-SHA256-signed change wakeups are closed and bounded; an explicitly
+constructed transport is bound to exactly one Recall source; record pages use
+opaque ACK-gated cursors and explicit `ADDED`, `UPDATED`, or `DELETED` actions;
+and a bundled code-owned mapper must produce a typed connector-v2 projection.
+The adapter owns stable native identity and deletion tombstones. Revocation
+parks later reads. Provider payloads cannot define endpoints, credentials,
+commands, connector code, or capture origins.
+
+This reflects Nango's documented
+[webhook-then-record-fetch](https://docs.nango.dev/guides/infrastructure)
+architecture while keeping the default Recall installation at zero managed
+third-party transfers. Deliberate MCP/web capture remains the separate
+`recall.capture` push capability with Brain-only authority; bulk connectors
+cannot gain shared capture visibility or choose the capture source/origin.
+
 ### iMessage local snapshot
 
 `IMessageConnector` reads one explicitly selected Messages `chat.db` through a
