@@ -121,6 +121,7 @@ def _cursor(
     page: str | None,
     watermarks: Mapping[str, str | None],
     max_seen: str | None,
+    cycle: int,
 ) -> str:
     try:
         raw = json.dumps(
@@ -130,6 +131,7 @@ def _cursor(
                 "page": page,
                 "watermarks": dict(watermarks),
                 "max_seen": max_seen,
+                "cycle": cycle,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -150,6 +152,7 @@ def _state(raw: str | None, streams: tuple[str, ...]) -> dict[str, Any]:
             "page": None,
             "watermarks": {stream: None for stream in streams},
             "max_seen": None,
+            "cycle": 0,
         }
     if not isinstance(raw, str) or not raw or len(raw.encode()) > MAX_CURSOR_BYTES:
         raise ConnectorContractError("connector cursor is invalid")
@@ -162,8 +165,12 @@ def _state(raw: str | None, streams: tuple[str, ...]) -> dict[str, Any]:
         raise ConnectorContractError("connector cursor is invalid") from None
     if (
         not isinstance(value, dict)
-        or set(value) != {"v", "stream", "page", "watermarks", "max_seen"}
+        or set(value) != {
+            "v", "stream", "page", "watermarks", "max_seen", "cycle",
+        }
         or value.get("v") != 1
+        or type(value.get("cycle")) is not int
+        or not 0 <= value["cycle"] <= 2_147_483_647
         or type(value.get("stream")) is not int
         or not 0 <= value["stream"] < len(streams)
         or value.get("page") is not None
@@ -306,6 +313,7 @@ class XActivityConnector:
                     page=next_page,
                     watermarks=watermarks,
                     max_seen=maximum,
+                    cycle=state["cycle"],
                 ),
                 has_more=True,
             )
@@ -320,6 +328,7 @@ class XActivityConnector:
                     page=None,
                     watermarks=watermarks,
                     max_seen=watermarks[next_stream],
+                    cycle=state["cycle"],
                 ),
                 has_more=True,
             )
@@ -331,6 +340,11 @@ class XActivityConnector:
                 page=None,
                 watermarks=watermarks,
                 max_seen=watermarks[first],
+                cycle=(
+                    0
+                    if state["cycle"] == 2_147_483_647
+                    else state["cycle"] + 1
+                ),
             ),
             has_more=False,
         )

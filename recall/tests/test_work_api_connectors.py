@@ -244,6 +244,7 @@ class SlackConnectorTest(unittest.TestCase):
             "page": "expired-page",
             "watermark": "2026-07-18T00:00:00Z",
             "max_seen": "2026-07-18T00:00:00Z",
+            "cycle": 1,
         })
         page = connector.pull(cursor)
         self.assertFalse(page.has_more)

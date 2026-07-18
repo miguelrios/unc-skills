@@ -60,6 +60,7 @@ jobs:
             e2e_federation_ranking.py \
             e2e_grep_ai.py \
             e2e_public_mcp_principal.py \
+            e2e_remote_worker.py \
             e2e_workspace_rail.py \
             e2e_retrieval_eval.py
           do
@@ -75,6 +76,20 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: recall-core:ci
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+      - name: Remote worker container contract
+        env:
+          RECALL_REMOTE_WORKER_IMAGE: recall-remote-worker:ci
+        run: |
+          docker build --pull --tag "$RECALL_REMOTE_WORKER_IMAGE" --file Dockerfile.remote-worker .
+          python server/tests/e2e_remote_worker_container.py
+      - name: Remote worker image vulnerability gate
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: recall-remote-worker:ci
           format: table
           exit-code: "1"
           ignore-unfixed: true

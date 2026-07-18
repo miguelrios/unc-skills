@@ -49,6 +49,12 @@ from connectors.host import (
     run_host_once,
     validate_reserved_export_inbox,
 )
+from connectors.remote_worker import (
+    load_remote_worker_config,
+    preview_remote_worker_config,
+    run_remote_worker_daemon,
+    run_remote_worker_once,
+)
 from privacy.policy import AgenticJudge, PrivacyPolicy, load_scoped_virtual_key
 
 
@@ -165,6 +171,12 @@ def parser() -> argparse.ArgumentParser:
     host_run.add_argument("--config", required=True)
     host_run.add_argument("--state", required=True)
     host_run.add_argument("--once", action="store_true")
+    remote_preview = commands.add_parser("remote-worker-config-preview")
+    remote_preview.add_argument("--config", required=True)
+    remote_run = commands.add_parser("remote-worker-run")
+    remote_run.add_argument("--config", required=True)
+    remote_run.add_argument("--state", required=True)
+    remote_run.add_argument("--once", action="store_true")
     dry = commands.add_parser("dry-run")
     dry.add_argument("--visibility", choices=("private", "shared"), required=True)
     dry.add_argument("--claude-root")
@@ -363,6 +375,25 @@ def main() -> None:
                 result = run_host_once(Path(args.config), Path(args.state))
             else:
                 result = run_host_daemon(Path(args.config), Path(args.state))
+        except ConnectorHostError as error:
+            raise SystemExit(str(error)) from None
+        print(json.dumps(result, sort_keys=True))
+        return
+    if args.command == "remote-worker-config-preview":
+        try:
+            result = preview_remote_worker_config(
+                load_remote_worker_config(Path(args.config))
+            )
+        except ConnectorHostError as error:
+            raise SystemExit(str(error)) from None
+        print(json.dumps(result, sort_keys=True))
+        return
+    if args.command == "remote-worker-run":
+        try:
+            if args.once:
+                result = run_remote_worker_once(Path(args.config), Path(args.state))
+            else:
+                result = run_remote_worker_daemon(Path(args.config), Path(args.state))
         except ConnectorHostError as error:
             raise SystemExit(str(error)) from None
         print(json.dumps(result, sort_keys=True))

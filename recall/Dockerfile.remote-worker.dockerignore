@@ -1,0 +1,15 @@
+.git
+.github
+docs/
+tests/
+tests_node/
+server/
+evals/
+legacy/
+spikes/
+*.env
+**/*.env
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.DS_Store

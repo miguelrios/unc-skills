@@ -128,10 +128,16 @@ def _url(value: Any) -> str | None:
     return value
 
 
-def _cursor(*, page: Any, watermark: str, max_seen: str) -> str:
+def _cursor(*, page: Any, watermark: str, max_seen: str, cycle: int) -> str:
     try:
         raw = json.dumps(
-            {"v": 1, "page": page, "watermark": watermark, "max_seen": max_seen},
+            {
+                "v": 1,
+                "page": page,
+                "watermark": watermark,
+                "max_seen": max_seen,
+                "cycle": cycle,
+            },
             sort_keys=True,
             separators=(",", ":"),
             allow_nan=False,
@@ -145,7 +151,13 @@ def _cursor(*, page: Any, watermark: str, max_seen: str) -> str:
 
 def _state(raw: str | None) -> dict[str, Any]:
     if raw is None:
-        return {"v": 1, "page": None, "watermark": EPOCH, "max_seen": EPOCH}
+        return {
+            "v": 1,
+            "page": None,
+            "watermark": EPOCH,
+            "max_seen": EPOCH,
+            "cycle": 0,
+        }
     if not isinstance(raw, str) or not raw or len(raw.encode()) > MAX_VALUE_BYTES:
         raise ConnectorContractError("connector cursor is invalid")
     try:
@@ -157,13 +169,19 @@ def _state(raw: str | None) -> dict[str, Any]:
         raise ConnectorContractError("connector cursor is invalid") from None
     if (
         not isinstance(value, dict)
-        or set(value) != {"v", "page", "watermark", "max_seen"}
+        or set(value) != {"v", "page", "watermark", "max_seen", "cycle"}
         or value.get("v") != 1
+        or type(value.get("cycle")) is not int
+        or not 0 <= value["cycle"] <= 2_147_483_647
     ):
         raise ConnectorContractError("connector cursor is invalid")
     _timestamp(value.get("watermark"), "connector cursor watermark")
     _timestamp(value.get("max_seen"), "connector cursor maximum")
     return value
+
+
+def _next_cycle(value: int) -> int:
+    return 0 if value == 2_147_483_647 else value + 1
 
 
 def _max_timestamp(current: str, candidate: str) -> str:
@@ -327,6 +345,7 @@ class GitHubActivityConnector:
                 page=page_number + 1 if has_more else None,
                 watermark=state["watermark"] if has_more else maximum,
                 max_seen=maximum,
+                cycle=state["cycle"] if has_more else _next_cycle(state["cycle"]),
             ),
             has_more=has_more,
         )
@@ -469,6 +488,7 @@ class LinearActivityConnector:
                 page=next_page,
                 watermark=state["watermark"] if has_more else maximum,
                 max_seen=maximum,
+                cycle=state["cycle"] if has_more else _next_cycle(state["cycle"]),
             ),
             has_more=has_more,
         )
@@ -606,6 +626,7 @@ class SlackMessagesConnector:
                 page=next_page,
                 watermark=state["watermark"] if has_more else maximum,
                 max_seen=maximum,
+                cycle=state["cycle"] if has_more else _next_cycle(state["cycle"]),
             ),
             has_more=has_more,
         )
@@ -779,6 +800,7 @@ class NotionWorkspaceConnector:
                 page=next_page,
                 watermark=state["watermark"] if has_more else maximum,
                 max_seen=maximum,
+                cycle=state["cycle"] if has_more else _next_cycle(state["cycle"]),
             ),
             has_more=has_more,
         )

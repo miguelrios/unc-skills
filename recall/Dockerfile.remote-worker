@@ -1,0 +1,27 @@
+FROM python:3.12-slim-trixie@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/opt/recall
+
+WORKDIR /opt/recall
+
+COPY --chown=10001:10001 connectors /opt/recall/connectors
+COPY --chown=10001:10001 client /opt/recall/client
+COPY --chown=10001:10001 collector /opt/recall/collector
+COPY --chown=10001:10001 privacy /opt/recall/privacy
+COPY --chown=10001:10001 contracts /opt/recall/contracts
+COPY --chown=10001:10001 scripts/install_gws.py /opt/recall/scripts/install_gws.py
+
+RUN python /opt/recall/scripts/install_gws.py \
+      --target x86_64-unknown-linux-gnu \
+      --prefix /opt/recall/vendor/gws/0.22.5 \
+    && groupadd --gid 10001 recall \
+    && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin recall \
+    && install -d -m 0700 -o 10001 -g 10001 /var/lib/recall/private
+
+USER 10001:10001
+VOLUME ["/var/lib/recall"]
+
+ENTRYPOINT ["python", "-m", "client.cli"]
+CMD ["remote-worker-run", "--config", "/var/lib/recall/private/worker.json", "--state", "/var/lib/recall/supervisor.db"]
