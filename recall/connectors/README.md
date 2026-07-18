@@ -5,6 +5,14 @@ that boundary: closed-schema validation, pre-ingest privacy, a mode-0600 SQLite
 outbox, Brain acknowledgement recovery, cursor commits, canonical tombstones, and
 content-free doctor state.
 
+## Generated integration catalog
+
+Run `recall-brain integration-catalog` to print the closed inventory grouped by
+local, remote, portable/import, and deliberate-capture placement. This preview
+reads no credential, source, selector, cursor, path, spool, or network state and
+performs no writes. The connector registry remains the single source of truth;
+tests fail if a registered connector is omitted or duplicated.
+
 ## Connector Kit v3
 
 `connectors.kit` is the versioned publisher surface around the same proven page
