@@ -27,6 +27,11 @@ def main() -> None:
         "google.calendar": ("private", "scrub", {"brain", "source"}),
         "google.contacts": ("private", "scrub", {"brain", "source"}),
         "google.drive": ("private", "scrub", {"brain", "source"}),
+        "github.activity": ("private", "scrub", {"brain", "source"}),
+        "linear.activity": ("private", "scrub", {"brain", "source"}),
+        "slack.messages": ("private", "scrub", {"brain", "source"}),
+        "notion.workspace": ("private", "scrub", {"brain", "source"}),
+        "x.activity": ("private", "scrub", {"brain", "source"}),
     }
     tests = {
         "recall.capture": "e2e_capture_mcp.py",
@@ -36,6 +41,11 @@ def main() -> None:
         "google.calendar": "e2e_workspace_rail.py",
         "google.contacts": "e2e_workspace_rail.py",
         "google.drive": "e2e_workspace_rail.py",
+        "github.activity": "e2e_remote_api_foundation.py",
+        "linear.activity": "e2e_remote_api_foundation.py",
+        "slack.messages": "e2e_remote_api_foundation.py",
+        "notion.workspace": "e2e_remote_api_foundation.py",
+        "x.activity": "e2e_remote_api_foundation.py",
     }
     results = {}
     for item in REGISTRY:
