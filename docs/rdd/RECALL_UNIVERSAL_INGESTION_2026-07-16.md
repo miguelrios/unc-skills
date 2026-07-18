@@ -736,8 +736,8 @@ only after Recall authorization, retains exact receipts and deletion lineage, ke
 out of the repository, and exposes no anonymous query mode. Private-network deployment remains an
 optional operator profile rather than an OSS requirement.
 
-The execution plan is
-`docs/LOOP_CHAIN_RECALL_PUBLIC_MCP_AND_UNIVERSAL_INGESTION_2026-07-17.md`.
+Execution plans, live infrastructure receipts, and Cascade evidence remain in
+private operator state; they are not public release artifacts.
 
 Primary provider references for this replan:
 
