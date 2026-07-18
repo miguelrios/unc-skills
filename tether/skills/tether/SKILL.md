@@ -42,6 +42,28 @@ Peer agents may collaborate through normal Slack conversation when Hermes is con
 
 Completion criterion: the result is posted to the same thread, or the same thread receives a sanitized failure explaining that no alternate session was used.
 
+## Attach An Existing Thread
+
+When a trusted launcher creates a fresh native agent session in response to an existing Slack turn, bind that exact thread without posting a second root message:
+
+```bash
+tether attach \
+  --channel C12345678 \
+  --thread-ts 1234567890.123456 \
+  --claude-session-id "$CLAUDE_SESSION_ID" \
+  --zellij-session "$ZELLIJ_SESSION_NAME" \
+  --zellij-pane-id "$ZELLIJ_PANE_ID" \
+  --cwd /absolute/repo/path \
+  --idempotency-key "stable-launch-id" \
+  --json
+```
+
+The local broker refuses to replace another active binding. When the target is
+already running in Zellij, provide both pane arguments so Tether fingerprints
+that exact live process and sends follow-ups into it; omitting them starts a
+separate native resume process. After attaching, use `tether reply --bridge-id
+...` for the native session's result. Do not guess a pane or session identity.
+
 ## Operate safely
 
 - Keep secrets, raw credentials, private prompts, and sensitive findings out of notification text and source metadata.
