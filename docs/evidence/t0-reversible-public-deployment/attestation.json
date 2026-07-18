@@ -1,0 +1,72 @@
+{
+  "artifact_class": "content-free-live-attestation",
+  "date_utc": "2026-07-18",
+  "database": {
+    "postgres_major": 17,
+    "schema_version": 16,
+    "tls": "verified",
+    "runtime_role": "least-privilege",
+    "vector_extension": "0.8.0",
+    "temporary_role_ttl_hours": 2,
+    "sql_capability_probe": "ready"
+  },
+  "deployment": {
+    "service_count": 1,
+    "service_type": "public-web-service",
+    "service_plan": "free",
+    "managed_https": true,
+    "tailscale_dependency": false,
+    "managed_embedding_protocol": "voyage-direct",
+    "separate_embedding_service_count": 0,
+    "image": "ghcr.io/miguelrios/recall-core@sha256:f1fbc24f6e91c19a18ee2e257498b22a2c54f7c18a9f0cc45e691aedc6ec77c1",
+    "merged_head": "b5a3f9d11f11476d3b486d50cfe5840efbf32c9c",
+    "deploy_status": "live"
+  },
+  "network": {
+    "pre_experiment_rule_count": 1,
+    "pre_experiment_cidr_count": 1,
+    "temporary_ipv4_anywhere_rule_count": 1,
+    "temporary_ipv6_anywhere_rule_count": 0,
+    "snapshot_sha256": "374b9fe6edeb051b697c4ab0a949ab3b3cabb96609016c161a6c91fb413b4cc1",
+    "independent_rollback_test": "passed",
+    "rollback_timer_expiry_minutes": 105,
+    "rollback_timer_persistent": true
+  },
+  "public_surface": {
+    "healthz_status": 200,
+    "readyz_status": 200,
+    "mcp_without_auth_status": 401,
+    "hidden_route_statuses": {
+      "debug": 404,
+      "doctor": 404,
+      "ingest": 404,
+      "metrics": 404,
+      "search_rest": 404,
+      "unknown": 404
+    },
+    "trusted_tailscale_headers": false,
+    "http_profile": "public-mcp"
+  },
+  "mcp_smoke": {
+    "initialize": "passed",
+    "negotiated_protocol": "2025-11-25",
+    "tool_count": 5,
+    "tool_names": [
+      "recall_related",
+      "recall_search",
+      "recall_show",
+      "recall_capture",
+      "recall_forget"
+    ]
+  },
+  "repository": {
+    "merged_prs": [
+      73,
+      74,
+      75
+    ],
+    "full_python_tests_passed": 371,
+    "node_tests_passed": 3,
+    "ci_status": "passed"
+  }
+}
