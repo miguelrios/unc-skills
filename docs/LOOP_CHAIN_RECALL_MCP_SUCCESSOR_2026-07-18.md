@@ -166,3 +166,11 @@ agent. Cleanup is unconditional and precedes the final static-egress choice.
    delete, or other third-party action capability.
 7. Every BUILD applies ZEN: simple, general, structurally fail-closed, agent-friendly, beautiful,
    and dope.
+
+## Execution log
+
+- **2026-07-18 — L0 COMPLETE:** MCP schema/runtime contract truth merged in PR #81; the
+  code-derived aggregate-only conformance runner merged in PR #82. The synthetic loopback passed
+  61/61 cells, all six fake-success mutants were rejected, and the full 386-Python/3-Node gate
+  passed. Criterion mapping and bound accounting are in
+  `docs/evidence/l0-contract-truth-conformance/EXIT.md`. Exit triggered L1.
