@@ -12,14 +12,23 @@ from .projectors import canonical_json, redact_text
 CAPTURE_ORIGIN_RE = re.compile(r"[a-z][a-z0-9_.-]{1,63}\Z")
 TAG_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}\Z")
 ALLOWED_PROVENANCE_SCHEMES = {"https", "manual", "connector", "export"}
-MAX_CAPTURE_BYTES = 1_000_000
+MAX_CAPTURE_BODY_CHARS = 32_000
+MAX_CAPTURE_BODY_BYTES = 128 * 1024
+MAX_CAPTURE_ENCODED_BYTES = 224 * 1024
 
 
-def _text(value: Any, label: str, limit: int) -> str:
+def _text(
+    value: Any,
+    label: str,
+    *,
+    character_limit: int,
+    byte_limit: int,
+) -> str:
     if (
         not isinstance(value, str)
         or not value.strip()
-        or len(value.encode()) > limit
+        or len(value) > character_limit
+        or len(value.encode()) > byte_limit
     ):
         raise ValueError(f"capture {label} is invalid")
     return value
@@ -83,8 +92,18 @@ def build_capture_event(arguments: Any, principal: dict) -> tuple[dict, dict]:
         or not principal_id
     ):
         raise ValueError("capture authority is invalid")
-    title = _text(arguments["title"], "title", 500)
-    body = _text(arguments["body"], "body", MAX_CAPTURE_BYTES)
+    title = _text(
+        arguments["title"],
+        "title",
+        character_limit=500,
+        byte_limit=2_000,
+    )
+    body = _text(
+        arguments["body"],
+        "body",
+        character_limit=MAX_CAPTURE_BODY_CHARS,
+        byte_limit=MAX_CAPTURE_BODY_BYTES,
+    )
     tags = arguments.get("tags", [])
     if (
         not isinstance(tags, list)
@@ -105,7 +124,7 @@ def build_capture_event(arguments: Any, principal: dict) -> tuple[dict, dict]:
         "provenance": provenance,
     }
     encoded = canonical_json(normalized)
-    if len(encoded) > MAX_CAPTURE_BYTES:
+    if len(encoded) > MAX_CAPTURE_ENCODED_BYTES:
         raise ValueError("capture exceeds the byte limit")
     native_id = "capture_" + hashlib.sha256(encoded).hexdigest()[:40]
     scrubbed_title = redact_text(title)
