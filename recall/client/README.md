@@ -1,9 +1,10 @@
 # Recall Brain clients
 
-The client is a stdlib-only, consent-first boundary for approved local coding
-history, supported user exports, and deliberate memory writes. It sends the same
-versioned envelopes as the Linux collector; it does not inspect ChatGPT, Cowork,
-or other application-private databases.
+The client is a stdlib-only, consent-first boundary for explicitly selected
+local sources, supported user exports, and deliberate memory writes. It sends
+the same versioned envelopes as the Linux collector. It never discovers source
+paths automatically: each supported database, export, or root must be selected
+by the owner, and unsupported application-private stores remain out of scope.
 
 ## Build the reproducible macOS bundle
 
@@ -14,7 +15,9 @@ python3 scripts/build_macos_package.py \
 ```
 
 Two builds from the same tree are byte-identical. `MANIFEST.json` records every
-installed file's byte count and SHA-256. The bundle carries its pinned arm64
+bundle file's byte count and SHA-256, and installation stops before changing the
+prefix if any entry or the package closure differs. This is corruption/tamper
+detection, not publisher code signing. The bundle carries its pinned arm64
 CPython runtime and installs only beneath the selected user prefix plus the
 explicitly selected user LaunchAgent files.
 
@@ -64,7 +67,10 @@ without reading record bodies. On the probed release, Cowork project logs are
 the supported desktop-work surface; Chromium IndexedDB and Local Storage remain
 excluded app state, and ordinary Claude cloud-chat history is not claimed.
 `--privacy-mode off|scrub|drop` defaults to `scrub`, and Cowork rejects `off`.
-Re-running the installer is an in-place upgrade that preserves private state.
+Re-running the installer stages and validates the new release before swapping
+code, preserves private state, and automatically restores the prior code and
+LaunchAgents if the upgrade fails. The last successful upgrade can be reverted
+with `./install.sh --rollback`.
 
 Inspect configured source classes without printing a path, credential, cursor,
 content, or exception:
@@ -72,9 +78,19 @@ content, or exception:
 ```bash
 recall-brain mac-status
 recall-brain mac-disable --source cowork
+recall-brain mac-support
+recall-brain mac-revoke --source cowork
+recall-brain mac-reset-local --source cowork --confirm-source cowork
 ```
 
 Per-source disable removes only that LaunchAgent and retains recoverable state.
+`mac-revoke` also removes only that source's Keychain item. `mac-reset-local`
+requires an exact source-name confirmation, pauses the source, and removes its
+local spool/checkpoint and content-free logs. It deliberately retains—and does
+not claim to delete—evidence already committed to the central Brain; central
+deletion requires an authenticated server-side receipt/source operation.
+`mac-support` reports only closed health and package-integrity aggregates: no
+paths, credentials, content, cursors, or exception text.
 Default uninstall removes code and agents but retains state; deleting state is
 an explicit choice:
 

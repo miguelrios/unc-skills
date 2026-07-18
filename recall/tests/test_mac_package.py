@@ -125,6 +125,7 @@ class MacPackageTest(unittest.TestCase):
         (package / "RUNTIME_LOCK.json").write_text(
             json.dumps(lock, sort_keys=True) + "\n"
         )
+        builder.refresh_manifest(package)
 
     def test_production_runtime_lock_is_immutable_arm64_cpython_312(self) -> None:
         lock = json.loads((RECALL_ROOT / "client" / "macos" / "RUNTIME_LOCK.json").read_text())
@@ -417,6 +418,77 @@ class MacPackageTest(unittest.TestCase):
         ], check=True, text=True, capture_output=True)
         self.assertFalse(json.loads(deleted.stdout)["state_retained"])
         self.assertFalse(prefix.exists())
+
+    def test_install_verifies_bundle_restores_failed_upgrade_and_supports_rollback(self) -> None:
+        archive = self.build("upgrade.tar.gz")
+        extracted = self.root / "upgrade-package"
+        extracted.mkdir()
+        with tarfile.open(archive, "r:gz") as package_archive:
+            package_archive.extractall(extracted, filter="data")
+        package = extracted / "recall-brain-macos"
+        self._use_host_runtime(package)
+        prefix = self.root / "upgrade-prefix"
+        agents = self.root / "upgrade-agents"
+        selected = self.root / "selected"
+        selected.mkdir()
+        (selected / "fixture.md").write_text("synthetic")
+        install = [
+            "sh", str(package / "install.sh"),
+            "--prefix", str(prefix), "--launch-agents", str(agents),
+            "--endpoint", "https://example.invalid", "--host-id", "synthetic-host",
+            "--keychain-service", "synthetic.reference", "--visibility", "private",
+            "--privacy-mode", "scrub", "--sources", "selected-text",
+            "--selected-text-root", str(selected), "--no-load",
+        ]
+        subprocess.run(install, check=True, text=True, capture_output=True)
+        marker = prefix / "lib" / "previous-release-marker"
+        marker.write_text("previous")
+        plist_before = (
+            agents / "ai.parcha.recall.selected-text.plist"
+        ).read_bytes()
+
+        tampered = package / "lib" / "client" / "cli.py"
+        original = tampered.read_bytes()
+        tampered.write_bytes(original + b"\n# tampered\n")
+        rejected = subprocess.run(install, text=True, capture_output=True)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("package_integrity_failed", rejected.stderr)
+        self.assertEqual(marker.read_text(), "previous")
+        self.assertEqual(
+            (agents / "ai.parcha.recall.selected-text.plist").read_bytes(),
+            plist_before,
+        )
+        tampered.write_bytes(original)
+
+        invalid_supervisor = self.root / "invalid-supervisor.json"
+        invalid_supervisor.write_text("{")
+        failed_upgrade = subprocess.run([
+            "sh", str(package / "install.sh"),
+            "--prefix", str(prefix), "--launch-agents", str(agents),
+            "--connector-supervisor-config", str(invalid_supervisor), "--no-load",
+        ], text=True, capture_output=True)
+        self.assertNotEqual(failed_upgrade.returncode, 0)
+        self.assertEqual(marker.read_text(), "previous")
+        self.assertEqual(
+            (agents / "ai.parcha.recall.selected-text.plist").read_bytes(),
+            plist_before,
+        )
+
+        subprocess.run(install, check=True, text=True, capture_output=True)
+        self.assertFalse(marker.exists())
+        rolled_back = subprocess.run([
+            "sh", str(package / "install.sh"), "--rollback",
+            "--prefix", str(prefix), "--launch-agents", str(agents), "--no-load",
+        ], check=True, text=True, capture_output=True)
+        self.assertEqual(json.loads(rolled_back.stdout), {
+            "schema_version": 1, "mode": "mac-rollback",
+            "restored": True, "state_retained": True,
+        })
+        self.assertEqual(marker.read_text(), "previous")
+        self.assertEqual(
+            (agents / "ai.parcha.recall.selected-text.plist").read_bytes(),
+            plist_before,
+        )
 
 
 if __name__ == "__main__":

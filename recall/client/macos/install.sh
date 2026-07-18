@@ -33,6 +33,7 @@ DISABLE_EXPORT_INBOX=0
 DISABLE_SOURCES=""
 SUPERVISOR_CONFIG=""
 DISABLE_SUPERVISOR=0
+ROLLBACK=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -67,10 +68,99 @@ while [ "$#" -gt 0 ]; do
     --disable-source) DISABLE_SOURCES="$DISABLE_SOURCES $2"; shift 2 ;;
     --connector-supervisor-config) SUPERVISOR_CONFIG=$2; shift 2 ;;
     --disable-connector-supervisor) DISABLE_SUPERVISOR=1; shift ;;
+    --rollback) ROLLBACK=1; shift ;;
     --no-load) NO_LOAD=1; shift ;;
     *) echo "usage: install.sh [connection] [--sources explicit,comma,separated,sources] [explicit source paths and selectors] [disable/lifecycle options]" >&2; exit 2 ;;
   esac
 done
+
+if [ "$ROLLBACK" -eq 1 ]; then
+  ROLLBACK_ROOT="$PREFIX/.rollback"
+  [ -d "$ROLLBACK_ROOT/code" ] && [ ! -L "$ROLLBACK_ROOT" ] || {
+    echo "rollback_unavailable" >&2
+    exit 1
+  }
+  mkdir -p "$PREFIX" "$LAUNCH_AGENTS"
+  CURRENT="$PREFIX/.rollback-current.$$"
+  rm -rf "$CURRENT"
+  mkdir -p "$CURRENT/code" "$CURRENT/plists"
+  for NAME in bin lib runtime; do
+    if [ -e "$PREFIX/$NAME" ] || [ -L "$PREFIX/$NAME" ]; then
+      mv "$PREFIX/$NAME" "$CURRENT/code/$NAME"
+    fi
+  done
+  for NAME in RUNTIME_LOCK.json MANIFEST.json; do
+    if [ -e "$PREFIX/$NAME" ] || [ -L "$PREFIX/$NAME" ]; then
+      mv "$PREFIX/$NAME" "$CURRENT/code/$NAME"
+    fi
+  done
+  for PLIST in "$LAUNCH_AGENTS"/ai.parcha.recall.*.plist; do
+    [ -e "$PLIST" ] || [ -L "$PLIST" ] || continue
+    cp -p "$PLIST" "$CURRENT/plists/"
+  done
+  rollback_stop_agents() {
+    [ "$NO_LOAD" -eq 0 ] || return 0
+    command -v launchctl >/dev/null 2>&1 || return 0
+    for LABEL in claude codex cowork chatgpt-export imessage whatsapp selected-text safari chrome apple-notes hermes connector-supervisor; do
+      TARGET="gui/$(id -u)/ai.parcha.recall.$LABEL"
+      launchctl bootout "$TARGET" >/dev/null 2>&1 || true
+      ATTEMPTS=0
+      while launchctl print "$TARGET" >/dev/null 2>&1; do
+        ATTEMPTS=$((ATTEMPTS + 1))
+        [ "$ATTEMPTS" -lt 100 ] || return 1
+        sleep 0.1
+      done
+    done
+  }
+  ROLLBACK_COMMITTED=0
+  restore_current() {
+    STATUS=$?
+    trap - EXIT HUP INT TERM
+    if [ "$ROLLBACK_COMMITTED" -eq 1 ]; then
+      exit "$STATUS"
+    fi
+    rm -rf "$PREFIX/bin" "$PREFIX/lib" "$PREFIX/runtime"
+    rm -f "$PREFIX/RUNTIME_LOCK.json" "$PREFIX/MANIFEST.json"
+    for NAME in bin lib runtime RUNTIME_LOCK.json MANIFEST.json; do
+      if [ -e "$CURRENT/code/$NAME" ] || [ -L "$CURRENT/code/$NAME" ]; then
+        mv "$CURRENT/code/$NAME" "$PREFIX/$NAME"
+      fi
+    done
+    rm -f "$LAUNCH_AGENTS"/ai.parcha.recall.*.plist
+    for PLIST in "$CURRENT/plists"/*.plist; do
+      [ -e "$PLIST" ] || continue
+      cp -p "$PLIST" "$LAUNCH_AGENTS/"
+      if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
+        launchctl bootstrap "gui/$(id -u)" "$LAUNCH_AGENTS/$(basename "$PLIST")" || true
+      fi
+    done
+    rm -rf "$CURRENT"
+    exit "$STATUS"
+  }
+  trap 'restore_current' EXIT HUP INT TERM
+  rollback_stop_agents
+  rm -f "$LAUNCH_AGENTS"/ai.parcha.recall.*.plist
+  for NAME in bin lib runtime RUNTIME_LOCK.json MANIFEST.json; do
+    if [ -e "$ROLLBACK_ROOT/code/$NAME" ] || [ -L "$ROLLBACK_ROOT/code/$NAME" ]; then
+      cp -Rp "$ROLLBACK_ROOT/code/$NAME" "$PREFIX/$NAME"
+    fi
+  done
+  for PLIST in "$ROLLBACK_ROOT/plists"/*.plist; do
+    [ -e "$PLIST" ] || continue
+    cp -p "$PLIST" "$LAUNCH_AGENTS/"
+  done
+  if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
+    for PLIST in "$LAUNCH_AGENTS"/ai.parcha.recall.*.plist; do
+      [ -e "$PLIST" ] || continue
+      launchctl bootstrap "gui/$(id -u)" "$PLIST"
+    done
+  fi
+  ROLLBACK_COMMITTED=1
+  trap - EXIT HUP INT TERM
+  rm -rf "$ROLLBACK_ROOT" "$CURRENT"
+  echo '{"schema_version":1,"mode":"mac-rollback","restored":true,"state_retained":true}'
+  exit 0
+fi
 
 case "$PRIVACY_MODE" in off|scrub|drop) ;; *) echo "privacy mode must be off, scrub, or drop" >&2; exit 2 ;; esac
 if [ -n "$EXPORT_INBOX" ] && [ "$DISABLE_EXPORT_INBOX" -eq 1 ]; then
@@ -195,21 +285,142 @@ stop_launch_agent() {
 }
 
 SOURCE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-mkdir -p "$PREFIX" "$PREFIX/bin" "$PREFIX/lib" "$PREFIX/state" "$LAUNCH_AGENTS"
-rm -rf "$PREFIX/lib/client" "$PREFIX/lib/collector" "$PREFIX/lib/connectors" "$PREFIX/lib/contracts" "$PREFIX/lib/privacy" "$PREFIX/runtime"
-cp -R "$SOURCE/lib/client" "$PREFIX/lib/client"
-cp -R "$SOURCE/lib/collector" "$PREFIX/lib/collector"
-cp -R "$SOURCE/lib/connectors" "$PREFIX/lib/connectors"
-cp -R "$SOURCE/lib/contracts" "$PREFIX/lib/contracts"
-cp -R "$SOURCE/lib/privacy" "$PREFIX/lib/privacy"
-cp -R "$SOURCE/runtime" "$PREFIX/runtime"
-cp "$SOURCE/bin/recall-brain" "$PREFIX/bin/recall-brain"
-cp "$SOURCE/RUNTIME_LOCK.json" "$PREFIX/RUNTIME_LOCK.json"
-chmod 755 "$PREFIX/bin/recall-brain"
+PACKAGE_RUNTIME="$SOURCE/runtime/bin/python3"
+[ -x "$PACKAGE_RUNTIME" ] || { echo "package_integrity_failed" >&2; exit 1; }
+"$PACKAGE_RUNTIME" -B - "$SOURCE" <<'PY'
+import hashlib
+import json
+import os
+import stat
+import sys
+from pathlib import Path, PurePosixPath
+
+try:
+    root = Path(sys.argv[1])
+    manifest_path = root / "MANIFEST.json"
+    if manifest_path.stat().st_size > 10_000_000:
+        raise ValueError
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("format") != "recall-macos-v2":
+        raise ValueError
+    entries = manifest["files"]
+    if not isinstance(entries, list) or len(entries) > 100_000:
+        raise ValueError
+    expected = set()
+    for entry in entries:
+        relative = PurePosixPath(entry["path"])
+        if relative.is_absolute() or ".." in relative.parts or str(relative) == "MANIFEST.json":
+            raise ValueError
+        if str(relative) in expected:
+            raise ValueError
+        expected.add(str(relative))
+        path = root.joinpath(*relative.parts)
+        for parent in path.parents:
+            if parent == root:
+                break
+            if stat.S_ISLNK(parent.lstat().st_mode):
+                raise ValueError
+        details = path.lstat()
+        if entry.get("type") == "symlink":
+            if not stat.S_ISLNK(details.st_mode) or os.readlink(path) != entry.get("target"):
+                raise ValueError
+        elif entry.get("type") == "file":
+            if (
+                not stat.S_ISREG(details.st_mode)
+                or details.st_size != entry.get("bytes")
+                or details.st_size > 1_000_000_000
+            ):
+                raise ValueError
+            digest = hashlib.sha256()
+            with path.open("rb") as source:
+                while chunk := source.read(1024 * 1024):
+                    digest.update(chunk)
+            if digest.hexdigest() != entry.get("sha256"):
+                raise ValueError
+        else:
+            raise ValueError
+    actual = set()
+    for directory, directories, files in os.walk(root, followlinks=False):
+        base = Path(directory)
+        for name in list(directories):
+            path = base / name
+            if path.is_symlink():
+                actual.add(path.relative_to(root).as_posix())
+        for name in files:
+            path = base / name
+            relative = path.relative_to(root).as_posix()
+            if relative != "MANIFEST.json":
+                actual.add(relative)
+    if actual != expected:
+        raise ValueError
+except (KeyError, OSError, TypeError, UnicodeError, ValueError):
+    raise SystemExit("package_integrity_failed") from None
+PY
+
+if [ -L "$PREFIX" ] || [ -L "$LAUNCH_AGENTS" ]; then
+  echo "install_location_unsafe" >&2
+  exit 1
+fi
+mkdir -p "$PREFIX" "$PREFIX/state" "$LAUNCH_AGENTS"
 chmod 700 "$PREFIX/state"
-RUNTIME="$PREFIX/runtime/bin/python3"
+TRANSACTION="$PREFIX/.transaction.$$"
+rm -rf "$TRANSACTION"
+mkdir -p "$TRANSACTION/stage/bin" "$TRANSACTION/stage/lib" \
+  "$TRANSACTION/old/code" "$TRANSACTION/old/plists"
+cp -R "$SOURCE/lib/client" "$TRANSACTION/stage/lib/client"
+cp -R "$SOURCE/lib/collector" "$TRANSACTION/stage/lib/collector"
+cp -R "$SOURCE/lib/connectors" "$TRANSACTION/stage/lib/connectors"
+cp -R "$SOURCE/lib/contracts" "$TRANSACTION/stage/lib/contracts"
+cp -R "$SOURCE/lib/privacy" "$TRANSACTION/stage/lib/privacy"
+cp -R "$SOURCE/runtime" "$TRANSACTION/stage/runtime"
+cp "$SOURCE/bin/recall-brain" "$TRANSACTION/stage/bin/recall-brain"
+cp "$SOURCE/RUNTIME_LOCK.json" "$TRANSACTION/stage/RUNTIME_LOCK.json"
+cp "$SOURCE/MANIFEST.json" "$TRANSACTION/stage/MANIFEST.json"
+chmod 755 "$TRANSACTION/stage/bin/recall-brain"
+for NAME in bin lib runtime RUNTIME_LOCK.json MANIFEST.json; do
+  if [ -e "$PREFIX/$NAME" ] || [ -L "$PREFIX/$NAME" ]; then
+    cp -Rp "$PREFIX/$NAME" "$TRANSACTION/old/code/$NAME"
+  fi
+done
+for PLIST in "$LAUNCH_AGENTS"/ai.parcha.recall.*.plist; do
+  [ -e "$PLIST" ] || [ -L "$PLIST" ] || continue
+  cp -p "$PLIST" "$TRANSACTION/old/plists/"
+done
+
+TRANSACTION_COMMITTED=0
+restore_transaction() {
+  STATUS=$?
+  trap - EXIT HUP INT TERM
+  if [ "$TRANSACTION_COMMITTED" -eq 0 ]; then
+    if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
+      for LABEL in claude codex cowork chatgpt-export imessage whatsapp selected-text safari chrome apple-notes hermes connector-supervisor; do
+        stop_launch_agent "ai.parcha.recall.$LABEL" || true
+      done
+    fi
+    rm -rf "$PREFIX/bin" "$PREFIX/lib" "$PREFIX/runtime"
+    rm -f "$PREFIX/RUNTIME_LOCK.json" "$PREFIX/MANIFEST.json"
+    for NAME in bin lib runtime RUNTIME_LOCK.json MANIFEST.json; do
+      if [ -e "$TRANSACTION/old/code/$NAME" ] || [ -L "$TRANSACTION/old/code/$NAME" ]; then
+        cp -Rp "$TRANSACTION/old/code/$NAME" "$PREFIX/$NAME"
+      fi
+    done
+    rm -f "$LAUNCH_AGENTS"/ai.parcha.recall.*.plist
+    for PLIST in "$TRANSACTION/old/plists"/*.plist; do
+      [ -e "$PLIST" ] || continue
+      cp -p "$PLIST" "$LAUNCH_AGENTS/"
+      if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
+        launchctl bootstrap "gui/$(id -u)" "$LAUNCH_AGENTS/$(basename "$PLIST")" || true
+      fi
+    done
+  fi
+  rm -rf "$TRANSACTION"
+  exit "$STATUS"
+}
+trap 'restore_transaction' EXIT HUP INT TERM
+
+RUNTIME="$TRANSACTION/stage/runtime/bin/python3"
 [ -x "$RUNTIME" ] || { echo "bundled runtime is not executable" >&2; exit 1; }
-"$RUNTIME" - "$PREFIX/RUNTIME_LOCK.json" <<'PY'
+"$RUNTIME" -B - "$TRANSACTION/stage/RUNTIME_LOCK.json" <<'PY'
 import ctypes
 import json
 import os
@@ -238,6 +449,12 @@ try:
 finally:
     connection.close()
 PY
+rm -rf "$PREFIX/bin" "$PREFIX/lib" "$PREFIX/runtime"
+rm -f "$PREFIX/RUNTIME_LOCK.json" "$PREFIX/MANIFEST.json"
+for NAME in bin lib runtime RUNTIME_LOCK.json MANIFEST.json; do
+  mv "$TRANSACTION/stage/$NAME" "$PREFIX/$NAME"
+done
+RUNTIME="$PREFIX/runtime/bin/python3"
 
 write_plist() {
   HARNESS=$1
@@ -552,6 +769,11 @@ if [ "$DISABLE_SUPERVISOR" -eq 1 ]; then
   fi
   rm -f "$LAUNCH_AGENTS/$LABEL.plist"
 fi
+rm -rf "$PREFIX/.rollback"
+mv "$TRANSACTION/old" "$PREFIX/.rollback"
+TRANSACTION_COMMITTED=1
+trap - EXIT HUP INT TERM
+rm -rf "$TRANSACTION"
 echo "installed Recall Brain Mac client"
 echo "selected sources: $SOURCES; visibility: $VISIBILITY; privacy: $PRIVACY_MODE"
 if [ -n "$SOURCES" ] || [ -n "$EXPORT_INBOX" ]; then
