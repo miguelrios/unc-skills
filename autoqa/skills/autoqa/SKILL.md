@@ -16,12 +16,13 @@ Establish three facts before anything else:
 1. **Target repo** — path or URL the user pointed at (ask only if truly absent).
 2. **Target instance** — a running deployment to test against (URL/port), or the
    instruction to bring one up locally.
-3. **Overlay** — look for a repo-specific overlay that pre-answers discovery: a
-   `autoqa-<project>` skill in the available-skills list, or `SELFQA.md` / `docs/SELFQA.md`
-   in the repo. **If found, read it now and skip straight to Phase 2** — the overlay is the
-   discovery, already verified. Missing overlay means full Phase 1.
+3. **Repo config** — look for `AUTOQA.md` at the repo root or under `docs/`. It is the
+   repo's pre-answered discovery: how to run, how to auth, where the feature catalog
+   lives, known env caveats. **If found, read it now and skip straight to Phase 2.**
+   Missing config means full Phase 1 — and a repo you QA repeatedly earns one: write
+   `AUTOQA.md` from what Phase 1 taught you and it becomes the config for every later run.
 
-Done when: repo path, instance URL (or "must boot"), and overlay-or-none are stated.
+Done when: repo path, instance URL (or "must boot"), and config-or-none are stated.
 
 ## Phase 1 — DISCOVER
 
