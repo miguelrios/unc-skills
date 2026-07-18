@@ -1,9 +1,9 @@
 [Unit]
-Description=Keep Recall BrainStore logical-backup RPO within five minutes
+Description=Schedule non-overlapping Recall BrainStore logical backups
 
 [Timer]
-OnBootSec=2min
-OnUnitActiveSec=5min
+OnActiveSec=15min
+OnUnitInactiveSec=6h
 AccuracySec=15s
 Persistent=true
 

@@ -15,6 +15,14 @@ SCRIPT = ROOT / "server/scripts/backup_restore.sh"
 
 
 class BackupPublicationTest(unittest.TestCase):
+    def test_deployment_timer_is_non_overlapping_and_makes_no_false_rpo_claim(self) -> None:
+        timer = (ROOT / "server/deploy/recall-brain-backup.timer").read_text()
+        service = (ROOT / "server/deploy/recall-brain-backup.service").read_text()
+        self.assertIn("OnActiveSec=15min", timer)
+        self.assertIn("OnUnitInactiveSec=6h", timer)
+        self.assertNotIn("OnUnitActiveSec", timer)
+        self.assertNotIn("five-minute", (timer + service).lower())
+
     def test_backup_keeps_previous_dump_visible_until_replacement_is_complete(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

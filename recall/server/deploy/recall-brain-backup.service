@@ -1,5 +1,5 @@
 [Unit]
-Description=Recall BrainStore five-minute logical backup
+Description=Recall BrainStore logical backup
 After=recall-brain.service
 
 [Service]

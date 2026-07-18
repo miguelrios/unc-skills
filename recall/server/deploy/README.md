@@ -237,9 +237,13 @@ principal-wide. Add `--capture-origin ORIGIN` to a principal-aware read/write to
 arguments cannot override either. Hosted capture structurally scrubs title and body before the
 canonical event is stored.
 
-The pilot uses a five-minute logical-backup timer for a bounded RPO. Before multi-user scale or
-C10 production cutover, replace it with continuous WAL archival plus daily base backups; the
-same blank-database restore/fingerprint contract remains the gate.
+The pilot timer starts its first logical backup after 15 minutes and schedules another six hours
+after the previous run finishes. This deliberately prevents overlapping full dumps. The interval
+is a conservative example, not an RPO guarantee: measure a complete backup on the real corpus and
+set the schedule from its duration, available disk, and provider-native recovery guarantees.
+Before multi-user scale or C10 production cutover, use provider point-in-time recovery or
+continuous WAL archival plus daily base backups; the same blank-database restore/fingerprint
+contract remains the gate.
 
 Searches have a 300ms database-work budget by default. Override it only within the validated
 10–5000ms range with `RECALL_SEARCH_DEADLINE_MS`; the response and service log expose only
