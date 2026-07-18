@@ -67,6 +67,24 @@ file under a private directory. Redirects, unknown operations or parameters,
 non-JSON responses, oversized bodies, revoked authority, and rate limits fail
 with stable content-free conditions. The rail never discovers connector code.
 
+### Google Workspace
+
+The bundled Gmail, Calendar, Contacts, and Drive connectors use the
+checksum-pinned Workspace CLI rail. They project closed v2 record kinds and
+keep every provider cursor behind the runner's Brain acknowledgement.
+
+- Gmail backfills messages, then uses history IDs. An expired history ID
+  (`404`) restarts a full reconciliation without inferring deletion.
+- Calendar and Contacts use terminal sync tokens. A stale token (`410`)
+  restarts reconciliation; only explicit cancelled/deleted resources become
+  tombstones.
+- Drive captures a start-page token before its file backfill, then consumes
+  changes. Only `removed` or explicitly trashed files become tombstones.
+
+Document attachments remain off. A Google Docs body can be exported as bounded
+plain text through the rail when explicitly enabled; other file types remain
+metadata-only. Preview and registration do not read credentials or sources.
+
 Connectors are explicit Python objects. Recall does not discover or execute
 plugins, recipes, entry points, or code from the current directory.
 

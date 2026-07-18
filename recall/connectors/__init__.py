@@ -34,6 +34,12 @@ from .conformance import (
     run_connector_conformance,
 )
 from .remote_api import BoundedJsonRail, RemoteApiError, RemoteOperation
+from .google_workspace import (
+    GmailConnector,
+    GoogleCalendarConnector,
+    GoogleContactsConnector,
+    GoogleDriveConnector,
+)
 from .supervisor import (
     ConnectorSupervisor,
     ScheduleDefinition,
@@ -73,6 +79,10 @@ __all__ = [
     "BoundedJsonRail",
     "RemoteApiError",
     "RemoteOperation",
+    "GmailConnector",
+    "GoogleCalendarConnector",
+    "GoogleContactsConnector",
+    "GoogleDriveConnector",
     "ConnectorSupervisor",
     "ScheduleDefinition",
     "ScheduledJob",
