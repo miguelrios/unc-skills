@@ -9,6 +9,8 @@ LATEST_PROTOCOL_VERSION = "2025-11-25"
 SUPPORTED_PROTOCOL_VERSIONS = frozenset(
     {"2025-03-26", "2025-06-18", LATEST_PROTOCOL_VERSION}
 )
+REQUEST_METHODS = ("initialize", "ping", "tools/list", "tools/call")
+NOTIFICATION_METHODS = ("notifications/initialized",)
 
 
 @dataclass(frozen=True)
