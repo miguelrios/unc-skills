@@ -16,15 +16,18 @@ owner, no jargon invented during the run.>
 |---|---------|----------|-------|--------|---------|
 | 1 | Health/boot | API | GET /health → 200 | PASS | evidence/01-health.txt |
 | 2 | <feature> | UI | <check> | FAIL | evidence/02-<slug>.png |
+| 3 | <feature> | — | <not run> | UNTESTED | needs <fixture> |
 | … | | | | | |
 
-Results are exactly PASS / FAIL / UNTESTED. Every row has a witness path that resolves.
+Results are exactly PASS / FAIL / UNTESTED / SKIPPED. Every row has a witness path that
+resolves. State the tier plainly: full-catalog coverage, or a smoke pass over headline
+features.
 
 ## Failures — triage
 
 | # | Failure | Severity | Cause |
 |---|---------|----------|-------|
-| 2 | <what broke> | release blocker / env quirk / test bug | <one line> |
+| 2 | <what broke> | release blocker / env quirk / test bug / dead code | <one line, incl. the user entry point that reaches it> |
 
 ## Coverage notes
 
