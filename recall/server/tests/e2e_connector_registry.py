@@ -21,6 +21,7 @@ def main() -> None:
         raise RuntimeError("RECALL_DATABASE_URL is required")
     policies = {
         "recall.capture": ("private", "scrub", {"brain"}),
+        "custom.webhook": ("private", "scrub", {"brain", "source"}),
         "openai.export-inbox": ("private", "drop", {"brain"}),
         "grep.ai": ("private", "drop", {"brain", "source"}),
         "google.gmail": ("private", "scrub", {"brain", "source"}),
@@ -50,6 +51,7 @@ def main() -> None:
     }
     tests = {
         "recall.capture": "e2e_capture_mcp.py",
+        "custom.webhook": "e2e_webhook_ingest.py",
         "openai.export-inbox": "e2e_export_inbox.py",
         "grep.ai": "e2e_grep_ai.py",
         "google.gmail": "e2e_google_workspace_connectors.py",
