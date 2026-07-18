@@ -88,6 +88,25 @@ metadata-only. Preview and registration do not read credentials or sources.
 Connectors are explicit Python objects. Recall does not discover or execute
 plugins, recipes, entry points, or code from the current directory.
 
+### Work APIs
+
+GitHub Issues and pull requests, Linear issues, Slack channel messages, and
+Notion page metadata use the same bounded JSON rail. Exact provider origins,
+operations, API-version headers, and GraphQL documents are immutable package
+code. Runtime values are limited to declared selectors such as one repository,
+team, channel, or integration-visible Notion workspace.
+
+Each adapter owns its provider cursor and keeps the acknowledged watermark
+inclusive so equal-timestamp revisions are replay-safe. Slack retries an expired
+opaque page cursor from the last acknowledged timestamp. Notion's search API is
+reconciled from its ordered pages. No adapter deletes by list absence:
+only a Slack `message_deleted` event or a Notion object explicitly marked
+`in_trash` becomes a tombstone. GitHub and Linear currently emit revisions only.
+
+Factories such as `github_rail(authority_path=...)` read a token lazily from the
+same strict mode-0600 authority file contract. Provider tokens, selectors, raw
+payloads, cursors, and exception details never enter previews or health output.
+
 ```python
 from connectors.sdk import ConnectorPage, ConnectorRecord, ConnectorRunner
 

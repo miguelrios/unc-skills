@@ -210,6 +210,50 @@ class RemoteApiRailTest(unittest.TestCase):
             "Bearer synthetic-authority",
         )
 
+    def test_code_owned_provider_headers_are_closed_and_cannot_override_authority(self):
+        captured = []
+
+        def opener(request, *, timeout):
+            captured.append(request)
+            return _Response(b"{}")
+
+        with tempfile.TemporaryDirectory() as directory:
+            secret = self.private_secret(Path(directory))
+            rail = BoundedJsonRail(
+                origin="https://api.notion.com",
+                authority_path=secret,
+                authorization_scheme="Bearer",
+                operations={
+                    "search.list": RemoteOperation(
+                        method="POST",
+                        path_template="/v1/search",
+                        path_fields=(),
+                        query_fields=(),
+                        json_fields=("page_size",),
+                    ),
+                },
+                fixed_headers={"Notion-Version": "2026-03-11"},
+                opener=opener,
+            )
+            rail.request("search.list", json_body={"page_size": 100})
+        self.assertEqual(captured[0].get_header("Notion-version"), "2026-03-11")
+        for forbidden in ("Authorization", "Accept", "Content-Type", "User-Agent"):
+            with self.assertRaisesRegex(ValueError, "invalid fixed headers"):
+                BoundedJsonRail(
+                    origin="https://api.notion.com",
+                    authority_path=Path("/synthetic/not-read"),
+                    authorization_scheme="Bearer",
+                    operations={
+                        "search.list": RemoteOperation(
+                            method="GET",
+                            path_template="/v1/search",
+                            path_fields=(),
+                            query_fields=(),
+                        ),
+                    },
+                    fixed_headers={forbidden: "synthetic"},
+                )
+
     def test_unknown_operation_extra_fields_and_bad_authority_fail_before_io(self):
         calls = []
 

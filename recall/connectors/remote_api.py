@@ -22,6 +22,8 @@ from privacy.transport import open_no_redirect
 FIELD = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 OPERATION_ID = re.compile(r"[a-z][a-z0-9_.-]{2,95}\Z")
 PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_]{0,63})\}")
+HEADER_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,63}\Z")
+RESERVED_HEADERS = {"accept", "authorization", "content-type", "user-agent"}
 MAX_AUTHORITY_BYTES = 16_384
 MAX_PARAMETER_BYTES = 4_096
 DEFAULT_MAX_RESPONSE_BYTES = 8_000_000
@@ -227,6 +229,7 @@ class BoundedJsonRail:
         authority_path: Path,
         authorization_scheme: str,
         operations: Mapping[str, RemoteOperation],
+        fixed_headers: Mapping[str, str] | None = None,
         opener: Callable[..., Any] = open_no_redirect,
         timeout_seconds: int = 30,
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
@@ -250,6 +253,24 @@ class BoundedJsonRail:
         ):
             raise ValueError("invalid remote operations")
         self.operations = MappingProxyType(dict(operations))
+        header_values = {} if fixed_headers is None else fixed_headers
+        if (
+            not isinstance(header_values, Mapping)
+            or len(header_values) > 16
+            or any(
+                not isinstance(key, str)
+                or not HEADER_NAME.fullmatch(key)
+                or key.lower() in RESERVED_HEADERS
+                or not isinstance(value, str)
+                or not value
+                or len(value.encode()) > 1_024
+                or any(ord(character) < 32 or ord(character) > 126 for character in value)
+                for key, value in header_values.items()
+            )
+            or len({key.lower() for key in header_values}) != len(header_values)
+        ):
+            raise ValueError("invalid fixed headers")
+        self.fixed_headers = MappingProxyType(dict(header_values))
         if not callable(opener):
             raise ValueError("invalid remote opener")
         self.opener = opener
@@ -323,6 +344,7 @@ class BoundedJsonRail:
             "Accept": "application/json",
             "Authorization": f"{self.authorization_scheme} {authority}",
             "User-Agent": "recall-remote-connector/1",
+            **self.fixed_headers,
         }
         if body is not None:
             headers["Content-Type"] = "application/json"
