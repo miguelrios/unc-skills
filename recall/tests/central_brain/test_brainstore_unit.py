@@ -29,6 +29,7 @@ except ModuleNotFoundError:
 from recall_server import SCHEMA_VERSION
 from recall_server import cli as server_cli
 from recall_server.app import Handler, serve, serve_unix, validate_http_profile
+from recall_server.capture import build_capture_event
 from recall_server.db import (
     BrainStore,
     related_candidate_limit,
@@ -522,6 +523,48 @@ class IngestTransactionContractTest(unittest.TestCase):
             ],
         )
         store._advance_projector.assert_called_once_with(connection, 43)
+
+
+class DeliberateCaptureContractTest(unittest.TestCase):
+    def test_public_capture_limit_fits_the_mcp_transport_budget(self) -> None:
+        principal = {
+            "source_id": "synthetic:capture",
+            "principal_id": "synthetic-owner",
+            "capture_origin": "synthetic-agent",
+        }
+        base = {
+            "schema_version": 1,
+            "title": "Synthetic bounded capture",
+            "occurred_at": "2026-07-18T02:00:00Z",
+            "tags": ["synthetic"],
+            "provenance": {"uri": "manual://synthetic"},
+        }
+        for body in ("x" * 32_000, "😀" * 32_000, "\x00" * 32_000):
+            with self.subTest(kind=body[:1].encode().hex()):
+                event, _privacy = build_capture_event(
+                    {**base, "body": body},
+                    principal,
+                )
+                request_body = json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "recall_capture",
+                            "arguments": {**base, "body": body},
+                        },
+                    },
+                    ensure_ascii=False,
+                ).encode()
+                self.assertLessEqual(len(body), 32_000)
+                self.assertLessEqual(len(body.encode()), 128 * 1024)
+                self.assertLess(len(request_body), 256 * 1024)
+                self.assertEqual(event["content"]["body"], body)
+
+        for body in ("x" * 32_001, "😀" * 32_001):
+            with self.assertRaisesRegex(ValueError, "capture body"):
+                build_capture_event({**base, "body": body}, principal)
 
 
 class SemanticRetrievalConfigurationTest(unittest.TestCase):

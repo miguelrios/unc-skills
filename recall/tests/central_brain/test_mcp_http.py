@@ -348,6 +348,136 @@ class RemoteMcpContractTest(unittest.TestCase):
             self.store.calls,
         )
 
+    def test_declared_tool_bounds_match_the_runtime_contract(self) -> None:
+        with McpHttpServer(self.store) as server:
+            _, _, raw = server.request(
+                "POST",
+                request("tools/list"),
+                protocol="2025-11-25",
+            )
+        tools = {
+            tool["name"]: tool["inputSchema"]
+            for tool in json.loads(raw)["result"]["tools"]
+        }
+        self.assertEqual(
+            tools["recall_search"]["properties"]["query"]["maxLength"],
+            8192,
+        )
+        self.assertEqual(
+            tools["recall_search"]["properties"]["limit"]["maximum"],
+            20,
+        )
+        self.assertEqual(
+            tools["recall_related"]["properties"]["limit"]["maximum"],
+            20,
+        )
+        self.assertEqual(
+            tools["recall_show"]["properties"]["around"],
+            {"type": "string", "format": "date-time"},
+        )
+        capture = tools["recall_capture"]["properties"]
+        self.assertEqual(capture["body"]["maxLength"], 32_000)
+        self.assertEqual(capture["tags"]["items"]["maxLength"], 64)
+        self.assertIn("pattern", capture["provenance"]["properties"]["uri"])
+
+    def test_show_uses_timestamp_and_rejects_conflicting_tail_before_store(self) -> None:
+        target = "recall://synthetic:codex/item-1?rev=1"
+        timestamp = "2026-07-18T02:00:00Z"
+        with McpHttpServer(self.store) as server:
+            status, _, raw = server.request(
+                "POST",
+                request(
+                    "tools/call",
+                    params={
+                        "name": "recall_show",
+                        "arguments": {
+                            "target": target,
+                            "around": timestamp,
+                            "prompts": True,
+                        },
+                    },
+                ),
+                protocol="2025-11-25",
+            )
+        self.assertEqual(status, 200)
+        self.assertIn("result", json.loads(raw))
+        self.assertIn(
+            (
+                "show",
+                target,
+                timestamp,
+                0,
+                True,
+                ["synthetic:codex", "synthetic:cowork"],
+            ),
+            self.store.calls,
+        )
+
+        invalid = (
+            {"around": 1},
+            {"around": "not-a-time"},
+            {"around": "2026-07-18T02:00:00"},
+            {"around": timestamp, "tail": 1},
+        )
+        for arguments in invalid:
+            with self.subTest(arguments=arguments):
+                self.store.calls.clear()
+                with McpHttpServer(self.store) as server:
+                    status, _, raw = server.request(
+                        "POST",
+                        request(
+                            "tools/call",
+                            params={
+                                "name": "recall_show",
+                                "arguments": {"target": target, **arguments},
+                            },
+                        ),
+                        protocol="2025-11-25",
+                    )
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(raw)["error"]["code"], -32602)
+                self.assertNotIn("show", {call[0] for call in self.store.calls})
+
+    def test_search_and_related_bounds_reject_before_store(self) -> None:
+        cases = (
+            (
+                "recall_search",
+                {"query": "synthetic", "limit": 21},
+                "search",
+            ),
+            (
+                "recall_search",
+                {"query": "x" * 8193},
+                "search",
+            ),
+            (
+                "recall_related",
+                {"cwd": "/synthetic", "limit": 21},
+                "related",
+            ),
+        )
+        for tool_name, arguments, store_call in cases:
+            with self.subTest(tool=tool_name):
+                self.store.calls.clear()
+                with McpHttpServer(self.store) as server:
+                    status, _, raw = server.request(
+                        "POST",
+                        request(
+                            "tools/call",
+                            params={
+                                "name": tool_name,
+                                "arguments": arguments,
+                            },
+                        ),
+                        protocol="2025-11-25",
+                    )
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(raw)["error"]["code"], -32602)
+                self.assertNotIn(
+                    store_call,
+                    {call[0] for call in self.store.calls},
+                )
+
     def test_public_profile_hides_every_non_mcp_route_before_store_io(self) -> None:
         self.environment.stop()
         self.environment = mock.patch.dict(

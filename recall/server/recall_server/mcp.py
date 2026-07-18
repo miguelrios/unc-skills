@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 LATEST_PROTOCOL_VERSION = "2025-11-25"
@@ -57,6 +58,23 @@ def _boolean(value: Any, name: str, *, default: bool = False) -> bool:
     return value
 
 
+def _date_time(value: Any, name: str) -> str:
+    text = _string(value, name)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        raise McpProtocolError(
+            -32602,
+            f"{name} must be a timezone-aware ISO-8601 timestamp",
+        ) from None
+    if parsed.tzinfo is None:
+        raise McpProtocolError(
+            -32602,
+            f"{name} must be a timezone-aware ISO-8601 timestamp",
+        )
+    return text
+
+
 READ_TOOLS = (
     {
         "name": "recall_related",
@@ -72,7 +90,7 @@ READ_TOOLS = (
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 100,
+                    "maximum": 20,
                     "default": 10,
                 },
                 "mains_only": {"type": "boolean", "default": False},
@@ -94,13 +112,14 @@ READ_TOOLS = (
             "properties": {
                 "query": {
                     "type": "string",
+                    "maxLength": 8192,
                     "description": "A natural-language question or search phrase.",
                 },
                 "filters": {"type": "object", "default": {}},
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 100,
+                    "maximum": 20,
                     "default": 10,
                 },
             },
@@ -120,10 +139,8 @@ READ_TOOLS = (
             "properties": {
                 "target": {"type": "string"},
                 "around": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 100,
-                    "default": 0,
+                    "type": "string",
+                    "format": "date-time",
                 },
                 "tail": {
                     "type": "integer",
@@ -163,20 +180,30 @@ WRITE_TOOLS = (
                 "body": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 1000000,
+                    "maxLength": 32000,
                 },
                 "occurred_at": {"type": "string", "format": "date-time"},
                 "tags": {
                     "type": "array",
                     "maxItems": 20,
                     "uniqueItems": True,
-                    "items": {"type": "string"},
+                    "items": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$",
+                    },
                 },
                 "provenance": {
                     "type": "object",
                     "additionalProperties": False,
                     "required": ["uri"],
-                    "properties": {"uri": {"type": "string"}},
+                    "properties": {
+                        "uri": {
+                            "type": "string",
+                            "format": "uri",
+                            "pattern": "^(?:https|manual|connector|export):",
+                        }
+                    },
                 },
             },
         },
@@ -230,14 +257,31 @@ def _call_tool(store, principal: dict, name: str, arguments: dict) -> dict:
     if name == "recall_search":
         _reject_extra(arguments, frozenset({"query", "filters", "limit"}))
         query = _string(arguments.get("query"), "query")
+        if len(query) > 8192:
+            raise McpProtocolError(-32602, "query must be at most 8192 characters")
         filters = _object(arguments.get("filters", {}), "filters")
-        limit = _integer(arguments.get("limit"), "limit", default=10, minimum=1)
+        limit = _integer(
+            arguments.get("limit"),
+            "limit",
+            default=10,
+            minimum=1,
+            maximum=20,
+        )
         return store.search(query, filters, limit, authorized_source)
     if name == "recall_show":
         _reject_extra(arguments, frozenset({"target", "around", "tail", "prompts"}))
         target = _string(arguments.get("target"), "target")
-        around = _integer(arguments.get("around"), "around", default=0, minimum=0)
+        around = (
+            _date_time(arguments["around"], "around")
+            if "around" in arguments
+            else None
+        )
         tail = _integer(arguments.get("tail"), "tail", default=0, minimum=0)
+        if around is not None and tail > 0:
+            raise McpProtocolError(
+                -32602,
+                "around and positive tail are mutually exclusive",
+            )
         prompts = _boolean(arguments.get("prompts"), "prompts")
         result = store.show(
             target,
@@ -256,7 +300,13 @@ def _call_tool(store, principal: dict, name: str, arguments: dict) -> dict:
         )
         cwd = _string(arguments.get("cwd"), "cwd", required=False)
         branch = _string(arguments.get("branch"), "branch", required=False)
-        limit = _integer(arguments.get("limit"), "limit", default=10, minimum=1)
+        limit = _integer(
+            arguments.get("limit"),
+            "limit",
+            default=10,
+            minimum=1,
+            maximum=20,
+        )
         mains_only = _boolean(arguments.get("mains_only"), "mains_only")
         fast = _boolean(arguments.get("fast"), "fast")
         return store.related(
