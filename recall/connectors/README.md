@@ -153,6 +153,35 @@ A provider failure changes only that job's backoff. Supervisor state and spools
 survive image restarts; an unchanged provider cycle advances a bounded private
 cycle generation without creating another acknowledged content version.
 
+### iMessage local snapshot
+
+`IMessageConnector` reads one explicitly selected Messages `chat.db` through a
+query-only SQLite transaction. It does not discover a home directory, attach to
+Messages, parse attachments or attributed-body archives, open a send surface,
+or modify the source database. The constructor probes the exact required table
+and column subset; an unsupported schema fails closed before any record is
+projected.
+
+Messages use hashed stable native and conversation IDs and become typed
+`communication_message.v1` records. Text, direction, sender, edit time, and
+service are selected explicitly. Only an upstream `is_deleted` marker becomes
+a tombstone; row or database absence never does. Each bounded sweep starts
+again after its ACK-gated terminal cursor, so edits to older rows converge
+without treating a local snapshot as an authoritative deletion list.
+
+The CLI requires an explicit database, private spool, source-scoped Brain
+authority, and `scrub` or `drop` privacy:
+
+```bash
+recall-brain imessage-sync \
+  --endpoint https://brain.example.invalid \
+  --source-id imessage:mac:host \
+  --keychain-service ai.parcha.recall \
+  --keychain-account imessage:mac:host \
+  --database "$HOME/Library/Messages/chat.db" \
+  --spool "$HOME/Library/Application Support/RecallBrain/state/imessage.db"
+```
+
 ```python
 from connectors.sdk import ConnectorPage, ConnectorRecord, ConnectorRunner
 

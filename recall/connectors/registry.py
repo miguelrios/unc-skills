@@ -678,6 +678,63 @@ REMOTE_API_REGISTRY = (
 )
 
 
+def _local_v3(
+    *,
+    connector_id: str,
+    command: str,
+    source_family: str,
+    record_kinds: list[str],
+    scopes: list[str],
+    selection_fields: list[str],
+    deletion_semantics: str,
+) -> ConnectorDefinitionV3:
+    return ConnectorDefinitionV3.from_mapping({
+        "schema_version": 3,
+        "connector_id": connector_id,
+        "command": command,
+        "mode": "pull",
+        "authority_slots": ["brain", "source"],
+        "source_family": source_family,
+        "record_kinds": record_kinds,
+        "placement": {
+            "execution": "source_local",
+            "acquisition": ["snapshot"],
+        },
+        "auth": {
+            "kind": "os_permission",
+            "minimum_scopes": scopes,
+        },
+        "sync": {
+            "backfill_modes": ["full", "incremental"],
+            "checkpoint": "ack_cursor",
+            "edit_semantics": "content_revision",
+            "deletion_semantics": deletion_semantics,
+            "reconciliation": True,
+        },
+        "policy": {
+            "visibility_modes": ["private"],
+            "privacy_modes": ["drop", "scrub"],
+            "default_privacy_mode": "scrub",
+            "retention_modes": ["source_controlled"],
+            "attachment_capability": False,
+        },
+        "selection_fields": selection_fields,
+    })
+
+
+LOCAL_MAC_REGISTRY = (
+    _local_v3(
+        connector_id="apple.imessage",
+        command="local-snapshot-sync",
+        source_family="communications",
+        record_kinds=["communication_message.v1"],
+        scopes=["macos.full_disk_access"],
+        selection_fields=["chat_ids", "date_max", "date_min"],
+        deletion_semantics="explicit_upstream",
+    ),
+)
+
+
 REGISTRY = (
     ConnectorDefinition.from_mapping({
         "schema_version": 1, "connector_id": "recall.capture", "command": "mcp-serve",
@@ -698,6 +755,7 @@ REGISTRY = (
         "checkpoint": "ack_cursor", "deletion": "explicit_receipt",
     }),
     *REMOTE_API_REGISTRY,
+    *LOCAL_MAC_REGISTRY,
 )
 def _index(items: tuple[Any, ...]) -> dict[str, Any]:
     result = {item.connector_id: item for item in items}

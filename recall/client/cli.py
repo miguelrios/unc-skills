@@ -28,6 +28,7 @@ from client.local_surfaces import (
 from connectors.cowork_local import CoworkLocalConnector
 from connectors.export_inbox import ExportInboxConnector
 from connectors.grep_ai import GrepAIConnector, load_private_api_key, validate_api_key
+from connectors.imessage import IMessageConnector
 from connectors.registry import (
     REGISTRY,
     ConnectorRegistryError,
@@ -206,6 +207,16 @@ def parser() -> argparse.ArgumentParser:
     _privacy(cowork, choices=("scrub", "drop"), default="scrub")
     cowork.add_argument("--root", required=True)
     cowork.add_argument("--spool", required=True)
+
+    imessage = commands.add_parser("imessage-sync")
+    _private_connection(imessage)
+    _privacy(imessage, choices=("scrub", "drop"), default="scrub")
+    imessage.add_argument("--database", required=True)
+    imessage.add_argument("--spool", required=True)
+    imessage.add_argument("--page-size", type=int, default=100)
+    imessage.add_argument("--chat-id", action="append", default=[])
+    imessage.add_argument("--date-min")
+    imessage.add_argument("--date-max")
 
     mac_status_parser = commands.add_parser("mac-status")
     mac_status_parser.add_argument(
@@ -543,6 +554,11 @@ def main() -> None:
             "grep.ai", visibility="private",
             privacy_mode=args.privacy_mode, authorities={"brain", "source"},
         )
+    elif args.command == "imessage-sync":
+        _registry_policy(
+            "apple.imessage", visibility="private",
+            privacy_mode=args.privacy_mode, authorities={"brain", "source"},
+        )
     token = _token(args)
     common = {
         "endpoint": args.endpoint,
@@ -551,7 +567,10 @@ def main() -> None:
         "principal_id": args.principal_id,
         "visibility": args.visibility,
     }
-    privacy = _privacy_policy(args) if args.command in {"collect", "cowork-local-sync", "export", "put", "export-inbox-sync", "mcp-serve", "grep-ai-sync"} else PrivacyPolicy(mode="off")
+    privacy = _privacy_policy(args) if args.command in {
+        "collect", "cowork-local-sync", "export", "put", "export-inbox-sync",
+        "mcp-serve", "grep-ai-sync", "imessage-sync",
+    } else PrivacyPolicy(mode="off")
     if args.command == "mcp-serve":
         backend = CaptureClient(**common, privacy=privacy)
         serve_mcp(
@@ -577,6 +596,23 @@ def main() -> None:
     elif args.command == "cowork-local-sync":
         connector = CoworkLocalConnector(
             root=Path(args.root), source_id=args.source_id,
+        )
+        runner = ConnectorRunner(
+            connector=connector, brain=BrainClient(**common),
+            spool_path=Path(args.spool), privacy=privacy,
+        )
+        try:
+            result = {"sync": runner.run_once(), "doctor": runner.doctor()}
+        finally:
+            runner.close()
+    elif args.command == "imessage-sync":
+        connector = IMessageConnector(
+            database=Path(args.database),
+            source_id=args.source_id,
+            page_size=args.page_size,
+            chat_ids=tuple(args.chat_id),
+            date_min=args.date_min,
+            date_max=args.date_max,
         )
         runner = ConnectorRunner(
             connector=connector, brain=BrainClient(**common),
