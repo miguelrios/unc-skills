@@ -14,6 +14,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 SERVER = ROOT / "recall/server"
+sys.path.insert(0, str(ROOT / "recall"))
 sys.path.insert(0, str(SERVER))
 
 from recall_server.app import Handler
