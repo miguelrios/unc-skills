@@ -848,6 +848,51 @@ PORTABLE_IMPORT_REGISTRY = (
         backfill_modes=["export"],
         reconciliation=False,
     ),
+    _local_v3(
+        connector_id="portable.slack",
+        command="slack-archive-sync",
+        source_family="communications",
+        record_kinds=["communication_message.v1"],
+        scopes=[],
+        selection_fields=[
+            "archive_id", "owner_identifiers", "removed_native_ids",
+        ],
+        deletion_semantics="explicit_owner",
+        acquisition=["import"],
+        auth_kind="selected_export",
+        backfill_modes=["export"],
+        reconciliation=False,
+    ),
+    _local_v3(
+        connector_id="portable.notion",
+        command="notion-archive-sync",
+        source_family="documents",
+        record_kinds=["document.v1"],
+        scopes=[],
+        selection_fields=[
+            "archive_id", "owner_identifiers", "removed_native_ids",
+        ],
+        deletion_semantics="explicit_owner",
+        acquisition=["import"],
+        auth_kind="selected_export",
+        backfill_modes=["export"],
+        reconciliation=False,
+    ),
+    _local_v3(
+        connector_id="portable.x",
+        command="x-archive-sync",
+        source_family="social",
+        record_kinds=["social_post.v1"],
+        scopes=[],
+        selection_fields=[
+            "archive_id", "owner_identifiers", "removed_native_ids",
+        ],
+        deletion_semantics="explicit_owner",
+        acquisition=["import"],
+        auth_kind="selected_export",
+        backfill_modes=["export"],
+        reconciliation=False,
+    ),
 )
 
 

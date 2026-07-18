@@ -43,6 +43,11 @@ from connectors.local_activity import (
     HermesSessionConnector,
 )
 from connectors.local_files import SelectedTextConnector
+from connectors.portable_archives import (
+    NotionArchiveConnector,
+    SlackArchiveConnector,
+    XArchiveConnector,
+)
 from connectors.portable_pim import (
     CalendarImportConnector,
     ContactImportConnector,
@@ -295,7 +300,10 @@ def parser() -> argparse.ArgumentParser:
     hermes.add_argument("--spool", required=True)
     hermes.add_argument("--page-size", type=int, default=500)
 
-    for command in ("mail-import-sync", "calendar-import-sync", "contact-import-sync"):
+    for command in (
+        "mail-import-sync", "calendar-import-sync", "contact-import-sync",
+        "slack-archive-sync", "notion-archive-sync", "x-archive-sync",
+    ):
         portable = commands.add_parser(command)
         _private_connection(portable)
         _privacy(portable, choices=("scrub", "drop"), default="scrub")
@@ -732,12 +740,16 @@ def main() -> None:
         )
     elif args.command in {
         "mail-import-sync", "calendar-import-sync", "contact-import-sync",
+        "slack-archive-sync", "notion-archive-sync", "x-archive-sync",
     }:
         _registry_policy(
             {
                 "mail-import-sync": "portable.mail",
                 "calendar-import-sync": "portable.calendar",
                 "contact-import-sync": "portable.contacts",
+                "slack-archive-sync": "portable.slack",
+                "notion-archive-sync": "portable.notion",
+                "x-archive-sync": "portable.x",
             }[args.command],
             visibility="private",
             privacy_mode=args.privacy_mode,
@@ -756,7 +768,8 @@ def main() -> None:
         "mcp-serve", "grep-ai-sync", "imessage-sync", "whatsapp-export-sync",
         "selected-text-sync", "browser-sync", "apple-notes-sync",
         "hermes-session-sync", "mail-import-sync", "calendar-import-sync",
-        "contact-import-sync",
+        "contact-import-sync", "slack-archive-sync", "notion-archive-sync",
+        "x-archive-sync",
     } else PrivacyPolicy(mode="off")
     if args.command == "mcp-serve":
         backend = CaptureClient(**common, privacy=privacy)
@@ -897,11 +910,15 @@ def main() -> None:
             runner.close()
     elif args.command in {
         "mail-import-sync", "calendar-import-sync", "contact-import-sync",
+        "slack-archive-sync", "notion-archive-sync", "x-archive-sync",
     }:
         connector_type = {
             "mail-import-sync": MailImportConnector,
             "calendar-import-sync": CalendarImportConnector,
             "contact-import-sync": ContactImportConnector,
+            "slack-archive-sync": SlackArchiveConnector,
+            "notion-archive-sync": NotionArchiveConnector,
+            "x-archive-sync": XArchiveConnector,
         }[args.command]
         connector = connector_type(
             path=Path(args.input),
