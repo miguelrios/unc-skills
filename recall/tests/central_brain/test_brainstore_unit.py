@@ -163,6 +163,14 @@ class SchemaMigrationContractTest(unittest.TestCase):
         self.assertIn("candidate.role='assistant'", implementation)
         self.assertNotIn("NOT EXISTS", implementation)
 
+    def test_webhook_privacy_is_host_owned_credential_state(self) -> None:
+        migration = SERVER / "schema" / "018_webhook_credentials.sql"
+        rendered = " ".join(migration.read_text().split()).casefold()
+        self.assertIn(
+            "add column if not exists webhook_privacy_mode text",
+            rendered,
+        )
+
     def test_managed_upgrade_documents_split_role_grant_refresh(self) -> None:
         guide = " ".join(
             (SERVER / "deploy" / "README.md").read_text().split()
@@ -807,6 +815,46 @@ class AdminCliSafetyTest(unittest.TestCase):
                 None,
                 ["read", "write"],
                 principal_id="synthetic-owner",
+            )
+        store.connect.assert_not_called()
+
+    def test_webhook_credentials_require_source_principal_and_privacy(self) -> None:
+        store = BrainStore("postgresql://synthetic.invalid/recall")
+        store.connect = mock.MagicMock()
+        invalid = (
+            (None, "synthetic-owner", "scrub"),
+            ("synthetic:webhook", None, "scrub"),
+            ("synthetic:webhook", "synthetic-owner", None),
+            ("synthetic:webhook", "synthetic-owner", "off"),
+        )
+        for source_id, principal_id, privacy_mode in invalid:
+            with self.subTest(
+                source_id=source_id,
+                principal_id=principal_id,
+                privacy_mode=privacy_mode,
+            ), self.assertRaisesRegex(ValueError, "invalid webhook credential"):
+                store.create_collector_token(
+                    "synthetic-webhook",
+                    source_id,
+                    ["webhook"],
+                    principal_id=principal_id,
+                    webhook_privacy_mode=privacy_mode,
+                )
+        with self.assertRaisesRegex(ValueError, "invalid webhook credential"):
+            store.create_collector_token(
+                "synthetic-read",
+                "synthetic:webhook",
+                ["read"],
+                principal_id="synthetic-owner",
+                webhook_privacy_mode="scrub",
+            )
+        with self.assertRaisesRegex(ValueError, "invalid webhook credential"):
+            store.create_collector_token(
+                "synthetic-combined",
+                "synthetic:webhook",
+                ["read", "webhook"],
+                principal_id="synthetic-owner",
+                webhook_privacy_mode="scrub",
             )
         store.connect.assert_not_called()
 

@@ -151,8 +151,9 @@ class BrainStore:
         *,
         principal_id: str | None = None,
         capture_origin: str | None = None,
+        webhook_privacy_mode: str | None = None,
     ) -> dict:
-        allowed = {"read", "write", "metrics"}
+        allowed = {"read", "write", "metrics", "webhook"}
         if not name or not scopes or set(scopes) - allowed:
             raise ValueError("invalid collector credential")
         if "write" in scopes and not source_id:
@@ -164,6 +165,16 @@ class BrainStore:
             or not CAPTURE_ORIGIN_RE.fullmatch(capture_origin)
         ):
             raise ValueError("invalid capture credential")
+        if (
+            ("webhook" in scopes)
+            != (
+                bool(source_id)
+                and bool(principal_id)
+                and webhook_privacy_mode in {"scrub", "drop"}
+            )
+            or ("webhook" in scopes and set(scopes) != {"webhook"})
+        ):
+            raise ValueError("invalid webhook credential")
         plaintext = "rcl_" + secrets.token_urlsafe(32)
         digest = hashlib.sha256(plaintext.encode()).hexdigest()
         credential_id = uuid.uuid4()
@@ -171,8 +182,8 @@ class BrainStore:
             conn.execute(
                 """INSERT INTO collector_credentials(
                        id,name,token_sha256,source_id,scopes,principal_id,
-                       capture_origin
-                   ) VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+                       capture_origin,webhook_privacy_mode
+                   ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
                 (
                     credential_id,
                     name,
@@ -181,6 +192,7 @@ class BrainStore:
                     scopes,
                     principal_id,
                     capture_origin,
+                    webhook_privacy_mode,
                 ),
             )
             conn.execute(
@@ -191,6 +203,7 @@ class BrainStore:
                     "source_id": source_id,
                     "principal_id": principal_id,
                     "capture_origin": capture_origin,
+                    "webhook_privacy_mode": webhook_privacy_mode,
                     "scopes": scopes,
                 }),),
             )
@@ -201,6 +214,7 @@ class BrainStore:
             "source_id": source_id,
             "principal_id": principal_id,
             "capture_origin": capture_origin,
+            "webhook_privacy_mode": webhook_privacy_mode,
             "scopes": scopes,
         }
 
@@ -315,12 +329,15 @@ class BrainStore:
         digest = hashlib.sha256(plaintext.encode()).hexdigest()
         with self.connect() as conn:
             row = conn.execute(
-                """SELECT id,name,source_id,principal_id,capture_origin,scopes
+                """SELECT id,name,source_id,principal_id,capture_origin,
+                          webhook_privacy_mode,scopes
                    FROM collector_credentials
                    WHERE token_sha256=%s AND revoked_at IS NULL""",
                 (digest,),
             ).fetchone()
             if not row or required_scope not in row["scopes"]:
+                return None
+            if required_scope == "webhook" and set(row["scopes"]) != {"webhook"}:
                 return None
             return row
 
