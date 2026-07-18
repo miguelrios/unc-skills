@@ -4,14 +4,14 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILL = ROOT / "skills" / "selfqa" / "SKILL.md"
+SKILL = ROOT / "skills" / "autoqa" / "SKILL.md"
 
 
 class SelfqaPackageTest(unittest.TestCase):
     def test_skill_has_required_frontmatter(self):
         text = SKILL.read_text()
         self.assertTrue(text.startswith("---\n"))
-        self.assertRegex(text, r"(?m)^name: selfqa$")
+        self.assertRegex(text, r"(?m)^name: autoqa$")
         self.assertRegex(text, r"(?m)^description: .+")
 
     def test_referenced_files_ship(self):

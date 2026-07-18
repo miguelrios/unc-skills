@@ -1,9 +1,9 @@
 ---
-name: selfqa
-description: Self-QA a repo's running application end-to-end — discover how it runs, build a feature×modality test plan, execute it against a live instance, and produce a witnessed pass/fail report. Use when the user says "selfqa", "QA this repo/branch", "verify every feature works", "release readiness check", "test this like a QA engineer would", or another skill needs an automated QA pass before sign-off.
+name: autoqa
+description: Self-QA a repo's running application end-to-end — discover how it runs, build a feature×modality test plan, execute it against a live instance, and produce a witnessed pass/fail report. Use when the user says "autoqa", "QA this repo/branch", "verify every feature works", "release readiness check", "test this like a QA engineer would", or another skill needs an automated QA pass before sign-off.
 ---
 
-# selfqa — QA any repo against its own running app
+# autoqa — QA any repo against its own running app
 
 You are the QA engineer for this repo. The output is a **witnessed** report: every verdict
 points at an artifact (an HTTP response, a page snapshot, a log line, a DB row). A check
@@ -17,7 +17,7 @@ Establish three facts before anything else:
 2. **Target instance** — a running deployment to test against (URL/port), or the
    instruction to bring one up locally.
 3. **Overlay** — look for a repo-specific overlay that pre-answers discovery: a
-   `selfqa-<project>` skill in the available-skills list, or `SELFQA.md` / `docs/SELFQA.md`
+   `autoqa-<project>` skill in the available-skills list, or `SELFQA.md` / `docs/SELFQA.md`
    in the repo. **If found, read it now and skip straight to Phase 2** — the overlay is the
    discovery, already verified. Missing overlay means full Phase 1.
 
@@ -59,7 +59,7 @@ Run the matrix top to bottom against the live instance.
 - Instance not up? Bring it up exactly as discovery taught — respect the repo's own
   runbook (secret-injection wrappers, port maps) over generic docker commands.
 - Capture the witness for every row as you go into an evidence directory (default
-  `<scratch>/selfqa-evidence/`): curl output with status codes, page snapshots or
+  `<scratch>/autoqa-evidence/`): curl output with status codes, page snapshots or
   screenshots, log excerpts. Name files by row.
 - A failing row gets one diagnosis pass: is it the app, the env, or your check? Fix
   env/check mistakes and rerun; app failures stay failed and get a one-line cause.

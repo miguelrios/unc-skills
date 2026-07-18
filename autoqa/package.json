@@ -1,5 +1,5 @@
 {
-  "name": "@parcha/selfqa",
+  "name": "@parcha/autoqa",
   "version": "0.1.0",
   "description": "Self-QA any repo end-to-end: discover how it runs, plan a feature test matrix, execute against a live instance, report with witnesses",
   "files": [
@@ -17,7 +17,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/miguelrios/unc-skills.git",
-    "directory": "selfqa"
+    "directory": "autoqa"
   },
   "keywords": ["agent-skills", "claude-code", "codex", "pi-package", "qa", "e2e-testing"],
   "pi": { "skills": ["./skills"] },

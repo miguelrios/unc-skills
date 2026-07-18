@@ -1,7 +1,7 @@
-# selfqa report template
+# autoqa report template
 
 ```markdown
-# selfqa report — <repo> @ <branch/commit> on <instance>
+# autoqa report — <repo> @ <branch/commit> on <instance>
 
 **Date:** <iso date>  **Instance:** <url>  **Evidence:** <evidence dir>
 

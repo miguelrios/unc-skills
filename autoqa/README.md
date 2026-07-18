@@ -1,9 +1,9 @@
-# selfqa
+# autoqa
 
 Point it at a repo; it QAs the running app like an engineer would.
 
 1. **RESOLVE** — target repo, target instance, and an optional repo-specific overlay
-   (`selfqa-<project>` skill or `SELFQA.md`) that pre-answers discovery.
+   (`autoqa-<project>` skill or `SELFQA.md`) that pre-answers discovery.
 2. **DISCOVER** — read what the repo already says about itself (CLAUDE.md/AGENTS.md,
    feature-spec docs, compose files, env samples, CI) to learn run, auth, and the feature
    inventory.
