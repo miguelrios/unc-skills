@@ -215,6 +215,32 @@ def main() -> None:
     )
     assert adjacent["results"][0]["native_id"] == "answer", adjacent
     assert "answer" in adjacent["results"][0]["legs"]
+    with store.connect() as connection:
+        anchor = connection.execute(
+            """SELECT occurred_at,id FROM items
+               WHERE source_id='source-h' AND event_native_id='question'"""
+        ).fetchone()
+        connection.execute("SET LOCAL enable_seqscan=off")
+        plan = connection.execute(
+            """EXPLAIN (FORMAT JSON)
+               SELECT id FROM items
+               WHERE source_id='source-h'
+                 AND session_native_id='session-h'
+                 AND deleted_at IS NULL
+                 AND role=%s
+                 AND (occurred_at,id)>(%s,%s)
+               ORDER BY occurred_at,id
+               LIMIT 1""",
+            ("user", anchor["occurred_at"], anchor["id"]),
+        ).fetchone()["QUERY PLAN"][0]["Plan"]
+
+        def index_names(node):
+            names = {node["Index Name"]} if "Index Name" in node else set()
+            for child in node.get("Plans", []):
+                names.update(index_names(child))
+            return names
+
+        assert "items_live_turn_role_time_idx" in index_names(plan), plan
     bounded_answer = store.search(
         "remind me what we chose for the orchard premise",
         {"until": "2026-07-16T00:01:30Z"}, 5,
@@ -359,6 +385,7 @@ def main() -> None:
     assert recovered_claim["processed"] == 1
     print(json.dumps({
         "status": "pass", "semantic_hit": 1, "answer_adjacency_hit": 1,
+        "answer_turn_index_used": 1,
         "unauthorized_hits": 0,
         "first_backfill": first["processed"] + remaining["processed"],
         "idempotent_replay": second["processed"], "source_scoped_replay": 0,

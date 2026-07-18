@@ -1124,6 +1124,17 @@ class BrainStore:
               SELECT value.lexical_rank,value.anchor_tier,value.anchor_order,response.id
               FROM anchors value
               JOIN items anchor ON anchor.id=value.anchor_id
+              LEFT JOIN LATERAL (
+                SELECT boundary.occurred_at,boundary.id
+                FROM items boundary
+                WHERE boundary.source_id=anchor.source_id
+                  AND boundary.session_native_id=anchor.session_native_id
+                  AND boundary.deleted_at IS NULL
+                  AND boundary.role='user'
+                  AND (boundary.occurred_at,boundary.id)>(anchor.occurred_at,anchor.id)
+                ORDER BY boundary.occurred_at,boundary.id
+                LIMIT 1
+              ) next_user ON true
               JOIN LATERAL (
                 SELECT candidate.id
                 FROM items candidate
@@ -1135,14 +1146,10 @@ class BrainStore:
                   AND (candidate.occurred_at,candidate.id)>(anchor.occurred_at,anchor.id)
                   AND (%s::timestamptz IS NULL OR candidate.occurred_at >= %s::timestamptz)
                   AND (%s::timestamptz IS NULL OR candidate.occurred_at <= %s::timestamptz)
-                  AND NOT EXISTS (
-                    SELECT 1 FROM items boundary
-                    WHERE boundary.source_id=anchor.source_id
-                      AND boundary.session_native_id=anchor.session_native_id
-                      AND boundary.deleted_at IS NULL
-                      AND boundary.role='user'
-                      AND (boundary.occurred_at,boundary.id)>(anchor.occurred_at,anchor.id)
-                      AND (boundary.occurred_at,boundary.id)<(candidate.occurred_at,candidate.id)
+                  AND (
+                    next_user.id IS NULL
+                    OR (candidate.occurred_at,candidate.id)
+                       <(next_user.occurred_at,next_user.id)
                   )
                 ORDER BY candidate.occurred_at DESC,candidate.id DESC
                 LIMIT 1
