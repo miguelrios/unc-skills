@@ -228,7 +228,8 @@ class LiveProviderAdapterTest(unittest.TestCase):
         self.assertEqual(details["healthCheckPath"], "/readyz")
         self.assertEqual(
             details["envSpecificDetails"]["dockerCommand"],
-            "serve --host 0.0.0.0 --port 10000 --require-auth "
+            "python -m recall_server.cli serve "
+            "--host 0.0.0.0 --port 10000 --require-auth "
             "--capability-profile production",
         )
         self.assertNotIn("dockerCommand", details)
