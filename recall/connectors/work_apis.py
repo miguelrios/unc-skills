@@ -636,6 +636,51 @@ def notion_rail(*, authority_path: Path, **options: Any) -> BoundedJsonRail:
     )
 
 
+X_TWEET_FIELDS = (
+    "author_id,conversation_id,created_at,edit_history_tweet_ids,"
+    "public_metrics,referenced_tweets"
+)
+
+
+def x_rail(*, authority_path: Path, **options: Any) -> BoundedJsonRail:
+    common = {
+        "path_fields": ("user_id",),
+        "fixed_query": {"tweet.fields": X_TWEET_FIELDS},
+    }
+    return BoundedJsonRail(
+        origin="https://api.x.com",
+        authority_path=authority_path,
+        authorization_scheme="Bearer",
+        operations={
+            "bookmarks.list": RemoteOperation(
+                method="GET",
+                path_template="/2/users/{user_id}/bookmarks",
+                query_fields=("max_results", "pagination_token"),
+                **common,
+            ),
+            "home.list": RemoteOperation(
+                method="GET",
+                path_template="/2/users/{user_id}/timelines/reverse_chronological",
+                query_fields=("max_results", "pagination_token", "since_id"),
+                **common,
+            ),
+            "mentions.list": RemoteOperation(
+                method="GET",
+                path_template="/2/users/{user_id}/mentions",
+                query_fields=("max_results", "pagination_token", "since_id"),
+                **common,
+            ),
+            "own.list": RemoteOperation(
+                method="GET",
+                path_template="/2/users/{user_id}/tweets",
+                query_fields=("max_results", "pagination_token", "since_id"),
+                **common,
+            ),
+        },
+        **options,
+    )
+
+
 def _notion_title(properties: Any) -> str:
     if not isinstance(properties, dict):
         return "Untitled"
@@ -748,4 +793,5 @@ __all__ = [
     "linear_rail",
     "notion_rail",
     "slack_rail",
+    "x_rail",
 ]

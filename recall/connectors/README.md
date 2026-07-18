@@ -107,6 +107,21 @@ Factories such as `github_rail(authority_path=...)` read a token lazily from the
 same strict mode-0600 authority file contract. Provider tokens, selectors, raw
 payloads, cursors, and exception details never enter previews or health output.
 
+### X activity
+
+The X adapter can poll bookmarks, mentions, authored posts, and the reverse
+chronological home timeline using OAuth user context. Stream selection is
+explicit and closed; the home timeline is never enabled as a default. Authored,
+mention, and home streams have independent inclusive `since_id` watermarks.
+Bookmarks, whose API has no `since_id`, reconcile by bounded pagination and the
+acknowledged-record ledger. Every stream keeps its own opaque page token, and
+the adapter requests only immutable code-owned post fields.
+
+Posts become `social_post.v1` revisions with stream-qualified identities.
+Removing a bookmark, deleting a post, or losing visibility is not inferred from
+list absence and therefore does not create a tombstone. Partial provider error
+responses fail the page without advancing any stream watermark.
+
 ```python
 from connectors.sdk import ConnectorPage, ConnectorRecord, ConnectorRunner
 

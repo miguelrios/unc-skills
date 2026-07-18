@@ -335,6 +335,51 @@ class RemoteApiRailTest(unittest.TestCase):
         self.assertTrue(body["query"].startswith("query RecallIssues"))
         self.assertEqual(body["variables"], {"after": "synthetic-cursor"})
 
+    def test_fixed_query_is_code_owned_and_disjoint_from_runtime_query(self):
+        captured = []
+
+        def opener(request, *, timeout):
+            captured.append(request)
+            return _Response(b'{"data":[],"meta":{}}')
+
+        with tempfile.TemporaryDirectory() as directory:
+            secret = self.private_secret(Path(directory))
+            rail = BoundedJsonRail(
+                origin="https://api.x.com",
+                authority_path=secret,
+                authorization_scheme="Bearer",
+                operations={
+                    "posts.list": RemoteOperation(
+                        method="GET",
+                        path_template="/2/users/{user_id}/tweets",
+                        path_fields=("user_id",),
+                        query_fields=("pagination_token", "since_id"),
+                        fixed_query={
+                            "tweet.fields": "author_id,conversation_id,created_at",
+                        },
+                    ),
+                },
+                opener=opener,
+            )
+            rail.request(
+                "posts.list",
+                path={"user_id": "123"},
+                query={"since_id": "456"},
+            )
+        self.assertEqual(
+            captured[0].full_url,
+            "https://api.x.com/2/users/123/tweets?"
+            "tweet.fields=author_id%2Cconversation_id%2Ccreated_at&since_id=456",
+        )
+        with self.assertRaisesRegex(ValueError, "invalid fixed query"):
+            RemoteOperation(
+                method="GET",
+                path_template="/2/users/{user_id}/tweets",
+                path_fields=("user_id",),
+                query_fields=("since_id",),
+                fixed_query={"since_id": "not-runtime-owned"},
+            )
+
     def test_redirect_rate_limit_content_type_and_response_size_fail_closed(self):
         operation = RemoteOperation(
             method="GET",

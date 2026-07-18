@@ -45,7 +45,7 @@ def main() -> None:
         "linear.activity": "e2e_work_api_connectors.py",
         "slack.messages": "e2e_work_api_connectors.py",
         "notion.workspace": "e2e_work_api_connectors.py",
-        "x.activity": "e2e_remote_api_foundation.py",
+        "x.activity": "e2e_x_connector.py",
     }
     results = {}
     for item in REGISTRY:

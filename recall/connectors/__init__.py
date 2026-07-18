@@ -49,7 +49,9 @@ from .work_apis import (
     linear_rail,
     notion_rail,
     slack_rail,
+    x_rail,
 )
+from .x_activity import XActivityConnector
 from .supervisor import (
     ConnectorSupervisor,
     ScheduleDefinition,
@@ -101,6 +103,8 @@ __all__ = [
     "linear_rail",
     "notion_rail",
     "slack_rail",
+    "x_rail",
+    "XActivityConnector",
     "ConnectorSupervisor",
     "ScheduleDefinition",
     "ScheduledJob",
