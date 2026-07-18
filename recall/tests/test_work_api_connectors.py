@@ -8,7 +8,6 @@ from collections import defaultdict, deque
 from pathlib import Path
 
 from connectors.sdk import (
-    ConnectorContractError,
     ConnectorRunError,
     ConnectorRunner,
     ConnectorUpstreamError,
