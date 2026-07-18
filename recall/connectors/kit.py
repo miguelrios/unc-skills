@@ -25,6 +25,15 @@ from connectors.sdk import (
     PullConnector,
 )
 from connectors.remote_api import BoundedJsonRail, RemoteApiError, RemoteOperation
+from connectors.managed_auth import (
+    ManagedAuthConnector,
+    ManagedPage,
+    ManagedProjection,
+    ManagedRecord,
+    ManagedTransport,
+    ManagedWakeup,
+    verify_nango_wakeup,
+)
 
 
 CONNECTOR_KIT_API_VERSION = "recall.connector-kit.v1"
@@ -112,6 +121,13 @@ __all__ = [
     "BoundedJsonRail",
     "RemoteApiError",
     "RemoteOperation",
+    "ManagedAuthConnector",
+    "ManagedPage",
+    "ManagedProjection",
+    "ManagedRecord",
+    "ManagedTransport",
+    "ManagedWakeup",
+    "verify_nango_wakeup",
     "decode_page_wire",
     "encode_page_wire",
 ]

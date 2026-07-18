@@ -65,6 +65,7 @@ jobs:
             e2e_portable_pim_imports.py \
             e2e_portable_service_archives.py \
             e2e_feed_and_jsonl_connectors.py \
+            e2e_managed_auth_adapter.py \
             e2e_public_mcp_principal.py \
             e2e_remote_worker.py \
             e2e_workspace_rail.py \
