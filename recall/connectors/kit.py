@@ -24,6 +24,7 @@ from connectors.sdk import (
     ConnectorUpstreamError,
     PullConnector,
 )
+from connectors.remote_api import BoundedJsonRail, RemoteApiError, RemoteOperation
 
 
 CONNECTOR_KIT_API_VERSION = "recall.connector-kit.v1"
@@ -108,6 +109,9 @@ __all__ = [
     "ConnectorSync",
     "ConnectorUpstreamError",
     "PullConnector",
+    "BoundedJsonRail",
+    "RemoteApiError",
+    "RemoteOperation",
     "decode_page_wire",
     "encode_page_wire",
 ]

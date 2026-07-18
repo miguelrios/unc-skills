@@ -33,6 +33,7 @@ from .conformance import (
     render_conformance_report,
     run_connector_conformance,
 )
+from .remote_api import BoundedJsonRail, RemoteApiError, RemoteOperation
 from .supervisor import (
     ConnectorSupervisor,
     ScheduleDefinition,
@@ -69,6 +70,9 @@ __all__ = [
     "ConformanceReport",
     "render_conformance_report",
     "run_connector_conformance",
+    "BoundedJsonRail",
+    "RemoteApiError",
+    "RemoteOperation",
     "ConnectorSupervisor",
     "ScheduleDefinition",
     "ScheduledJob",
