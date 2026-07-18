@@ -174,3 +174,11 @@ agent. Cleanup is unconditional and precedes the final static-egress choice.
   61/61 cells, all six fake-success mutants were rejected, and the full 386-Python/3-Node gate
   passed. Criterion mapping and bound accounting are in
   `docs/evidence/l0-contract-truth-conformance/EXIT.md`. Exit triggered L1.
+- **2026-07-18 — L1 AT_BOUND:** Response bounding merged in PR #84 and canonical capture receipts
+  merged in PR #85. Their exact immutable image passed 62/62 real-data cells below the Render
+  network boundary, including 5/5 private questions and 17/17 receipt resolution. Render could
+  not establish the PlanetScale connection during the IPv4-only proof window, so the public
+  matrix did not rerun and L2 did not start. The allowlist, roles, credentials, Render
+  configuration, suspension state, and private proof material were restored or destroyed as
+  applicable. Criterion mapping and the human network gate are in
+  `docs/evidence/l1-reversible-public-direct-mcp/EXIT.md`.
