@@ -7,7 +7,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from connectors.host import ConnectorHostConfig, ConnectorHostError, HOSTED_FACTORIES, build_host
+from connectors.host import (
+    ConnectorHostConfig,
+    ConnectorHostError,
+    HOSTED_FACTORIES,
+    REMOTE_SELECTOR_FIELDS,
+    build_host,
+)
+from connectors.registry import definition
 from connectors.remote_worker import (
     REMOTE_WORKER_CONNECTORS,
     preview_remote_worker_config,
@@ -87,6 +94,14 @@ def config(root: Path) -> dict:
 
 
 class RemoteWorkerConfigTest(unittest.TestCase):
+    def test_registry_selectors_exactly_match_the_shipped_worker_config(self):
+        self.assertEqual(set(REMOTE_WORKER_CONNECTORS), set(REMOTE_SELECTOR_FIELDS))
+        for connector_id in REMOTE_WORKER_CONNECTORS:
+            self.assertEqual(
+                set(definition(connector_id).selection_fields),
+                REMOTE_SELECTOR_FIELDS[connector_id],
+            )
+
     def test_nine_remote_jobs_preview_without_authority_source_network_or_writes(self):
         with tempfile.TemporaryDirectory() as directory:
             value = ConnectorHostConfig.from_mapping(config(Path(directory)))

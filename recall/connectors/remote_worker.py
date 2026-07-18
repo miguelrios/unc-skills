@@ -11,18 +11,17 @@ from connectors.host import (
     run_host_daemon,
     run_host_once,
 )
+from connectors.registry import REGISTRY, ConnectorDefinitionV3
 
 
-REMOTE_WORKER_CONNECTORS = (
-    "google.gmail",
-    "google.calendar",
-    "google.contacts",
-    "google.drive",
-    "github.activity",
-    "linear.activity",
-    "slack.messages",
-    "notion.workspace",
-    "x.activity",
+REMOTE_WORKER_CONNECTORS = tuple(
+    item.connector_id
+    for item in REGISTRY
+    if (
+        isinstance(item, ConnectorDefinitionV3)
+        and item.mode == "pull"
+        and item.execution_placement == "remote_worker"
+    )
 )
 
 

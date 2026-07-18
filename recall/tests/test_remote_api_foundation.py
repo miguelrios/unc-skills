@@ -129,7 +129,8 @@ class RemoteRegistryTest(unittest.TestCase):
 
     def test_x_home_timeline_is_selectable_but_not_implicitly_enabled(self):
         item = definition("x.activity")
-        self.assertIn("include_home_timeline", item.selection_fields)
+        self.assertIn("streams", item.selection_fields)
+        self.assertNotIn("home", item.to_public())
         self.assertNotIn("defaults", item.to_public())
         self.assertNotIn("enabled", item.to_public())
 

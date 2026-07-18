@@ -587,67 +587,69 @@ def _remote_v3(
 REMOTE_API_REGISTRY = (
     _remote_v3(
         connector_id="google.gmail",
-        command="workspace-sync",
+        command="remote-worker-run",
         source_family="communications",
         record_kinds=["communication_message.v1"],
         acquisition=["poll"],
         auth_kind="oauth2",
         scopes=["https://www.googleapis.com/auth/gmail.readonly"],
-        selection_fields=["account", "include_spam_trash", "label_ids", "query"],
+        selection_fields=[
+            "include_spam_trash", "label_ids", "own_addresses", "query",
+        ],
     ),
     _remote_v3(
         connector_id="google.calendar",
-        command="workspace-sync",
+        command="remote-worker-run",
         source_family="schedule",
         record_kinds=["calendar_event.v1"],
         acquisition=["poll"],
         auth_kind="oauth2",
         scopes=["https://www.googleapis.com/auth/calendar.readonly"],
-        selection_fields=["account", "calendar_ids", "time_max", "time_min"],
+        selection_fields=["calendar_id", "time_max", "time_min"],
     ),
     _remote_v3(
         connector_id="google.contacts",
-        command="workspace-sync",
+        command="remote-worker-run",
         source_family="contacts",
         record_kinds=["contact_identity.v1"],
         acquisition=["poll"],
         auth_kind="oauth2",
         scopes=["https://www.googleapis.com/auth/contacts.readonly"],
-        selection_fields=["account"],
+        selection_fields=[],
     ),
     _remote_v3(
         connector_id="google.drive",
-        command="workspace-sync",
+        command="remote-worker-run",
         source_family="documents",
         record_kinds=["document.v1"],
         acquisition=["poll"],
         auth_kind="oauth2",
         scopes=["https://www.googleapis.com/auth/drive.readonly"],
-        selection_fields=["account", "drive_ids", "mime_types"],
+        selection_fields=["drive_id", "include_document_text", "mime_types"],
     ),
     _remote_v3(
         connector_id="github.activity",
-        command="remote-api-sync",
+        command="remote-worker-run",
         source_family="work_activity",
         record_kinds=["document.v1"],
         acquisition=["poll"],
         auth_kind="api_token",
         scopes=["contents:read", "issues:read", "metadata:read", "pull_requests:read"],
-        selection_fields=["account", "organizations", "repositories"],
+        selection_fields=["owner", "repository"],
     ),
     _remote_v3(
         connector_id="linear.activity",
-        command="remote-api-sync",
+        command="remote-worker-run",
         source_family="work_activity",
         record_kinds=["document.v1"],
         acquisition=["poll", "webhook"],
         auth_kind="oauth2",
         scopes=["read"],
-        selection_fields=["account", "teams"],
+        selection_fields=["team_id"],
     ),
     _remote_v3(
         connector_id="slack.messages",
-        command="remote-api-sync",
+        command="remote-worker-run",
         source_family="communications",
         record_kinds=["communication_message.v1"],
         acquisition=["poll"],
@@ -659,33 +661,27 @@ REMOTE_API_REGISTRY = (
             "groups:read",
             "users:read",
         ],
-        selection_fields=["account", "channels"],
+        selection_fields=["channel_id"],
     ),
     _remote_v3(
         connector_id="notion.workspace",
-        command="remote-api-sync",
+        command="remote-worker-run",
         source_family="documents",
         record_kinds=["document.v1"],
         acquisition=["poll"],
         auth_kind="oauth2",
         scopes=["read_content"],
-        selection_fields=["account", "data_sources", "pages"],
+        selection_fields=[],
     ),
     _remote_v3(
         connector_id="x.activity",
-        command="remote-api-sync",
+        command="remote-worker-run",
         source_family="social",
         record_kinds=["social_post.v1"],
         acquisition=["poll"],
         auth_kind="oauth2",
         scopes=["bookmark.read", "offline.access", "tweet.read", "users.read"],
-        selection_fields=[
-            "account",
-            "include_bookmarks",
-            "include_home_timeline",
-            "include_mentions",
-            "include_own_posts",
-        ],
+        selection_fields=["streams", "user_id"],
     ),
 )
 
@@ -741,7 +737,7 @@ def _local_v3(
 LOCAL_MAC_REGISTRY = (
     _local_v3(
         connector_id="apple.imessage",
-        command="local-snapshot-sync",
+        command="imessage-sync",
         source_family="communications",
         record_kinds=["communication_message.v1"],
         scopes=["macos.full_disk_access"],
@@ -750,7 +746,7 @@ LOCAL_MAC_REGISTRY = (
     ),
     _local_v3(
         connector_id="whatsapp.export",
-        command="local-export-sync",
+        command="whatsapp-export-sync",
         source_family="communications",
         record_kinds=["communication_message.v1"],
         scopes=[],
@@ -765,7 +761,7 @@ LOCAL_MAC_REGISTRY = (
     ),
     _local_v3(
         connector_id="local.selected-text",
-        command="local-file-sync",
+        command="selected-text-sync",
         source_family="documents",
         record_kinds=["document.v1"],
         scopes=["macos.user_selected_files"],
@@ -963,7 +959,7 @@ REGISTRY = (
     ConnectorDefinitionV3.from_mapping({
         "schema_version": 3,
         "connector_id": "custom.webhook",
-        "command": "webhook-serve",
+        "command": "serve",
         "mode": "push",
         "authority_slots": ["brain", "source"],
         "source_family": "deliberate_capture",
@@ -1049,7 +1045,78 @@ def preview() -> dict[str, Any]:
     }
 
 
-def _catalog_entry(item: ConnectorDefinition) -> tuple[str, dict[str, Any]]:
+def activation_surface(
+    item: ConnectorDefinition | ConnectorDefinitionV3,
+) -> dict[str, str]:
+    """Map a registered connector to its concrete shipped activation surface."""
+
+    if isinstance(item, ConnectorDefinitionV3):
+        if item.mode == "push":
+            runtime, package, contract, lifecycle = (
+                "public_edge",
+                "recall-core",
+                "webhook-credential-v1",
+                "server_credential",
+            )
+        elif item.execution_placement == "remote_worker":
+            runtime, package, contract, lifecycle = (
+                "remote_worker",
+                "recall-remote-worker",
+                "connector-host-v1",
+                "supervised_job",
+            )
+        elif (
+            item.execution_placement == "either"
+            or item.connector_id.startswith("portable.")
+        ):
+            runtime, package, contract, lifecycle = (
+                "portable_runner",
+                "recall-brain",
+                "selected-input-v1",
+                "explicit_import",
+            )
+        else:
+            runtime, package, contract, lifecycle = (
+                "mac_utility",
+                "recall-brain-macos",
+                "selected-local-source-v1",
+                "scheduled_source",
+            )
+    elif item.mode == "push":
+        runtime, package, contract, lifecycle = (
+            "mcp_host",
+            "recall-brain",
+            "mcp-host-profile-v1",
+            "host_credential",
+        )
+    elif item.authority_slots == ("brain",):
+        runtime, package, contract, lifecycle = (
+            "mac_utility",
+            "recall-brain-macos",
+            "selected-export-v1",
+            "scheduled_source",
+        )
+    else:
+        runtime, package, contract, lifecycle = (
+            "connector_supervisor",
+            "recall-brain",
+            "connector-host-v1",
+            "supervised_job",
+        )
+    return {
+        "connector_id": item.connector_id,
+        "runtime": runtime,
+        "package": package,
+        "entrypoint": item.command,
+        "config_contract": contract,
+        "lifecycle": lifecycle,
+        "implementation": "available",
+    }
+
+
+def _catalog_entry(
+    item: ConnectorDefinition | ConnectorDefinitionV3,
+) -> tuple[str, dict[str, Any]]:
     if isinstance(item, ConnectorDefinitionV3):
         if item.execution_placement == "remote_worker":
             group = "remote"
@@ -1060,7 +1127,7 @@ def _catalog_entry(item: ConnectorDefinition) -> tuple[str, dict[str, Any]]:
             group = "portable"
         else:
             group = "local"
-        return group, {
+        entry = {
             "connector_id": item.connector_id,
             "source_family": item.source_family,
             "execution": item.execution_placement,
@@ -1068,8 +1135,8 @@ def _catalog_entry(item: ConnectorDefinition) -> tuple[str, dict[str, Any]]:
             "auth": item.auth.kind,
             "record_kinds": list(item.record_kinds),
         }
-    if item.mode == "push":
-        return "deliberate_capture", {
+    elif item.mode == "push":
+        group, entry = "deliberate_capture", {
             "connector_id": item.connector_id,
             "source_family": "deliberate_capture",
             "execution": "edge_client",
@@ -1077,8 +1144,8 @@ def _catalog_entry(item: ConnectorDefinition) -> tuple[str, dict[str, Any]]:
             "auth": "none",
             "record_kinds": [],
         }
-    if item.authority_slots == ("brain",):
-        return "portable", {
+    elif item.authority_slots == ("brain",):
+        group, entry = "portable", {
             "connector_id": item.connector_id,
             "source_family": "user_export",
             "execution": "source_local",
@@ -1086,14 +1153,17 @@ def _catalog_entry(item: ConnectorDefinition) -> tuple[str, dict[str, Any]]:
             "auth": "selected_export",
             "record_kinds": [],
         }
-    return "remote", {
-        "connector_id": item.connector_id,
-        "source_family": "third_party_research",
-        "execution": "remote_worker",
-        "acquisition": ["poll"],
-        "auth": "api_token",
-        "record_kinds": [],
-    }
+    else:
+        group, entry = "remote", {
+            "connector_id": item.connector_id,
+            "source_family": "third_party_research",
+            "execution": "remote_worker",
+            "acquisition": ["poll"],
+            "auth": "api_token",
+            "record_kinds": [],
+        }
+    entry["activation"] = activation_surface(item)
+    return group, entry
 
 
 def catalog() -> dict[str, Any]:
@@ -1107,7 +1177,7 @@ def catalog() -> dict[str, Any]:
         group, entry = _catalog_entry(item)
         groups[group].append(entry)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "mode": "integration-catalog",
         "credential_reads": 0,
         "source_reads": 0,

@@ -102,7 +102,7 @@ class RegistryPreviewAndStatusTest(unittest.TestCase):
             value = catalog()
         token.assert_not_called(); source_key.assert_not_called()
         sqlite_connect.assert_not_called(); network.assert_not_called()
-        self.assertEqual(value["schema_version"], 1)
+        self.assertEqual(value["schema_version"], 2)
         self.assertEqual(value["mode"], "integration-catalog")
         self.assertEqual(value["credential_reads"], 0)
         self.assertEqual(value["source_reads"], 0)
@@ -128,9 +128,14 @@ class RegistryPreviewAndStatusTest(unittest.TestCase):
         )
         self.assertTrue(all(
             set(entry) == {
-                "acquisition", "auth", "connector_id", "execution",
+                "acquisition", "activation", "auth", "connector_id", "execution",
                 "record_kinds", "source_family",
             }
+            for entry in entries
+        ))
+        self.assertTrue(all(
+            entry["activation"]["connector_id"] == entry["connector_id"]
+            and entry["activation"]["implementation"] == "available"
             for entry in entries
         ))
 

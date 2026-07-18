@@ -11,7 +11,58 @@ Run `recall-brain integration-catalog` to print the closed inventory grouped by
 local, remote, portable/import, and deliberate-capture placement. This preview
 reads no credential, source, selector, cursor, path, spool, or network state and
 performs no writes. The connector registry remains the single source of truth;
-tests fail if a registered connector is omitted or duplicated.
+tests fail if a registered connector is omitted or duplicated. Each row includes
+its concrete activation surface: shipped package, runtime, entrypoint, config
+contract, and lifecycle. `recall-brain integration-activation-catalog` prints
+that activation matrix alone.
+
+The generated matrix currently covers:
+
+- Mac-local sources through `recall-brain-macos`: iMessage, selected WhatsApp
+  export, selected text, Safari, Chrome, Apple Notes, and Hermes sessions.
+- Remote-worker APIs through `recall-remote-worker`: Gmail, Google Calendar,
+  Google Contacts, Google Drive, GitHub, Linear, Slack, Notion, and X.
+- Explicit portable inputs through `recall-brain`: mail, calendar, contacts,
+  Slack, Notion, X, RSS/Atom, and closed JSONL.
+- Deliberate capture through an MCP host, the selected ChatGPT export inbox,
+  Grep AI completed research, and the authenticated custom webhook on Recall
+  Core's `public-edge` profile.
+
+These names are documentation only; the command output is authoritative and is
+generated from the same immutable registry used by runners and tests.
+
+## Unified activation intent
+
+`integration-activation-preview` validates one private, closed activation intent.
+The intent can contain only connector/source/principal identity, a permitted
+privacy mode, declared selector values, and file/Keychain authority references.
+It cannot contain a command, endpoint, module, import string, executable, plugin,
+or arbitrary provider request recipe. The file and its parent must be private;
+links and oversized or unknown shapes fail closed.
+
+Preview returns only the connector's static activation surface, privacy mode,
+selector count, and authority-reference counts. It does not read authority
+values, source content, or network state and never prints identities, selector
+values, references, paths, or credentials. Webhook preview additionally confirms
+the required `webhook` capability and fixed source/principal binding while
+explicitly reporting that no credential was issued.
+
+```bash
+recall-brain integration-activation-preview --config <private-intent>
+recall-brain integration-activation-configure \
+  --config <private-intent> --state <private-state>
+recall-brain integration-activation-transition \
+  --state <private-state> --connector-id custom.webhook --action enable
+recall-brain integration-activation-status \
+  --state <private-state> --connector-id custom.webhook
+```
+
+The shared lifecycle is `configured → enabled → paused → enabled → revoked →
+uninstalled`. Replaying the same action is idempotent; invalid transitions do
+not mutate state. The mode-0600 lifecycle database stores only connector ID,
+state, revision, last action, and a non-reversible config digest. Provider
+configuration remains in the private intent, while source runners continue to
+own privacy-before-spool, ACK-before-cursor, bounded retry, and deduplication.
 
 ## Connector Kit v3
 
