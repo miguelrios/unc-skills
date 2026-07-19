@@ -342,6 +342,7 @@ Every `EXIT.md` repeats this table and updates only from checkable evidence:
 | Loop | P1: Sol session | P2: Sol → Kimi subagent | OSS clean-room |
 |---|---:|---:|---:|
 | L0 | NOT RUN | NOT RUN | NOT RUN |
+| L1 | PASS (`n=1`) | NOT RUN | NOT RUN |
 
 ## Chain invariants
 

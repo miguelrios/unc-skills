@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "proof": "P1",
+  "canary_id": "canary-3c973bdad3e5",
+  "started_at_utc": "2026-07-19T04:05:06Z",
+  "finished_at_utc": "2026-07-19T04:05:09Z",
+  "runtime": {
+    "claude_code_version": "2.1.215",
+    "cliproxyapi_release": "v7.2.88",
+    "cliproxyapi_commit": "93d74a890a44802f656d7f39a573916b2611896e",
+    "isolated_proxy": true
+  },
+  "requests": [
+    {
+      "role": "parent",
+      "provider_channel": "openai-codex",
+      "auth_kind": "oauth",
+      "requested_model": "gpt-5.6-sol",
+      "http_status": 200,
+      "stream_completed": true,
+      "tool_calls": 1
+    },
+    {
+      "role": "parent",
+      "provider_channel": "openai-codex",
+      "auth_kind": "oauth",
+      "requested_model": "gpt-5.6-sol",
+      "http_status": 200,
+      "stream_completed": true,
+      "tool_calls": 0
+    }
+  ],
+  "artifact": {
+    "kind": "synthetic",
+    "sha256": "571402fa79f8cf627caa1b657cea8947cd22b200412833103a7f02d230c09ba9",
+    "deterministic_check": "PASS"
+  },
+  "safety": {
+    "direct_provider_api_key_used": false,
+    "raw_content_committed": false,
+    "credential_material_committed": false
+  }
+}
