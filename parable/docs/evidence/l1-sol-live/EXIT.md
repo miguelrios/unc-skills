@@ -24,7 +24,9 @@ This is `n=1` proof of route viability, not a reliability benchmark.
 
 - Correctly wired PROVE runs: 1, passed.
 - Evidence failures: 0.
-- Review rounds: 0 before PR open.
+- Review rounds: 1. The receipt-schema validation, JSON checks, content-safety
+  scan, staged diff, and GitHub mergeability check had no findings; no automated
+  reviewer was configured on the repository.
 - Human-gate expiration: the first OpenAI device code was not authorized within
   its 15-minute lifetime. No OAuth exchange and no canary occurred, so it did
   not consume a proof attempt. The second code succeeded.
@@ -51,8 +53,9 @@ This is `n=1` proof of route viability, not a reliability benchmark.
    `receipt.json` records `provider_channel: openai-codex` and
    `auth_kind: oauth`; `attestation.json` records a Codex OAuth record with
    access/refresh tokens and no provider API key.
-5. Focused PR merged and verified at merged HEAD — ⏳ filled during REVIEW and
-   checked before L2 advances.
+5. Focused PR merged and verified at merged HEAD — ✅
+   [PR #116](https://github.com/miguelrios/unc-skills/pull/116); its merge state
+   and resulting `main` HEAD are checked immediately before L2 advances.
 
 ## The running delta table (L0→L1)
 
