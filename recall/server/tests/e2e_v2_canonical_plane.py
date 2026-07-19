@@ -129,8 +129,10 @@ def main() -> None:
                 )
                 connection.execute(
                     """INSERT INTO forget_tombstones(
-                           tenant_id,source_id,target_identity_sha256,mode,reason,deleted_at
-                       ) VALUES (%s,%s,%s,'explicit_forget','owner_requested',now())""",
+                           tenant_id,source_id,target_identity_sha256,mode,reason,
+                           deleted_at,status,completed_at
+                       ) VALUES (%s,%s,%s,'explicit_forget','owner_requested',
+                                 now(),'deleted',now())""",
                     (tenant, source, identity_sha256),
                 )
                 connection.execute(

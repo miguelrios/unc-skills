@@ -15,6 +15,7 @@ from typing import Any, Protocol
 from urllib.parse import urlparse
 
 from client.mac import canonical_envelope
+from contracts.v2 import ContractError, validate_contract
 from privacy.policy import PrivacyPolicy, summarize_receipts
 
 
@@ -458,11 +459,26 @@ class BrainWriter(Protocol):
     def ingest(self, events: list[dict[str, Any]]) -> dict[str, Any]: ...
 
 
+class RawArchiveWriter(Protocol):
+    def put_raw(
+        self,
+        *,
+        tenant_id: str,
+        source_id: str,
+        native_id: str,
+        payload: bytes,
+        media_type: str,
+        created_at: str,
+    ) -> dict[str, Any]: ...
+
+
 class ConnectorRunner:
-    """ACK-gated runtime. Connector payloads cross privacy before SQLite or Brain."""
+    """ACK-gated runtime with raw archive before private spool and Brain."""
 
     def __init__(self, *, connector: PullConnector, brain: BrainWriter, spool_path: Path,
-                 privacy: PrivacyPolicy | None = None, enabled: bool = True):
+                 privacy: PrivacyPolicy | None = None, enabled: bool = True,
+                 archive: RawArchiveWriter | None = None, tenant_id: str | None = None,
+                 principal_id: str = "owner"):
         connector_id = getattr(connector, "connector_id", None)
         source_id = getattr(connector, "source_id", None)
         if not isinstance(connector_id, str) or not CONNECTOR_ID.fullmatch(connector_id):
@@ -471,8 +487,19 @@ class ConnectorRunner:
             raise ConnectorContractError("source_id is invalid")
         if not isinstance(enabled, bool):
             raise ConnectorContractError("enabled must be boolean")
+        if (archive is None) != (tenant_id is None):
+            raise ConnectorContractError("archive and tenant_id must be configured together")
+        if tenant_id is not None and (
+            not isinstance(tenant_id, str) or not IDENTITY.fullmatch(tenant_id)
+        ):
+            raise ConnectorContractError("tenant_id is invalid")
+        if not isinstance(principal_id, str) or not IDENTITY.fullmatch(principal_id):
+            raise ConnectorContractError("principal_id is invalid")
         self.connector = connector
         self.brain = brain
+        self.archive = archive
+        self.tenant_id = tenant_id
+        self.principal_id = principal_id
         self.connector_id = connector_id
         self.source_id = source_id
         self.privacy = privacy or PrivacyPolicy(mode="off")
@@ -532,22 +559,81 @@ class ConnectorRunner:
     def _clear_error(self) -> None:
         self.db.execute("DELETE FROM meta WHERE key='last_error_code'")
 
-    def _event(self, record: ConnectorRecord, content: dict[str, Any], provenance: dict[str, Any]) -> dict[str, Any]:
+    @staticmethod
+    def _raw_payload(record: ConnectorRecord) -> bytes:
+        return json.dumps(
+            {
+                "schema_version": record.schema_version,
+                "native_id": record.native_id,
+                "native_parent_id": record.native_parent_id,
+                "occurred_at": record.occurred_at,
+                "content": record.content,
+                "provenance": record.provenance,
+                "deleted": record.deleted,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode()
+
+    def _archive_raw(self, record: ConnectorRecord) -> dict[str, Any] | None:
+        if self.archive is None:
+            return None
+        payload = self._raw_payload(record)
+        try:
+            candidate = self.archive.put_raw(
+                tenant_id=self.tenant_id,
+                source_id=self.source_id,
+                native_id=record.native_id,
+                payload=payload,
+                media_type="application/json",
+                created_at=record.occurred_at,
+            )
+        except Exception as error:
+            if getattr(error, "error_code", None) == "archive_identity_forgotten":
+                raise ConnectorRunError("archive_identity_forgotten") from None
+            raise ConnectorRunError("archive_unavailable") from None
+        try:
+            reference = validate_contract(candidate, expected="recall.artifact-ref.v1")
+        except ContractError:
+            raise ConnectorRunError("archive_invalid_reference") from None
+        expected = {
+            "tenant_id": self.tenant_id,
+            "source_id": self.source_id,
+            "content_sha256": hashlib.sha256(payload).hexdigest(),
+            "size_bytes": len(payload),
+            "media_type": "application/json",
+            "created_at": record.occurred_at,
+        }
+        if any(reference.get(key) != value for key, value in expected.items()):
+            raise ConnectorRunError("archive_invalid_reference")
+        return reference
+
+    def _event(
+        self,
+        record: ConnectorRecord,
+        content: dict[str, Any],
+        provenance: dict[str, Any],
+        artifact_ref: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         provenance = {
             **provenance,
             "connector_id": self.connector_id,
             "connector_schema_version": record.schema_version,
         }
+        if artifact_ref is not None:
+            provenance["artifact_ref"] = artifact_ref
         if record.deleted:
             return canonical_envelope(
                 source_id=self.source_id, native_id=record.native_id, kind="tombstone",
-                content={"target_native_id": record.native_id}, principal_id="owner",
+                content={"target_native_id": record.native_id}, principal_id=self.principal_id,
                 visibility="private", occurred_at=record.occurred_at,
                 provenance=provenance, parent=record.native_parent_id,
             )
         return canonical_envelope(
             source_id=self.source_id, native_id=record.native_id, kind="connector_record",
-            content=content, principal_id="owner", visibility="private",
+            content=content, principal_id=self.principal_id, visibility="private",
             occurred_at=record.occurred_at, provenance=provenance,
             parent=record.native_parent_id,
         )
@@ -565,20 +651,51 @@ class ConnectorRunner:
         events = []
         dropped = 0
         deduplicated = 0
+        archived = 0
+        forgotten = 0
         for record in page.records:
+            was_forgotten = False
             provenance_decision = PrivacyPolicy(mode="scrub").apply(record.provenance)
             safe_provenance = provenance_decision.value
             if record.deleted:
                 decision = PrivacyPolicy(mode="off").apply({"content": {}, "provenance": safe_provenance})
-                event = self._event(record, {}, decision.value["provenance"])
+                try:
+                    artifact_ref = self._archive_raw(record)
+                except ConnectorRunError as error:
+                    if error.error_code != "archive_identity_forgotten":
+                        raise
+                    artifact_ref = None
+                    event = None
+                    forgotten += 1
+                    was_forgotten = True
+                else:
+                    archived += int(artifact_ref is not None)
+                    event = self._event(record, {}, decision.value["provenance"], artifact_ref)
             else:
                 decision = self.privacy.apply({"content": record.content, "provenance": safe_provenance})
-                event = None if decision.action == "drop" else self._event(
-                    record, decision.value["content"], decision.value["provenance"]
-                )
+                if decision.action == "drop":
+                    event = None
+                else:
+                    try:
+                        artifact_ref = self._archive_raw(record)
+                    except ConnectorRunError as error:
+                        if error.error_code != "archive_identity_forgotten":
+                            raise
+                        artifact_ref = None
+                        event = None
+                        forgotten += 1
+                        was_forgotten = True
+                    else:
+                        archived += int(artifact_ref is not None)
+                        event = self._event(
+                            record,
+                            decision.value["content"],
+                            decision.value["provenance"],
+                            artifact_ref,
+                        )
             receipts.append(decision.receipt())
             if event is None:
-                dropped += 1
+                dropped += int(not was_forgotten)
             elif self._acknowledged(event):
                 deduplicated += 1
             else:
@@ -597,7 +714,8 @@ class ConnectorRunner:
                 self._commit_page(page_id, page.next_cursor)
         return {
             "privacy": privacy, "staged": len(events), "dropped": dropped,
-            "deduplicated": deduplicated,
+            "deduplicated": deduplicated, "archived": archived,
+            "forgotten": forgotten,
         }
 
     def _commit_page(self, page_id: int, cursor: str | None) -> None:
@@ -681,6 +799,9 @@ class ConnectorRunner:
             raise ConnectorContractError("pull must return ConnectorPage")
         try:
             staged = self._stage(page, cursor)
+        except ConnectorRunError as error:
+            self._record_error(error.error_code)
+            raise
         except ConnectorContractError:
             self._record_error("connector_invalid_page")
             raise

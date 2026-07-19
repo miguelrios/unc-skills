@@ -27,7 +27,6 @@ def request(**overrides) -> ArchiveRequest:
         "tenant_id": TENANT,
         "source_id": SOURCE,
         "native_id": "native:synthetic-1",
-        "revision": 1,
         "media_type": "application/json",
         "payload": PAYLOAD,
     }
@@ -124,7 +123,7 @@ class ArchiveStoreParityTest(unittest.TestCase):
         for store in (self.filesystem, self.s3):
             first = store.put(request())
             replay = store.put(request())
-            changed = store.put(request(revision=2, payload=PAYLOAD + b"\n"))
+            changed = store.put(request(payload=PAYLOAD + b"\n"))
 
             self.assertEqual(first.artifact_id, replay.artifact_id)
             self.assertEqual(first.object_key, replay.object_key)
@@ -182,6 +181,26 @@ class ArchiveStoreParityTest(unittest.TestCase):
         data_path.write_bytes(b"tampered")
         with self.assertRaises(ArchiveCorruption):
             self.filesystem.read(reference, tenant_id=TENANT, source_id=SOURCE)
+
+    def test_contract_gateway_delete_is_idempotent_and_tenant_safe(self):
+        for store in (self.filesystem, self.s3):
+            reference = store.put_raw(
+                tenant_id=TENANT,
+                source_id=SOURCE,
+                native_id="native:gateway-delete",
+                payload=PAYLOAD,
+                media_type="application/json",
+                created_at="2026-07-19T00:00:00Z",
+            )
+            forged = {**reference, "tenant_id": "tenant:other"}
+            self.assertFalse(store.delete_raw(forged))
+            internal = store.put(request(native_id="native:gateway-delete"))
+            self.assertEqual(
+                store.read(internal, tenant_id=TENANT, source_id=SOURCE),
+                PAYLOAD,
+            )
+            self.assertTrue(store.delete_raw(reference))
+            self.assertFalse(store.delete_raw(reference))
 
     def test_filesystem_rejects_a_symlinked_parent(self):
         with tempfile.TemporaryDirectory() as temporary:

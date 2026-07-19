@@ -116,6 +116,20 @@ class SchemaMigrationContractTest(unittest.TestCase):
         self.assertNotIn("raw_payload", rendered)
         self.assertNotIn("password", rendered)
 
+    def test_v2_lifecycle_migration_fences_resurrection_and_resumes_forget(self) -> None:
+        migration = SERVER / "schema" / "020_v2_lifecycle_guards.sql"
+        rendered = " ".join(migration.read_text().split()).casefold()
+        self.assertIn("state in ('live', 'deleting', 'deleted')", rendered)
+        self.assertIn(
+            "encryption in ('filesystem-owner-only', 'sse-s3', 'sse-kms', 'sse-c')",
+            rendered,
+        )
+        self.assertIn("status in ('deleting', 'deleted')", rendered)
+        self.assertIn("forget_tombstones_idempotency_idx", rendered)
+        self.assertIn("recall_v2_reject_forgotten_event", rendered)
+        self.assertIn("before insert on canonical_events", rendered)
+        self.assertIn("errcode='23514'", rendered)
+
     def test_connector_v2_source_families_are_host_owned_and_migrated(self) -> None:
         added = {
             "communications", "schedule", "contacts", "social", "documents",

@@ -21,6 +21,7 @@ from connectors.sdk import (
     seed_acknowledged_records,
 )
 from privacy.policy import PrivacyPolicy
+from server.recall_server.archive import FilesystemArchiveStore
 
 
 class SyntheticConnector:
@@ -67,6 +68,55 @@ class FakeBrain:
             "status": "committed", "inserted": inserted,
             "duplicate_events": duplicates, "receipts": receipts, "replay": False,
         }
+
+
+class FakeArchive:
+    def __init__(self):
+        self.calls = 0
+        self.objects: dict[str, bytes] = {}
+        self.fail_before_commit = False
+        self.fail_after_commit = False
+        self.invalid_reference = False
+        self.reject_forgotten = False
+
+    def put_raw(
+        self,
+        *,
+        tenant_id: str,
+        source_id: str,
+        native_id: str,
+        payload: bytes,
+        media_type: str,
+        created_at: str,
+    ) -> dict:
+        self.calls += 1
+        if self.reject_forgotten:
+            raise ConnectorRunError("archive_identity_forgotten")
+        if self.fail_before_commit:
+            raise OSError("synthetic archive unavailable with private detail")
+        digest = hashlib.sha256(payload).hexdigest()
+        self.objects.setdefault(digest, payload)
+        if self.fail_after_commit:
+            self.fail_after_commit = False
+            raise OSError("synthetic archive acknowledgement lost")
+        reference = {
+            "contract": "recall.artifact-ref.v1",
+            "schema_version": 1,
+            "tenant_id": tenant_id,
+            "source_id": source_id,
+            "artifact_id": "art_" + digest[:16],
+            "storage_backend": "s3",
+            "object_key": f"objects/{digest[:2]}/{digest}",
+            "content_sha256": digest,
+            "size_bytes": len(payload),
+            "media_type": media_type,
+            "encryption": "sse-s3",
+            "version_id": "version-" + digest[:16],
+            "created_at": created_at,
+        }
+        if self.invalid_reference:
+            reference["tenant_id"] = "tenant:wrong"
+        return reference
 
 
 def record(native_id: str, text: str, *, deleted: bool = False,
@@ -183,6 +233,191 @@ class ConnectorRunnerTest(unittest.TestCase):
         recovered.run_once()
         self.assertEqual(connector.pulls, [None, "page-1"])
         recovered.close()
+
+    def test_raw_archive_precedes_private_spool_and_brain(self) -> None:
+        canary = "archive-raw-canary-77"
+        connector = SyntheticConnector({
+            None: ConnectorPage(
+                records=(record("archive-one", f"api_key={canary} safe context"),),
+                next_cursor="done",
+                has_more=False,
+            ),
+        })
+        archive = FakeArchive()
+        brain = FakeBrain()
+        runner = ConnectorRunner(
+            connector=connector,
+            brain=brain,
+            archive=archive,
+            tenant_id="tenant:synthetic",
+            principal_id="principal:owner",
+            spool_path=self.spool,
+            privacy=PrivacyPolicy(mode="scrub"),
+        )
+        result = runner.run_once()
+        self.assertEqual(result["archived"], 1)
+        self.assertEqual(len(archive.objects), 1)
+        self.assertIn(canary.encode(), next(iter(archive.objects.values())))
+        event = next(iter(brain.events.values()))
+        self.assertNotIn(canary, json.dumps(event))
+        self.assertNotIn(canary.encode(), self.spool_bytes())
+        artifact = event["provenance"]["artifact_ref"]
+        self.assertEqual(artifact["tenant_id"], "tenant:synthetic")
+        self.assertEqual(artifact["source_id"], connector.source_id)
+        runner.close()
+
+    def test_archive_failure_never_stages_calls_brain_or_moves_cursor(self) -> None:
+        connector = SyntheticConnector({
+            None: ConnectorPage(
+                records=(record("archive-failure", "safe"),),
+                next_cursor="done",
+                has_more=False,
+            ),
+        })
+        archive = FakeArchive()
+        archive.fail_before_commit = True
+        brain = FakeBrain()
+        runner = ConnectorRunner(
+            connector=connector,
+            brain=brain,
+            archive=archive,
+            tenant_id="tenant:synthetic",
+            principal_id="principal:owner",
+            spool_path=self.spool,
+        )
+        with self.assertRaisesRegex(ConnectorRunError, "archive_unavailable"):
+            runner.run_once()
+        self.assertEqual(brain.calls, 0)
+        self.assertEqual(runner.doctor()["pending"], 0)
+        self.assertFalse(runner.doctor()["checkpointed"])
+        runner.close()
+
+    def test_lost_archive_ack_replays_one_object_then_commits(self) -> None:
+        connector = SyntheticConnector({
+            None: ConnectorPage(
+                records=(record("archive-replay", "safe"),),
+                next_cursor="done",
+                has_more=False,
+            ),
+        })
+        archive = FakeArchive()
+        archive.fail_after_commit = True
+        brain = FakeBrain()
+        runner = ConnectorRunner(
+            connector=connector,
+            brain=brain,
+            archive=archive,
+            tenant_id="tenant:synthetic",
+            principal_id="principal:owner",
+            spool_path=self.spool,
+        )
+        with self.assertRaisesRegex(ConnectorRunError, "archive_unavailable"):
+            runner.run_once()
+        self.assertEqual(len(archive.objects), 1)
+        self.assertEqual(runner.doctor()["pending"], 0)
+        self.assertEqual(runner.run_once()["acked"], 1)
+        self.assertEqual(len(archive.objects), 1)
+        self.assertEqual(archive.calls, 2)
+        self.assertEqual(brain.calls, 1)
+        self.assertTrue(runner.doctor()["checkpointed"])
+        runner.close()
+
+    def test_archive_configuration_and_reference_fail_closed(self) -> None:
+        connector = SyntheticConnector({
+            None: ConnectorPage(
+                records=(record("archive-invalid", "safe"),),
+                next_cursor="done",
+                has_more=False,
+            ),
+        })
+        with self.assertRaisesRegex(ConnectorContractError, "configured together"):
+            ConnectorRunner(
+                connector=connector,
+                brain=FakeBrain(),
+                archive=FakeArchive(),
+                spool_path=self.spool,
+            )
+        with self.assertRaisesRegex(ConnectorContractError, "configured together"):
+            ConnectorRunner(
+                connector=connector,
+                brain=FakeBrain(),
+                tenant_id="tenant:synthetic",
+                spool_path=self.spool,
+            )
+
+        archive = FakeArchive()
+        archive.invalid_reference = True
+        runner = ConnectorRunner(
+            connector=connector,
+            brain=FakeBrain(),
+            archive=archive,
+            tenant_id="tenant:synthetic",
+            principal_id="principal:owner",
+            spool_path=self.spool,
+        )
+        with self.assertRaisesRegex(ConnectorRunError, "archive_invalid_reference"):
+            runner.run_once()
+        self.assertEqual(runner.doctor()["pending"], 0)
+        self.assertEqual(runner.doctor()["last_error_code"], "archive_invalid_reference")
+        runner.close()
+
+    def test_filesystem_archive_gateway_runs_end_to_end(self) -> None:
+        canary = "real-filesystem-raw-canary-32"
+        connector = SyntheticConnector({
+            None: ConnectorPage(
+                records=(record("archive-real", f"api_key={canary} context"),),
+                next_cursor="done",
+                has_more=False,
+            ),
+        })
+        archive = FilesystemArchiveStore(
+            Path(self.temporary.name) / "raw-archive",
+            namespace_key=b"n" * 32,
+        )
+        brain = FakeBrain()
+        runner = ConnectorRunner(
+            connector=connector,
+            brain=brain,
+            archive=archive,
+            tenant_id="tenant:synthetic",
+            principal_id="principal:owner",
+            spool_path=self.spool,
+            privacy=PrivacyPolicy(mode="scrub"),
+        )
+        self.assertEqual(runner.run_once()["archived"], 1)
+        event = next(iter(brain.events.values()))
+        reference = event["provenance"]["artifact_ref"]
+        stored = archive.root / reference["object_key"] / "data"
+        self.assertIn(canary.encode(), stored.read_bytes())
+        self.assertNotIn(canary, json.dumps(event))
+        self.assertNotIn(canary.encode(), self.spool_bytes())
+        runner.close()
+
+    def test_forgotten_archive_identity_is_suppressed_and_cursor_advances(self) -> None:
+        connector = SyntheticConnector({
+            None: ConnectorPage(
+                records=(record("forgotten-one", "must not resurrect"),),
+                next_cursor="done",
+                has_more=False,
+            ),
+        })
+        archive = FakeArchive()
+        archive.reject_forgotten = True
+        brain = FakeBrain()
+        runner = ConnectorRunner(
+            connector=connector,
+            brain=brain,
+            archive=archive,
+            tenant_id="tenant:synthetic",
+            principal_id="principal:owner",
+            spool_path=self.spool,
+        )
+        result = runner.run_once()
+        self.assertEqual(result["forgotten"], 1)
+        self.assertEqual(result["staged"], 0)
+        self.assertEqual(brain.calls, 0)
+        self.assertTrue(runner.doctor()["checkpointed"])
+        runner.close()
 
     def test_reordered_acknowledged_record_is_not_resubmitted(self) -> None:
         repeated = record("reordered-one", "same acknowledged content")
