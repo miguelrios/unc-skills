@@ -12,6 +12,7 @@ on:
       - "recall/.dockerignore"
       - "recall/server/**"
       - "recall/contracts/**"
+      - "recall/privacy/**"
       - "recall/skills/recall/scripts/recall.py"
       - ".github/workflows/recall-image.yml"
   workflow_dispatch:
