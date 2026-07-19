@@ -21,6 +21,7 @@ PRIVACY_MODES = {"off", "scrub", "drop"}
 CHECKPOINTS = {"none", "ack_cursor"}
 DELETIONS = {"explicit_receipt", "explicit_export_reference"}
 RUNTIME_ERROR_CODES = {
+    "archive_identity_forgotten", "archive_invalid_reference", "archive_unavailable",
     "brain_invalid_acknowledgement", "brain_unauthorized", "brain_unavailable",
     "connector_disabled", "connector_invalid_page", "connector_rate_limited",
     "connector_spool_error", "connector_unavailable",

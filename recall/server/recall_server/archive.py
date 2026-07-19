@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any, BinaryIO, Protocol
 from urllib.parse import urlsplit
 
+from contracts.v2 import ContractError, validate_contract
+
 
 DEFAULT_MAXIMUM_BYTES = 64 * 1024 * 1024
 IDENTITY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._/@+-]{1,255}")
@@ -47,7 +49,6 @@ class ArchiveRequest:
     tenant_id: str
     source_id: str
     native_id: str
-    revision: int
     media_type: str
     payload: bytes
 
@@ -55,8 +56,6 @@ class ArchiveRequest:
         for value in (self.tenant_id, self.source_id, self.native_id):
             if not isinstance(value, str) or not IDENTITY_RE.fullmatch(value):
                 raise ValueError("archive identity is invalid")
-        if not isinstance(self.revision, int) or isinstance(self.revision, bool) or self.revision < 1:
-            raise ValueError("archive revision is invalid")
         if not isinstance(self.media_type, str) or not MEDIA_TYPE_RE.fullmatch(self.media_type):
             raise ValueError("archive media type is invalid")
         if not isinstance(self.payload, bytes):
@@ -111,7 +110,6 @@ def _identity(
         request.tenant_id.encode(),
         request.source_id.encode(),
         request.native_id.encode(),
-        str(request.revision).encode(),
         content_sha256.encode(),
     ))
     digest = hmac.new(namespace_key, b"artifact\0" + message, hashlib.sha256).hexdigest()
@@ -127,6 +125,19 @@ def _metadata(reference: ArtifactReference) -> dict[str, str]:
         "size_bytes": str(reference.size_bytes),
         "media_type_sha256": hashlib.sha256(reference.media_type.encode()).hexdigest(),
     }
+
+
+def _verify_metadata(reference: ArtifactReference, actual: Any) -> None:
+    expected = _metadata(reference)
+    if not isinstance(actual, dict):
+        raise ArchiveCorruption("archive metadata mismatch")
+    for key in ("tenant_scope_sha256", "source_scope_sha256"):
+        if not isinstance(actual.get(key), str) or not hmac.compare_digest(
+            actual[key], expected[key],
+        ):
+            raise ArchiveNotFound("archive object not found")
+    if actual != expected:
+        raise ArchiveCorruption("archive metadata mismatch")
 
 
 class _ArchiveStore:
@@ -211,6 +222,68 @@ class _ArchiveStore:
             content_sha256=digest,
         )
 
+    def put_raw(
+        self,
+        *,
+        tenant_id: str,
+        source_id: str,
+        native_id: str,
+        payload: bytes,
+        media_type: str,
+        created_at: str,
+    ) -> dict[str, Any]:
+        """Connector-facing gateway: write once, then return the closed public reference."""
+        reference = self.put(ArchiveRequest(
+            tenant_id=tenant_id,
+            source_id=source_id,
+            native_id=native_id,
+            media_type=media_type,
+            payload=payload,
+        ))
+        return reference.to_contract(
+            tenant_id=tenant_id,
+            source_id=source_id,
+            created_at=created_at,
+        )
+
+    def delete_raw(self, value: dict[str, Any]) -> bool:
+        """Delete one contract reference without exposing archive namespace material."""
+        try:
+            reference = validate_contract(value, expected="recall.artifact-ref.v1")
+        except ContractError:
+            raise ArchiveNotFound("archive object not found") from None
+        if reference["storage_backend"] != self.storage_backend:
+            raise ArchiveNotFound("archive object not found")
+        internal = ArtifactReference(
+            artifact_id=reference["artifact_id"],
+            tenant_scope_sha256=_scope_digest(
+                self._namespace_key, b"tenant", reference["tenant_id"],
+            ),
+            source_scope_sha256=_scope_digest(
+                self._namespace_key, b"source", reference["source_id"],
+            ),
+            storage_backend=reference["storage_backend"],
+            object_key=reference["object_key"],
+            content_sha256=reference["content_sha256"],
+            size_bytes=reference["size_bytes"],
+            media_type=reference["media_type"],
+            encryption=reference["encryption"],
+            version_id=reference["version_id"],
+        )
+        try:
+            self.read(
+                internal,
+                tenant_id=reference["tenant_id"],
+                source_id=reference["source_id"],
+            )
+        except ArchiveNotFound:
+            return False
+        return self.delete(
+            internal,
+            tenant_id=reference["tenant_id"],
+            source_id=reference["source_id"],
+        )
+
 
 class _BytesReader:
     def __init__(self, payload: bytes) -> None:
@@ -254,7 +327,7 @@ def _read_bounded(
 
 class FilesystemArchiveStore(_ArchiveStore):
     storage_backend = "filesystem"
-    encryption = "filesystem-managed"
+    encryption = "filesystem-owner-only"
 
     def __init__(
         self,
@@ -347,8 +420,7 @@ class FilesystemArchiveStore(_ArchiveStore):
             payload = data_path.read_bytes()
         except (FileNotFoundError, json.JSONDecodeError) as error:
             raise ArchiveNotFound("archive object not found") from error
-        if metadata != _metadata(reference):
-            raise ArchiveCorruption("archive metadata mismatch")
+        _verify_metadata(reference, metadata)
         if len(payload) != reference.size_bytes or not hmac.compare_digest(
             hashlib.sha256(payload).hexdigest(), reference.content_sha256,
         ):
@@ -410,7 +482,7 @@ class S3ArchiveStore(_ArchiveStore):
         self.endpoint_url = endpoint_url
         self.client = client
         self.kms_key_id = kms_key_id
-        self.encryption = "aws:kms" if kms_key_id else "sse-s3"
+        self.encryption = "sse-kms" if kms_key_id else "sse-s3"
 
     def put_stream(
         self,
@@ -495,8 +567,7 @@ class S3ArchiveStore(_ArchiveStore):
             raise
         except Exception as error:
             raise ArchiveError("archive provider request failed") from error
-        if response.get("Metadata") != _metadata(reference):
-            raise ArchiveCorruption("archive metadata mismatch")
+        _verify_metadata(reference, response.get("Metadata"))
         body = response.get("Body")
         if body is None or response.get("ContentLength") != reference.size_bytes:
             raise ArchiveCorruption("archive metadata mismatch")
