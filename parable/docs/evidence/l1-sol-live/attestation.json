@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "proof": "P1",
+  "captured_at_utc": "2026-07-19T04:05:09Z",
+  "installation": {
+    "release": "v7.2.88",
+    "commit": "93d74a890a44802f656d7f39a573916b2611896e",
+    "archive_sha256": "2cc3b38e3ba2474d0cdeb7a3f25b026891ba34e34d3a7e0501d4efd03c01f6fe",
+    "published_checksum_verified": true
+  },
+  "network": {
+    "listen_address": "127.0.0.1",
+    "listen_port": 18317,
+    "remote_management": false,
+    "isolated_canary_process": true
+  },
+  "local_security": {
+    "proxy_config_mode": "0600",
+    "oauth_directory_mode": "0700",
+    "raw_logs_committed": false,
+    "oauth_record_committed": false
+  },
+  "subscription_auth": {
+    "provider_record_type": "codex",
+    "has_access_token": true,
+    "has_refresh_token": true,
+    "has_provider_api_key": false
+  },
+  "authenticated_catalog": {
+    "models": 10,
+    "gpt_5_6_sol_entries": 1
+  }
+}
