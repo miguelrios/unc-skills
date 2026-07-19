@@ -971,7 +971,7 @@ class BrainStore:
                                     )
                                 ],
                             )
-                            if use_watermark:
+                            if use_watermark and dirty is None:
                                 watermark = max(
                                     row["anchor_item_id"] for row in rows
                                 )
