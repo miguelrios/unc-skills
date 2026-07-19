@@ -2,7 +2,7 @@ FROM python:3.12-slim-bookworm@sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/opt/recall
+    PYTHONPATH=/opt/recall:/opt
 
 WORKDIR /opt/recall
 
@@ -13,7 +13,7 @@ RUN python -m pip install --no-cache-dir --disable-pip-version-check --no-compil
 
 COPY --chown=10001:10001 server/recall_server /opt/recall/recall_server
 COPY --chown=10001:10001 server/schema /opt/recall/schema
-COPY --chown=10001:10001 contracts /opt/recall/contracts
+COPY --chown=10001:10001 contracts /opt/contracts
 COPY --chown=10001:10001 privacy /opt/recall/privacy
 COPY --chown=10001:10001 skills/recall/scripts/recall.py /opt/skills/recall/scripts/recall.py
 
