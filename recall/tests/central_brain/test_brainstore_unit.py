@@ -89,6 +89,14 @@ class SchemaMigrationContractTest(unittest.TestCase):
             rendered,
         )
 
+    def test_turn_dedupe_has_a_session_scoped_cleanup_index(self) -> None:
+        migration = SERVER / "schema" / "023_turn_prompt_dedupe_index.sql"
+        rendered = " ".join(migration.read_text().split()).casefold()
+        self.assertIn(
+            "on turn_embeddings(source_id, session_native_id, anchor_item_id)",
+            rendered,
+        )
+
     def test_v2_canonical_plane_is_tenant_keyed_and_deletion_explicit(self) -> None:
         migration = SERVER / "schema" / "019_v2_canonical_plane.sql"
         rendered = " ".join(migration.read_text().split()).casefold()
@@ -768,6 +776,29 @@ class RelatedRetrievalContractTest(unittest.TestCase):
 
 
 class SemanticRetrievalContractTest(unittest.TestCase):
+    def test_turn_projection_keeps_only_the_latest_exact_prompt_per_session(
+        self,
+    ) -> None:
+        implementation = inspect.getsource(BrainStore.embed_pending_turns)
+        latest_anchors = implementation.split(
+            "WITH latest_anchors AS MATERIALIZED", 1,
+        )[1].split("SELECT anchor.id AS anchor_item_id", 1)[0]
+        latest_anchors = " ".join(latest_anchors.split())
+
+        self.assertIn("max(candidate_anchor.id) AS anchor_item_id", latest_anchors)
+        self.assertIn(
+            "GROUP BY candidate_anchor.source_id, "
+            "candidate_anchor.session_native_id, "
+            "candidate_anchor.text_redacted",
+            latest_anchors,
+        )
+        self.assertIn("ORDER BY max(candidate_anchor.id)", latest_anchors)
+        self.assertIn(
+            "DELETE FROM turn_embeddings older_embedding",
+            implementation,
+        )
+        self.assertIn("older_anchor.text_redacted=%s", implementation)
+
     def test_turn_projection_uses_one_indexable_response_range(self) -> None:
         implementation = inspect.getsource(BrainStore.embed_pending_turns)
         response_range = implementation.split(

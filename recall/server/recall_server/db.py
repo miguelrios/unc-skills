@@ -796,11 +796,36 @@ class BrainStore:
                     )
                     rows = conn.execute(
                         """
+                        WITH latest_anchors AS MATERIALIZED (
+                          SELECT max(candidate_anchor.id) AS anchor_item_id
+                          FROM items candidate_anchor
+                          WHERE candidate_anchor.deleted_at IS NULL
+                            AND candidate_anchor.role='user'
+                            AND btrim(candidate_anchor.text_redacted)<>''
+                            AND (
+                              %s::text IS NULL
+                              OR candidate_anchor.source_id=%s
+                            )
+                            AND (
+                              %s::text IS NULL
+                              OR candidate_anchor.session_native_id=%s
+                            )
+                            AND (
+                              %s::bigint IS NULL
+                              OR candidate_anchor.id>%s
+                            )
+                          GROUP BY candidate_anchor.source_id,
+                                   candidate_anchor.session_native_id,
+                                   candidate_anchor.text_redacted
+                          ORDER BY max(candidate_anchor.id)
+                        )
                         SELECT anchor.id AS anchor_item_id,anchor.source_id,
                                anchor.session_native_id,anchor.text_redacted AS user_text,
                                response.response_item_id,response.item_ids,
                                response.assistant_texts
-                        FROM items anchor
+                        FROM latest_anchors latest_anchor
+                        JOIN items anchor
+                          ON anchor.id=latest_anchor.anchor_item_id
                         LEFT JOIN LATERAL (
                           SELECT boundary.occurred_at,boundary.id
                           FROM items boundary
@@ -844,16 +869,7 @@ class BrainStore:
                         ) response ON true
                         LEFT JOIN turn_embeddings embedding
                           ON embedding.anchor_item_id=anchor.id
-                        WHERE anchor.deleted_at IS NULL
-                          AND anchor.role='user'
-                          AND btrim(anchor.text_redacted)<>''
-                          AND (%s::text IS NULL OR anchor.source_id=%s)
-                          AND (
-                            %s::text IS NULL
-                            OR anchor.session_native_id=%s
-                          )
-                          AND (%s::bigint IS NULL OR anchor.id>%s)
-                          AND (
+                        WHERE (
                             %s::boolean
                             OR (
                               embedding.anchor_item_id IS NULL
@@ -935,6 +951,25 @@ class BrainStore:
                     vectors = self.semantic_runtime.embed_documents(documents)
                     with conn.transaction():
                         with conn.cursor() as cursor:
+                            cursor.executemany(
+                                """DELETE FROM turn_embeddings older_embedding
+                                   USING items older_anchor
+                                   WHERE older_embedding.anchor_item_id=
+                                         older_anchor.id
+                                     AND older_embedding.source_id=%s
+                                     AND older_embedding.session_native_id=%s
+                                     AND older_embedding.anchor_item_id<>%s
+                                     AND older_anchor.text_redacted=%s""",
+                                [
+                                    (
+                                        row["source_id"],
+                                        row["session_native_id"],
+                                        row["anchor_item_id"],
+                                        row["user_text"],
+                                    )
+                                    for row in rows
+                                ],
+                            )
                             cursor.executemany(
                                 """INSERT INTO turn_embeddings(
                                      anchor_item_id,response_item_id,source_id,
