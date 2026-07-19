@@ -20,6 +20,9 @@ WITH expected_tables(name) AS (
         ('audit_events'), ('projection_watermarks'), ('collector_credentials'),
         ('entities'), ('projection_backfills'), ('source_profiles'),
         ('session_export_cursors'), ('source_aliases'), ('item_embeddings'),
+        ('embedding_projection_watermarks'), ('turn_embeddings'),
+        ('turn_embedding_items'), ('turn_embedding_projection_watermarks'),
+        ('turn_embedding_dirty_sessions'),
         ('brain_tenants'), ('brain_principals'), ('canonical_sources'),
         ('raw_artifacts'), ('canonical_events'), ('canonical_documents'),
         ('canonical_chunks'), ('canonical_ingest_jobs'), ('receipt_redirects'),
@@ -48,13 +51,13 @@ SELECT
     role.rolbypassrls AS bypass_rls,
     pg_catalog.has_database_privilege(current_database(), 'CONNECT') AS can_connect,
     pg_catalog.has_schema_privilege(current_user, 'public', 'USAGE') AS can_use_schema,
-    (SELECT count(*) = 29 AND COALESCE(bool_and(
+    (SELECT count(*) = 34 AND COALESCE(bool_and(
         pg_catalog.to_regclass(pg_catalog.format('public.%I', name)) IS NOT NULL
         AND pg_catalog.has_table_privilege(
             current_user, pg_catalog.to_regclass(pg_catalog.format('public.%I', name)), 'SELECT'
         )
     ), false) FROM expected_tables) AS can_read_runtime_tables,
-    (SELECT count(*) = 28 AND COALESCE(bool_and(
+    (SELECT count(*) = 33 AND COALESCE(bool_and(
         pg_catalog.to_regclass(pg_catalog.format('public.%I', name)) IS NOT NULL
         AND pg_catalog.has_table_privilege(
             current_user, pg_catalog.to_regclass(pg_catalog.format('public.%I', name)),

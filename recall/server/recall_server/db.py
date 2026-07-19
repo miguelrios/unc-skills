@@ -30,6 +30,10 @@ from .ranking import DEFAULT_SEARCH_DEADLINE_MS, evidence_rank_components, shoul
 from .semantic import SemanticRuntime
 
 MAX_SEARCH_RESULT_TEXT_CHARS = 4096
+TURN_USER_MARKER = "User request:\n"
+TURN_ASSISTANT_MARKER = "\nAssistant response:\n"
+TURN_CONTINUATION_MARKER = "\n\nAssistant continuation:\n"
+TURN_EMBEDDING_CONTRACT = "recall.turn-embedding.v1:question-complete-response"
 
 
 class IdempotencyConflict(Exception):
@@ -43,6 +47,25 @@ class SearchDeadlineExceeded(Exception):
 def bounded_search_text(value: str) -> tuple[str, bool]:
     """Return an agent-sized search snippet; show resolves the full receipt."""
     return value[:MAX_SEARCH_RESULT_TEXT_CHARS], len(value) > MAX_SEARCH_RESULT_TEXT_CHARS
+
+
+def turn_embedding_text(user_text: str, assistant_texts: Iterable[str]) -> str:
+    """Represent a conversational turn with the question and its complete response."""
+    responses = list(assistant_texts)
+    if not user_text.strip() or not responses or any(not value.strip() for value in responses):
+        raise ValueError("turn embedding requires non-empty user and assistant text")
+    return (
+        TURN_USER_MARKER
+        + user_text
+        + TURN_ASSISTANT_MARKER
+        + TURN_CONTINUATION_MARKER.join(responses)
+    )
+
+
+def turn_runtime_fingerprint(semantic_fingerprint: str) -> str:
+    return hashlib.sha256(
+        f"{TURN_EMBEDDING_CONTRACT}\0{semantic_fingerprint}".encode()
+    ).hexdigest()
 
 
 def semantic_candidate_limit(result_limit: int) -> int:
@@ -693,6 +716,306 @@ class BrainStore:
             "surface_scoped": surface is not None,
         }
 
+    def embed_pending_turns(
+        self,
+        batch_size: int = 128,
+        max_batches: int | None = None,
+        source_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Embed user request plus its complete assistant response as one retrieval unit."""
+        if self.semantic_runtime is None:
+            raise ValueError("semantic runtime is not configured")
+        if not 1 <= batch_size <= 1000 or (max_batches is not None and max_batches < 1):
+            raise ValueError("invalid turn embedding backfill bounds")
+        if source_id is not None and not SOURCE_ID_RE.fullmatch(source_id):
+            raise ValueError("invalid embedding source")
+        fingerprint = turn_runtime_fingerprint(self.semantic_runtime.fingerprint)
+        processed = batches = 0
+        with self.connect() as conn:
+            lock_name = "recall:turn-embeddings"
+            locked = conn.execute(
+                "SELECT pg_try_advisory_lock(hashtextextended(%s,0)) AS value",
+                (lock_name,),
+            ).fetchone()["value"]
+            if not locked:
+                return {"status": "busy", "processed": 0, "batches": 0}
+            try:
+                use_watermark = source_id is None
+                watermark = 0
+                if use_watermark:
+                    conn.execute(
+                        """INSERT INTO turn_embedding_projection_watermarks(
+                             runtime_fingerprint,model,dimensions,last_anchor_item_id
+                           ) VALUES (%s,%s,%s,0)
+                           ON CONFLICT(runtime_fingerprint) DO NOTHING""",
+                        (
+                            fingerprint,
+                            self.semantic_runtime.model,
+                            self.semantic_runtime.dimensions,
+                        ),
+                    )
+                    watermark = conn.execute(
+                        """SELECT last_anchor_item_id
+                           FROM turn_embedding_projection_watermarks
+                           WHERE runtime_fingerprint=%s
+                           FOR UPDATE""",
+                        (fingerprint,),
+                    ).fetchone()["last_anchor_item_id"]
+                while max_batches is None or batches < max_batches:
+                    dirty = conn.execute(
+                        """SELECT source_id,session_native_id,last_anchor_item_id
+                           FROM turn_embedding_dirty_sessions
+                           WHERE (%s::text IS NULL OR source_id=%s)
+                           ORDER BY updated_at,source_id,session_native_id
+                           LIMIT 1
+                           FOR UPDATE SKIP LOCKED""",
+                        (source_id, source_id),
+                    ).fetchone()
+                    scan_source_id = (
+                        dirty["source_id"] if dirty is not None else source_id
+                    )
+                    scan_session_native_id = (
+                        dirty["session_native_id"]
+                        if dirty is not None
+                        else None
+                    )
+                    scan_after = (
+                        dirty["last_anchor_item_id"]
+                        if dirty is not None
+                        else (watermark if use_watermark else None)
+                    )
+                    rows = conn.execute(
+                        """
+                        SELECT anchor.id AS anchor_item_id,anchor.source_id,
+                               anchor.session_native_id,anchor.text_redacted AS user_text,
+                               response.response_item_id,response.item_ids,
+                               response.assistant_texts
+                        FROM items anchor
+                        LEFT JOIN LATERAL (
+                          SELECT boundary.occurred_at,boundary.id
+                          FROM items boundary
+                          WHERE boundary.source_id=anchor.source_id
+                            AND boundary.session_native_id=anchor.session_native_id
+                            AND boundary.deleted_at IS NULL
+                            AND boundary.role='user'
+                            AND (boundary.occurred_at,boundary.id)>
+                                (anchor.occurred_at,anchor.id)
+                          ORDER BY boundary.occurred_at,boundary.id
+                          LIMIT 1
+                        ) next_user ON true
+                        JOIN LATERAL (
+                          SELECT
+                            (array_agg(candidate.id ORDER BY
+                               candidate.occurred_at DESC,candidate.id DESC))[1]
+                              AS response_item_id,
+                            array_agg(candidate.id ORDER BY
+                               candidate.occurred_at,candidate.id) AS item_ids,
+                            array_agg(candidate.text_redacted ORDER BY
+                               candidate.occurred_at,candidate.id) AS assistant_texts
+                          FROM items candidate
+                          WHERE candidate.source_id=anchor.source_id
+                            AND candidate.session_native_id=anchor.session_native_id
+                            AND candidate.deleted_at IS NULL
+                            AND candidate.role='assistant'
+                            AND btrim(candidate.text_redacted)<>''
+                            AND (candidate.occurred_at,candidate.id)>
+                                (anchor.occurred_at,anchor.id)
+                            AND (
+                              next_user.id IS NULL
+                              OR (candidate.occurred_at,candidate.id)<
+                                 (next_user.occurred_at,next_user.id)
+                            )
+                          HAVING count(*)>0
+                        ) response ON true
+                        LEFT JOIN turn_embeddings embedding
+                          ON embedding.anchor_item_id=anchor.id
+                        WHERE anchor.deleted_at IS NULL
+                          AND anchor.role='user'
+                          AND btrim(anchor.text_redacted)<>''
+                          AND (%s::text IS NULL OR anchor.source_id=%s)
+                          AND (
+                            %s::text IS NULL
+                            OR anchor.session_native_id=%s
+                          )
+                          AND (%s::bigint IS NULL OR anchor.id>%s)
+                          AND (
+                            %s::boolean
+                            OR (
+                              embedding.anchor_item_id IS NULL
+                              OR embedding.response_item_id<>
+                                 response.response_item_id
+                              OR embedding.model<>%s
+                              OR embedding.runtime_fingerprint<>%s
+                              OR embedding.dimensions<>%s
+                              OR cardinality(response.item_ids)+1<>(
+                                SELECT count(*)
+                                FROM turn_embedding_items linked
+                                WHERE linked.anchor_item_id=anchor.id
+                              )
+                              OR EXISTS (
+                                SELECT 1
+                                FROM turn_embedding_items linked
+                                JOIN items linked_item
+                                  ON linked_item.id=linked.item_id
+                                WHERE linked.anchor_item_id=anchor.id
+                                  AND linked_item.deleted_at IS NOT NULL
+                              )
+                            )
+                          )
+                        ORDER BY anchor.id
+                        LIMIT %s
+                        FOR UPDATE OF anchor SKIP LOCKED
+                        """,
+                        (
+                            scan_source_id,
+                            scan_source_id,
+                            scan_session_native_id,
+                            scan_session_native_id,
+                            scan_after,
+                            scan_after,
+                            dirty is not None,
+                            self.semantic_runtime.model,
+                            fingerprint,
+                            self.semantic_runtime.dimensions,
+                            batch_size,
+                        ),
+                    ).fetchall()
+                    if not rows:
+                        if dirty is not None:
+                            conn.execute(
+                                """DELETE FROM turn_embedding_dirty_sessions
+                                   WHERE source_id=%s
+                                     AND session_native_id=%s""",
+                                (
+                                    dirty["source_id"],
+                                    dirty["session_native_id"],
+                                ),
+                            )
+                            conn.commit()
+                            continue
+                        if use_watermark:
+                            watermark = conn.execute(
+                                """SELECT COALESCE(max(id),%s) AS value
+                                   FROM items
+                                   WHERE id>%s AND deleted_at IS NULL
+                                     AND role='user' AND btrim(text_redacted)<>''""",
+                                (watermark, watermark),
+                            ).fetchone()["value"]
+                            conn.execute(
+                                """UPDATE turn_embedding_projection_watermarks
+                                   SET last_anchor_item_id=GREATEST(
+                                         last_anchor_item_id,%s
+                                       ),
+                                       updated_at=now()
+                                   WHERE runtime_fingerprint=%s""",
+                                (watermark, fingerprint),
+                            )
+                        break
+                    documents = [
+                        turn_embedding_text(
+                            row["user_text"], row["assistant_texts"],
+                        )
+                        for row in rows
+                    ]
+                    vectors = self.semantic_runtime.embed_documents(documents)
+                    with conn.transaction():
+                        with conn.cursor() as cursor:
+                            cursor.executemany(
+                                """INSERT INTO turn_embeddings(
+                                     anchor_item_id,response_item_id,source_id,
+                                     session_native_id,model,dimensions,
+                                     content_sha256,runtime_fingerprint,embedding
+                                   ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::halfvec)
+                                   ON CONFLICT(anchor_item_id) DO UPDATE SET
+                                     response_item_id=excluded.response_item_id,
+                                     source_id=excluded.source_id,
+                                     session_native_id=excluded.session_native_id,
+                                     model=excluded.model,
+                                     dimensions=excluded.dimensions,
+                                     content_sha256=excluded.content_sha256,
+                                     runtime_fingerprint=excluded.runtime_fingerprint,
+                                     embedding=excluded.embedding,
+                                     embedded_at=now()""",
+                                [
+                                    (
+                                        row["anchor_item_id"],
+                                        row["response_item_id"],
+                                        row["source_id"],
+                                        row["session_native_id"],
+                                        self.semantic_runtime.model,
+                                        self.semantic_runtime.dimensions,
+                                        hashlib.sha256(document.encode()).hexdigest(),
+                                        fingerprint,
+                                        json.dumps(vector, separators=(",", ":")),
+                                    )
+                                    for row, document, vector in zip(
+                                        rows, documents, vectors, strict=True
+                                    )
+                                ],
+                            )
+                            cursor.executemany(
+                                """DELETE FROM turn_embedding_items
+                                   WHERE anchor_item_id=%s""",
+                                [(row["anchor_item_id"],) for row in rows],
+                            )
+                            cursor.executemany(
+                                """INSERT INTO turn_embedding_items(
+                                     anchor_item_id,item_id
+                                   ) VALUES (%s,%s)""",
+                                [
+                                    (row["anchor_item_id"], item_id)
+                                    for row in rows
+                                    for item_id in (
+                                        row["anchor_item_id"],
+                                        *row["item_ids"],
+                                    )
+                                ],
+                            )
+                            if use_watermark:
+                                watermark = max(
+                                    row["anchor_item_id"] for row in rows
+                                )
+                                cursor.execute(
+                                    """UPDATE turn_embedding_projection_watermarks
+                                       SET last_anchor_item_id=GREATEST(
+                                             last_anchor_item_id,%s
+                                           ),
+                                           updated_at=now()
+                                       WHERE runtime_fingerprint=%s""",
+                                    (watermark, fingerprint),
+                                )
+                            if dirty is not None:
+                                cursor.execute(
+                                    """UPDATE turn_embedding_dirty_sessions
+                                       SET last_anchor_item_id=GREATEST(
+                                             last_anchor_item_id,%s
+                                           ),
+                                           updated_at=updated_at
+                                       WHERE source_id=%s
+                                         AND session_native_id=%s""",
+                                    (
+                                        max(
+                                            row["anchor_item_id"]
+                                            for row in rows
+                                        ),
+                                        dirty["source_id"],
+                                        dirty["session_native_id"],
+                                    ),
+                                )
+                    processed += len(rows)
+                    batches += 1
+            finally:
+                conn.execute(
+                    "SELECT pg_advisory_unlock(hashtextextended(%s,0))",
+                    (lock_name,),
+                )
+        return {
+            "status": "complete",
+            "processed": processed,
+            "batches": batches,
+            "source_scoped": source_id is not None,
+        }
+
     def record_dead_letter(self, error_code: str, summary: str) -> None:
         """Record rejection metadata only; never persist the rejected payload."""
         with self.connect() as conn:
@@ -1178,6 +1501,121 @@ class BrainStore:
             if float(row["lexical_rank"]) >= minimum_similarity
         ]
 
+    def _turn_semantic_leg(
+        self,
+        conn,
+        vector: list[float],
+        filters: dict,
+        *,
+        authorized_source: str | list[str] | tuple[str, ...] | None = None,
+        limit: int = 100,
+        routed_source_ids: list[str] | None = None,
+        deadline_at: float | None = None,
+        minimum_similarity: float = 0.35,
+    ) -> list[dict]:
+        """Retrieve a final answer using an embedding of its complete conversational turn."""
+        if self.semantic_runtime is None:
+            return []
+        where, params = self._read_filters(
+            filters, authorized_source, routed_source_ids,
+        )
+        encoded = json.dumps(vector, separators=(",", ":"))
+        fingerprint = turn_runtime_fingerprint(self.semantic_runtime.fingerprint)
+        conn.execute("SELECT set_config('hnsw.iterative_scan','strict_order',true)")
+        rows = self._execute_bounded(
+            conn,
+            f"""
+            WITH nearest AS MATERIALIZED (
+              SELECT embedding.anchor_item_id,embedding.response_item_id,
+                     embedding.embedding <=> %s::halfvec AS distance
+              FROM turn_embeddings embedding
+              JOIN items i ON i.id=embedding.response_item_id
+              JOIN sessions s
+                ON s.source_id=i.source_id
+               AND s.native_id=i.session_native_id
+              WHERE embedding.model=%s
+                AND embedding.runtime_fingerprint=%s
+                AND embedding.dimensions=%s
+                AND {where}
+              ORDER BY embedding.embedding <=> %s::halfvec,
+                       embedding.anchor_item_id DESC
+              LIMIT %s
+            )
+            SELECT i.id,i.source_id,i.session_native_id,i.event_native_id,
+                   i.occurred_at,i.surface,i.text_redacted,i.receipt,
+                   i.projector_version,s.started_at,s.ended_at,s.metadata,
+                   se.envelope #>> '{{provenance,original_path}}' AS path,
+                   se.observed_at,
+                   coalesce(sp.family,'unclassified') AS source_family,
+                   coalesce(sp.quality,'unrated') AS source_quality,
+                   coalesce(sp.freshness_half_life_days,180)
+                     AS freshness_half_life_days,
+                   (sp.source_id IS NOT NULL) AS source_profiled,
+                   (1-nearest.distance)::real AS lexical_rank
+            FROM nearest
+            JOIN items anchor ON anchor.id=nearest.anchor_item_id
+            JOIN items i ON i.id=nearest.response_item_id
+            JOIN sessions s
+              ON s.source_id=i.source_id
+             AND s.native_id=i.session_native_id
+            JOIN source_events se ON se.id=i.event_id
+            LEFT JOIN source_profiles sp ON sp.source_id=i.source_id
+            LEFT JOIN LATERAL (
+              SELECT boundary.occurred_at,boundary.id
+              FROM items boundary
+              WHERE boundary.source_id=anchor.source_id
+                AND boundary.session_native_id=anchor.session_native_id
+                AND boundary.deleted_at IS NULL
+                AND boundary.role='user'
+                AND (boundary.occurred_at,boundary.id)>
+                    (anchor.occurred_at,anchor.id)
+              ORDER BY boundary.occurred_at,boundary.id
+              LIMIT 1
+            ) next_user ON true
+            JOIN LATERAL (
+              SELECT candidate.id
+              FROM items candidate
+              WHERE candidate.source_id=anchor.source_id
+                AND candidate.session_native_id=anchor.session_native_id
+                AND candidate.deleted_at IS NULL
+                AND candidate.role='assistant'
+                AND (candidate.occurred_at,candidate.id)>
+                    (anchor.occurred_at,anchor.id)
+                AND (
+                  next_user.id IS NULL
+                  OR (candidate.occurred_at,candidate.id)<
+                     (next_user.occurred_at,next_user.id)
+                )
+              ORDER BY candidate.occurred_at DESC,candidate.id DESC
+              LIMIT 1
+            ) current_response ON current_response.id=nearest.response_item_id
+            WHERE anchor.deleted_at IS NULL
+              AND NOT EXISTS (
+                SELECT 1
+                FROM turn_embedding_items linked
+                JOIN items linked_item ON linked_item.id=linked.item_id
+                WHERE linked.anchor_item_id=nearest.anchor_item_id
+                  AND linked_item.deleted_at IS NOT NULL
+              )
+            ORDER BY nearest.distance,nearest.anchor_item_id DESC
+            """,
+            [
+                encoded,
+                self.semantic_runtime.model,
+                fingerprint,
+                self.semantic_runtime.dimensions,
+                *params,
+                encoded,
+                limit,
+            ],
+            deadline_at,
+        ).fetchall()
+        return [
+            {**dict(row), "leg": "turn-semantic", "tier": 2}
+            for row in rows
+            if float(row["lexical_rank"]) >= minimum_similarity
+        ]
+
     def _answer_leg(self, conn, anchors: list[dict], filters: dict, *,
                     deadline_at: float | None = None) -> list[dict]:
         """Promote the final assistant item in a matched user's conversational turn."""
@@ -1347,7 +1785,12 @@ class BrainStore:
             for position, row in enumerate(rows, 1):
                 contribution = 1.0 / (60 + position)
                 leg = row.pop("leg")
-                observable_legs = {leg, "answer"} if leg == "exact-answer" else {leg}
+                if leg == "exact-answer":
+                    observable_legs = {leg, "answer"}
+                elif leg == "turn-semantic":
+                    observable_legs = {leg, "semantic", "answer"}
+                else:
+                    observable_legs = {leg}
                 existing = candidates.get(row["id"])
                 if existing is None:
                     row["legs"] = observable_legs
@@ -1430,6 +1873,22 @@ class BrainStore:
                     # Those rescues run lazily only when dense evidence cannot
                     # fill the requested session anchors.
                     for vector_index, semantic_vector in enumerate(semantic_vectors):
+                        turn_rows = run_leg(
+                            f"turn-semantic-{vector_index}",
+                            lambda semantic_vector=semantic_vector:
+                                self._turn_semantic_leg(
+                                    conn,
+                                    semantic_vector,
+                                    filters,
+                                    authorized_source=authorized_source,
+                                    routed_source_ids=routed_source_ids,
+                                    deadline_at=deadline_at,
+                                    limit=semantic_candidate_limit(limit),
+                                    minimum_similarity=
+                                        self.semantic_minimum_similarity,
+                                ),
+                        )
+                        merge(turn_rows)
                         semantic_rows = run_leg(f"semantic-{vector_index}", lambda semantic_vector=semantic_vector: self._semantic_leg(
                             conn, semantic_vector, filters, authorized_source=authorized_source,
                             routed_source_ids=routed_source_ids, deadline_at=deadline_at,
@@ -1437,8 +1896,11 @@ class BrainStore:
                             minimum_similarity=self.semantic_minimum_similarity,
                         ))
                         if vector_index == 0:
-                            for semantic_row in semantic_rows:
-                                anchor = (semantic_row["source_id"], semantic_row["session_native_id"])
+                            for semantic_row in [*turn_rows, *semantic_rows]:
+                                anchor = (
+                                    semantic_row["source_id"],
+                                    semantic_row["session_native_id"],
+                                )
                                 if anchor not in dense_anchor_keys:
                                     dense_anchor_keys.append(anchor)
                                 if len(dense_anchor_keys) >= max(1, limit - 1):
@@ -2073,8 +2535,11 @@ class BrainStore:
                 before = conn.execute("SELECT count(*) AS n FROM items WHERE deleted_at IS NULL").fetchone()["n"]
                 entities_before = conn.execute("SELECT count(*) AS n FROM entities").fetchone()["n"]
                 conn.execute(
-                    "TRUNCATE item_embeddings,entities,chunks,items,sessions,"
-                    "projection_watermarks RESTART IDENTITY"
+                    "TRUNCATE turn_embedding_items,turn_embeddings,"
+                    "turn_embedding_projection_watermarks,"
+                    "turn_embedding_dirty_sessions,item_embeddings,"
+                    "embedding_projection_watermarks,entities,chunks,items,"
+                    "sessions,projection_watermarks RESTART IDENTITY"
                 )
                 rows = conn.execute("SELECT id,envelope,revision FROM source_events ORDER BY id").fetchall()
                 self._project_batch(

@@ -61,7 +61,7 @@ infrastructure. The example is synthetic; a live manifest belongs in a private m
 location and contains references, never credential values.
 
 The production database gate requires a standard PostgreSQL URL with
-`sslmode=verify-full` and an explicit trust root, schema migrations 1 through 20,
+`sslmode=verify-full` and an explicit trust root, schema migrations 1 through 21,
 pgvector 0.8.0 or newer, and a runtime role without superuser, database/role creation,
 replication, or RLS-bypass privilege:
 
@@ -289,6 +289,15 @@ head-and-tail projection so a giant tool result cannot stall a complete backfill
 verifies the exact model commit and float32 dtype against TEI `/info` before sending text. Search
 ignores stale fingerprints, dimensions, projector versions, and content hashes.
 
+Schema 021 adds a second, rebuildable semantic projection for conversational sources. It embeds a
+user request together with every assistant message before the next user turn, preserving the
+request at the head and the final response at the tail. Search still returns the final canonical
+assistant item and its normal `recall://` receipt; the combined turn is only a retrieval vector.
+Every contributing item is linked so a soft deletion excludes the vector immediately, and search
+also verifies that the cited response is still the current final response for the turn. This
+closes the common failure where a short answer is meaningless without its preceding question
+without creating uncited synthetic memory.
+
 Production backfill uses an identical second sidecar on `127.0.0.1:8090`. Keeping historical CPU
 inference separate prevents convergence work from rejecting live query embeddings. Neither port is
 served through Tailscale, and both runtimes enforce the same pinned single-input contract. The worker
@@ -312,6 +321,8 @@ items, or receipts:
 ```bash
 RECALL_DATABASE_URL=... RECALL_EMBEDDING_URL=http://127.0.0.1:8089 \
   python -m recall_server.cli backfill-embeddings --batch-size 128
+RECALL_DATABASE_URL=... RECALL_EMBEDDING_URL=http://127.0.0.1:8089 \
+  python -m recall_server.cli backfill-turn-embeddings --batch-size 128
 ```
 
 On a large existing brain, converge high-value sources first without changing global correctness:
@@ -319,6 +330,7 @@ On a large existing brain, converge high-value sources first without changing gl
 ```bash
 python -m recall_server.cli backfill-embeddings --source-id SOURCE_ID --batch-size 128
 python -m recall_server.cli backfill-embeddings --source-id SOURCE_ID --surface user --batch-size 128
+python -m recall_server.cli backfill-turn-embeddings --source-id SOURCE_ID --batch-size 128
 ```
 
 The optional source and surface selectors change scheduling only. Metrics and search compatibility remain global, and an

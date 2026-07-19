@@ -38,6 +38,7 @@ from recall_server.db import (
     related_candidate_limit,
     semantic_candidate_limit,
     should_run_optional_rescue,
+    turn_embedding_text,
 )
 from recall_server.federation import SOURCE_FAMILIES, SourceProfile
 from recall_server.projectors import advisory_lock_key, canonical_json, effective_session_id, partial_lexical_probes, phrase_query_spec, preferred_phrase_probe, preferred_phrase_probes, project, redact_text, validate_envelope
@@ -754,6 +755,26 @@ class RelatedRetrievalContractTest(unittest.TestCase):
 
 
 class SemanticRetrievalContractTest(unittest.TestCase):
+    def test_turn_projection_preserves_question_head_and_final_answer_tail(self) -> None:
+        rendered = turn_embedding_text(
+            "Why did we choose the managed database?",
+            ["First progress update.", "The final decision and reason."],
+        )
+
+        self.assertTrue(rendered.startswith(
+            "User request:\nWhy did we choose the managed database?"
+        ))
+        self.assertTrue(rendered.endswith("The final decision and reason."))
+        self.assertIn("\n\nAssistant continuation:\n", rendered)
+
+    def test_turn_candidate_limit_is_applied_after_authorization_filters(self) -> None:
+        implementation = inspect.getsource(BrainStore._turn_semantic_leg)
+        nearest = implementation.split("WITH nearest AS MATERIALIZED", 1)[1]
+        nearest = nearest.split("LIMIT %s", 1)[0]
+
+        self.assertIn("JOIN items i ON i.id=embedding.response_item_id", nearest)
+        self.assertIn("AND {where}", nearest)
+
     def test_search_results_bound_large_evidence_and_keep_show_receipt(self) -> None:
         exact, exact_truncated = bounded_search_text("x" * 4096)
         oversized, oversized_truncated = bounded_search_text("🙂" * 4097)
