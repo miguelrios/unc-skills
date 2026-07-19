@@ -326,6 +326,48 @@ def main() -> None:
         authorized_source="source-k",
     )
     assert late_result["results"][0]["native_id"] == "late-answer"
+    repeated_prompt = "What is the current deployment status?"
+    store.ingest("repeated-turn-old-p", [
+        envelope(
+            "source-p", "repeated-question-old", repeated_prompt,
+            "session-repeated-p", occurred_at="2026-07-16T02:10:00Z",
+        ),
+        envelope(
+            "source-p", "repeated-answer-old", "The old deployment status.",
+            "session-repeated-p", role="assistant",
+            occurred_at="2026-07-16T02:11:00Z",
+        ),
+    ])
+    assert store.embed_pending_turns(
+        batch_size=10, source_id="source-p",
+    )["processed"] == 1
+    store.ingest("repeated-turn-latest-p", [
+        envelope(
+            "source-p", "repeated-question-latest", repeated_prompt,
+            "session-repeated-p", occurred_at="2026-07-16T02:12:00Z",
+        ),
+        envelope(
+            "source-p", "repeated-answer-latest", "The latest deployment status.",
+            "session-repeated-p", role="assistant",
+            occurred_at="2026-07-16T02:13:00Z",
+        ),
+    ])
+    repeated_turn = store.embed_pending_turns(
+        batch_size=10, source_id="source-p",
+    )
+    assert repeated_turn["processed"] == 1
+    with store.connect() as connection:
+        repeated_projection = connection.execute(
+            """SELECT count(*) AS value,
+                      max(response.event_native_id) AS response_native_id
+               FROM turn_embeddings embedding
+               JOIN items anchor ON anchor.id=embedding.anchor_item_id
+               JOIN items response ON response.id=embedding.response_item_id
+               WHERE anchor.source_id='source-p'
+                 AND anchor.session_native_id='session-repeated-p'"""
+        ).fetchone()
+    assert repeated_projection["value"] == 1
+    assert repeated_projection["response_native_id"] == "repeated-answer-latest"
     with store.connect() as connection:
         connection.execute("DELETE FROM turn_embedding_dirty_sessions")
     store.ingest("turn-watermark-low", [
