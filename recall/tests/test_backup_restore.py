@@ -143,7 +143,8 @@ esac
             backup.mkdir()
             original = b"stable-root-owned-dump"
             digest = hashlib.md5(
-                b"schema_migrations:1:d41d8cd98f00b204e9800998ecf8427e"
+                b"schema_migrations:1:d41d8cd98f00b204e9800998ecf8427e",
+                usedforsecurity=False,
             ).hexdigest()
             (backup / "brain.dump").write_bytes(original)
             (backup / "manifest.json").write_text(json.dumps({
