@@ -326,6 +326,8 @@ def main() -> None:
         authorized_source="source-k",
     )
     assert late_result["results"][0]["native_id"] == "late-answer"
+    with store.connect() as connection:
+        connection.execute("DELETE FROM turn_embedding_dirty_sessions")
     store.ingest("turn-watermark-low", [
         envelope(
             "source-l", "watermark-low-question", "Low turn question.",
@@ -354,8 +356,22 @@ def main() -> None:
             occurred_at="2026-07-16T04:01:00Z",
         ),
     ])
-    dirty_first = store.embed_pending_turns(batch_size=100, max_batches=1)
+    dirty_first = store.embed_pending_turns(
+        batch_size=100, max_batches=1, dirty_only=True,
+    )
     assert dirty_first["processed"] == 1
+    dirty_replay = store.embed_pending_turns(
+        batch_size=100, dirty_only=True,
+    )
+    assert dirty_replay["processed"] == 0
+    with store.connect() as connection:
+        projected_before_global_scan = connection.execute(
+            """SELECT count(*) AS value
+               FROM turn_embeddings embedding
+               JOIN items item ON item.id=embedding.anchor_item_id
+               WHERE item.source_id IN ('source-l','source-m')"""
+        ).fetchone()["value"]
+    assert projected_before_global_scan == 1
     global_turn_backfill = store.embed_pending_turns(batch_size=100)
     global_turn_replay = store.embed_pending_turns(batch_size=100)
     assert global_turn_backfill["processed"] >= 1
@@ -368,6 +384,48 @@ def main() -> None:
                WHERE item.source_id IN ('source-l','source-m')"""
         ).fetchone()["value"]
     assert projected_watermark_turns == 2
+    store.ingest("parallel-dirty-turns", [
+        envelope(
+            "source-n", "parallel-dirty-n-question", "Parallel dirty N question.",
+            "session-parallel-dirty-n", occurred_at="2026-07-16T05:00:00Z",
+        ),
+        envelope(
+            "source-n", "parallel-dirty-n-answer", "Parallel dirty N answer.",
+            "session-parallel-dirty-n", role="assistant",
+            occurred_at="2026-07-16T05:01:00Z",
+        ),
+        envelope(
+            "source-o", "parallel-dirty-o-question", "Parallel dirty O question.",
+            "session-parallel-dirty-o", occurred_at="2026-07-16T06:00:00Z",
+        ),
+        envelope(
+            "source-o", "parallel-dirty-o-answer", "Parallel dirty O answer.",
+            "session-parallel-dirty-o", role="assistant",
+            occurred_at="2026-07-16T06:01:00Z",
+        ),
+    ])
+    dirty_barrier = threading.Barrier(2)
+    dirty_parallel_stores = [
+        BrainStore(
+            os.environ["RECALL_DATABASE_URL"],
+            semantic_runtime=CoordinatedSemanticRuntime(dirty_barrier),
+        )
+        for _ in range(2)
+    ]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        dirty_parallel_results = [
+            future.result()
+            for future in [
+                executor.submit(
+                    dirty_parallel_stores[index].embed_pending_turns,
+                    batch_size=100,
+                    max_batches=1,
+                    dirty_only=True,
+                )
+                for index in range(2)
+            ]
+        ]
+    assert [result["processed"] for result in dirty_parallel_results] == [1, 1]
     exact_question = "What exact orchard premise decision did we make?"
     store.ingest("exact-question-i", [
         envelope(
@@ -521,6 +579,9 @@ def main() -> None:
         "sensitive_queries_sent_to_planner": 0,
         "parallel_source_backfills": sum(
             result["processed"] for result in parallel_results
+        ),
+        "parallel_dirty_turn_backfills": sum(
+            result["processed"] for result in dirty_parallel_results
         ),
         "parallel_same_source_backfills": sum(
             result["processed"] for result in same_source_results
