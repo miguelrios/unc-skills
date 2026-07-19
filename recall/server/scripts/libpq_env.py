@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import os
 import stat
 from pathlib import Path
@@ -26,7 +27,18 @@ class ConnectionPolicyError(ValueError):
     pass
 
 
-def libpq_environment(url: str) -> dict[str, str]:
+def _loopback(hostname: str) -> bool:
+    if hostname == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
+def libpq_environment(url: str, *, profile: str = "production") -> dict[str, str]:
+    if profile not in {"production", "local-fixture"}:
+        raise ConnectionPolicyError("database profile invalid")
     if not url or any(character in url for character in "\x00\r\n"):
         raise ConnectionPolicyError("database URL unavailable")
     parsed = urlsplit(url)
@@ -50,8 +62,12 @@ def libpq_environment(url: str) -> dict[str, str]:
     if len({key for key, _value in pairs}) != len(pairs):
         raise ConnectionPolicyError("database query duplicated")
     query = dict(pairs)
-    if query.pop("sslmode", None) != "verify-full":
-        raise ConnectionPolicyError("database TLS policy invalid")
+    sslmode = query.pop("sslmode", None)
+    if profile == "production":
+        if sslmode != "verify-full":
+            raise ConnectionPolicyError("database TLS policy invalid")
+    elif not _loopback(parsed.hostname) or sslmode != "disable":
+        raise ConnectionPolicyError("database fixture policy invalid")
     unknown = set(query) - set(ALLOWED_QUERY)
     if unknown:
         raise ConnectionPolicyError("database query unsupported")
@@ -61,7 +77,7 @@ def libpq_environment(url: str) -> dict[str, str]:
         "PGDATABASE": database,
         "PGUSER": username,
         "PGPASSWORD": password,
-        "PGSSLMODE": "verify-full",
+        "PGSSLMODE": sslmode,
         **{ALLOWED_QUERY[key]: value for key, value in query.items()},
     }
     if any(
@@ -100,12 +116,21 @@ def main() -> None:
     operations = parser.add_subparsers(dest="operation", required=True)
     execute = operations.add_parser("exec")
     execute.add_argument("--url-env", required=True)
+    execute.add_argument(
+        "--profile", choices=("production", "local-fixture"), default="production",
+    )
     execute.add_argument("command", nargs=argparse.REMAINDER)
     write = operations.add_parser("write")
     write.add_argument("--url-env", required=True)
+    write.add_argument(
+        "--profile", choices=("production", "local-fixture"), default="production",
+    )
     write.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    values = libpq_environment(os.environ.get(args.url_env, ""))
+    values = libpq_environment(
+        os.environ.get(args.url_env, ""),
+        profile=args.profile,
+    )
     if args.operation == "write":
         write_environment(args.output, values)
         return
