@@ -46,7 +46,8 @@ The transcripts remain the source of truth. The SQLite index is disposable and
 fully rebuildable.
 
 When a private Recall Brain service is available, set `RECALL_URL` to use the same read commands
-over the tailnet. `RECALL_MODE=shadow` compares central receipts while returning local behavior;
+remotely. An explicit `/mcp` suffix selects the scoped MCP tools; a URL without it preserves the
+legacy REST transport. `RECALL_MODE=shadow` compares central receipts while returning local behavior;
 `RECALL_MODE=local` is an instant rollback that does not rewrite either store. Remote failures do
 not silently fall back to stale local results.
 

@@ -20,9 +20,16 @@ Setting `RECALL_URL` selects the tailnet central service for read commands (`sea
 `related`, and `doctor`) and enables deliberate writes (`put` and `delete`). The same flags and output shapes remain valid, and every displayed remote
 hit includes its resolvable receipt on the `WHY` line.
 
+Use an explicit `/mcp` suffix for a public or managed MCP endpoint, for example
+`RECALL_URL=https://recall.example.com/mcp`. The skill then calls the scoped
+`recall_search`, `recall_show`, `recall_related`, `recall_capture`, and
+`recall_forget` tools directly; `doctor` uses MCP ping. `session-export` has no
+MCP tool and fails closed. A URL without `/mcp` preserves the legacy REST
+transport.
+
 For a persistent per-device read profile, use a mode-0600 regular file at
 `~/.config/recall-brain/client.json` with the exact shape
-`{"schema_version":1,"url":"https://brain.example.ts.net:9443",`
+`{"schema_version":1,"url":"https://brain.example.com/mcp",`
 `"token_file":"/absolute/private/read-token.json"}`. The referenced token file
 must also be a non-symlink mode-0600 regular file. Environment variables override
 the profile field by field; `RECALL_MODE=local` remains the instant rollback.
@@ -67,8 +74,10 @@ python3 scripts/recall.py delete 'recall://memory:mac:host/memory-…?rev=1'
 
 `put` returns the canonical receipt. Preserve it when reporting the write;
 `delete` requires that receipt and emits a tombstone under the same source and
-native ID. Writes require remote mode and fail closed if `RECALL_URL`, the
-source-scoped credential, or the exact source ID is unavailable. Never infer a
+native ID. REST writes require the exact source ID. MCP writes are instead
+bound to the source and origin of the scoped host credential, so the client
+does not transmit either authority. All writes require remote mode and fail
+closed if the endpoint or scoped credential is unavailable. Never infer a
 shared visibility choice: default to `private`, and use `shared` only when the
 user deliberately selects it. Secret-shaped lines are redacted before ingest.
 

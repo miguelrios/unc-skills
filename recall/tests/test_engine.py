@@ -818,6 +818,110 @@ class RedirectOnlyHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
 
+class McpRemoteHandler(BaseHTTPRequestHandler):
+    requests: list[dict] = []
+    target_path = "/source/mcp-session.jsonl"
+    fail_tool = False
+
+    def log_message(self, *_args):
+        pass
+
+    def send_json(self, status: int, body: dict) -> None:
+        rendered = json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(rendered)))
+        self.end_headers()
+        self.wfile.write(rendered)
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+        type(self).requests.append({
+            "method": "POST",
+            "path": self.path,
+            "body": body,
+            "authorization": self.headers.get("Authorization"),
+            "accept": self.headers.get("Accept"),
+            "protocol": self.headers.get("MCP-Protocol-Version"),
+            "idempotency_key": self.headers.get("Idempotency-Key"),
+        })
+        if self.path != "/mcp":
+            self.send_json(404, {"error": "not found"})
+            return
+        if type(self).fail_tool:
+            self.send_json(200, {
+                "jsonrpc": "2.0", "id": body.get("id"),
+                "error": {"code": -32603, "message": "synthetic tool failure"},
+            })
+            return
+        if body["method"] == "ping":
+            value = {}
+        else:
+            self.assert_tool_call(body)
+            name = body["params"]["name"]
+            arguments = body["params"]["arguments"]
+            if name == "recall_search":
+                value = {"results": [{
+                    "path": type(self).target_path,
+                    "occurred_at": "2026-01-01T00:00:00Z",
+                    "cwd": "/work/grep123/project",
+                    "slot": "grep123",
+                    "branch": "feature/mcp",
+                    "surface": "tool_output",
+                    "text": "remote MCP exact deadbeef evidence",
+                    "matched_terms": ["deadbeef"],
+                    "legs": ["exact"],
+                    "receipt": "recall://claude:linux/mcp-session:1?rev=1#item=0",
+                }], "diagnostics": {"deadline_ms": 300, "elapsed_ms": 11.0}}
+            elif name == "recall_show":
+                value = {"chunks": [{
+                    "occurred_at": "2026-01-01T00:00:00Z",
+                    "surface": "user",
+                    "text": "remote MCP prompt",
+                    "receipt": arguments["target"],
+                }]}
+            elif name == "recall_related":
+                value = {"results": [{
+                    "path": type(self).target_path,
+                    "overlap": 2,
+                    "cwd": arguments.get("cwd"),
+                    "branch": arguments.get("branch"),
+                    "receipt": "recall://claude:linux/mcp-session:1?rev=1#item=0",
+                }]}
+            elif name == "recall_capture":
+                value = {
+                    "status": "committed",
+                    "receipt": "recall://memory:mcp/capture-1?rev=1",
+                    "duplicate": False,
+                }
+            elif name == "recall_forget":
+                value = {
+                    "status": "forgotten",
+                    "receipt": arguments["receipt"].split("#", 1)[0],
+                }
+            else:
+                raise AssertionError(name)
+        self.send_json(200, {
+            "jsonrpc": "2.0", "id": body["id"],
+            "result": (
+                value if body["method"] == "ping" else {
+                    "content": [{"type": "text", "text": json.dumps(value)}],
+                    "structuredContent": value,
+                    "isError": False,
+                }
+            ),
+        })
+
+    @staticmethod
+    def assert_tool_call(body):
+        if (
+            body.get("jsonrpc") != "2.0"
+            or body.get("method") != "tools/call"
+            or set(body.get("params", {})) != {"name", "arguments"}
+        ):
+            raise AssertionError(body)
+
+
 class RemoteTransportTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -886,6 +990,134 @@ class RemoteTransportTest(unittest.TestCase):
             "source_alias": "cowork",
         })
         self.assertEqual(request["body"]["limit"], 7)
+
+    def test_explicit_mcp_url_uses_tools_call_for_read_surface(self):
+        mcp = ThreadingHTTPServer(("127.0.0.1", 0), McpRemoteHandler)
+        thread = threading.Thread(target=mcp.serve_forever, daemon=True)
+        thread.start()
+        McpRemoteHandler.requests = []
+        os.environ["RECALL_URL"] = f"http://127.0.0.1:{mcp.server_port}/mcp"
+        try:
+            code, output, error = self.call(
+                "search", "deadbeef", "--limit", "5",
+                "--source-family", "coding_history",
+            )
+            self.assertEqual((code, error), (0, ""))
+            self.assertIn(McpRemoteHandler.target_path, output)
+            request = McpRemoteHandler.requests[-1]
+            self.assertEqual(request["path"], "/mcp")
+            self.assertEqual(request["protocol"], "2025-11-25")
+            self.assertEqual(request["accept"], "application/json, text/event-stream")
+            self.assertIsNone(request["idempotency_key"])
+            self.assertEqual(request["body"]["method"], "tools/call")
+            self.assertEqual(request["body"]["params"], {
+                "name": "recall_search",
+                "arguments": {
+                    "query": "deadbeef",
+                    "filters": {"source_family": "coding_history"},
+                    "limit": 5,
+                },
+            })
+
+            target = "recall://claude:linux/mcp-session:1?rev=1#item=0"
+            self.assertIn("remote MCP prompt", self.call("show", target, "--prompts")[1])
+            self.assertIn(
+                "overlap=2",
+                self.call("related", "--cwd", "/work/grep123/project", "--branch", "feature/mcp")[1],
+            )
+            self.assertIn("OK remote", self.call("doctor")[1])
+            self.assertEqual(McpRemoteHandler.requests[-1]["body"]["method"], "ping")
+        finally:
+            mcp.shutdown()
+            mcp.server_close()
+
+    def test_explicit_mcp_url_maps_deliberate_write_and_fails_closed_for_export(self):
+        mcp = ThreadingHTTPServer(("127.0.0.1", 0), McpRemoteHandler)
+        thread = threading.Thread(target=mcp.serve_forever, daemon=True)
+        thread.start()
+        McpRemoteHandler.requests = []
+        os.environ["RECALL_URL"] = f"http://127.0.0.1:{mcp.server_port}/mcp"
+        os.environ["RECALL_WRITE_SOURCE_ID"] = "memory:mac:test"
+        self.addCleanup(os.environ.pop, "RECALL_WRITE_SOURCE_ID", None)
+        try:
+            code, output, error = self.call(
+                "put", "A deliberate MCP memory\nwith bounded body",
+                "--provenance-uri", "manual://unit-test",
+            )
+            self.assertEqual((code, error), (0, ""))
+            captured = json.loads(output)
+            self.assertEqual(captured["receipt"], "recall://memory:mcp/capture-1?rev=1")
+            request = McpRemoteHandler.requests[-1]
+            self.assertEqual(request["body"]["params"]["name"], "recall_capture")
+            self.assertEqual(request["body"]["params"]["arguments"]["title"], "A deliberate MCP memory")
+            self.assertEqual(
+                request["body"]["params"]["arguments"]["body"],
+                "A deliberate MCP memory\nwith bounded body",
+            )
+            self.assertNotIn("source_id", request["body"]["params"]["arguments"])
+
+            code, output, error = self.call(
+                "delete", captured["receipt"], "--source-id", "memory:mac:test",
+            )
+            self.assertEqual((code, error), (0, ""))
+            self.assertEqual(
+                McpRemoteHandler.requests[-1]["body"]["params"],
+                {"name": "recall_forget", "arguments": {"receipt": captured["receipt"]}},
+            )
+
+            before = len(McpRemoteHandler.requests)
+            code, output, error = self.call(
+                "session-export", "--target", McpRemoteHandler.target_path,
+            )
+            self.assertNotEqual(code, 0)
+            self.assertEqual(output, "")
+            self.assertIn("not available over MCP", error)
+            self.assertEqual(len(McpRemoteHandler.requests), before)
+        finally:
+            mcp.shutdown()
+            mcp.server_close()
+
+    def test_mcp_error_is_bounded_and_does_not_echo_request_or_token(self):
+        mcp = ThreadingHTTPServer(("127.0.0.1", 0), McpRemoteHandler)
+        thread = threading.Thread(target=mcp.serve_forever, daemon=True)
+        thread.start()
+        McpRemoteHandler.requests = []
+        McpRemoteHandler.fail_tool = True
+        token_file = self.root / "mcp-token.json"
+        token_file.write_text(json.dumps({"token": "mcp-synthetic-secret-token"}))
+        token_file.chmod(0o600)
+        os.environ["RECALL_TOKEN_FILE"] = str(token_file)
+        os.environ["RECALL_URL"] = f"http://127.0.0.1:{mcp.server_port}/mcp"
+        canary = "private-query-canary-must-not-echo"
+        try:
+            code, output, error = self.call("search", canary)
+            self.assertNotEqual(code, 0)
+            self.assertEqual(output, "")
+            self.assertIn("MCP -32603", error)
+            self.assertNotIn(canary, error)
+            self.assertNotIn("mcp-synthetic-secret-token", error)
+        finally:
+            McpRemoteHandler.fail_tool = False
+            mcp.shutdown()
+            mcp.server_close()
+
+    def test_private_client_config_accepts_explicit_mcp_endpoint(self):
+        token_file = self.root / "mcp-read-token.json"
+        token_file.write_text(json.dumps({"token": "configured-mcp-read-token"}))
+        token_file.chmod(0o600)
+        config = self.root / "mcp-client.json"
+        config.write_text(json.dumps({
+            "schema_version": 1,
+            "url": f"http://127.0.0.1:{self.server.server_port}/mcp",
+            "token_file": str(token_file),
+        }))
+        config.chmod(0o600)
+        os.environ.pop("RECALL_URL", None)
+        os.environ.pop("RECALL_TOKEN_FILE", None)
+        os.environ["RECALL_CONFIG_FILE"] = str(config)
+        loaded = engine.load_client_config()
+        self.assertEqual(loaded["url"], f"http://127.0.0.1:{self.server.server_port}/mcp")
+        self.assertEqual(loaded["token_file"], str(token_file))
 
     def test_remote_paths_show_related_and_doctor_keep_cli_surface(self):
         remote_trace = self.root / "remote-trace.jsonl"

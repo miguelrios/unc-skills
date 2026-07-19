@@ -1375,6 +1375,19 @@ class BrainStore:
         try:
             with self.connect() as conn:
                 routed_source_ids = self._resolve_routed_source_ids(conn, filters)
+                exact_question_rows = run_leg(
+                    "exact-question",
+                    lambda: self._exact_question_leg(
+                        conn,
+                        query,
+                        filters,
+                        authorized_source=authorized_source,
+                        routed_source_ids=routed_source_ids,
+                        deadline_at=deadline_at,
+                    ),
+                )
+                exact_question_count = len(exact_question_rows)
+                merge(exact_question_rows)
                 if identifiers:
                     merge(run_leg("entity", lambda: self._entity_leg(
                         conn, identifiers, filters, authorized_source=authorized_source,
@@ -1392,12 +1405,6 @@ class BrainStore:
                             break
                 else:
                     phrase_spec = phrase_query_spec(preferred_phrase_probes(engine.phrase_queries(query)))
-                    exact_question_rows = run_leg("exact-question", lambda: self._exact_question_leg(
-                        conn, query, filters, authorized_source=authorized_source,
-                        routed_source_ids=routed_source_ids, deadline_at=deadline_at,
-                    ))
-                    exact_question_count = len(exact_question_rows)
-                    merge(exact_question_rows)
                     # Dense retrieval is the primary non-exact natural-language
                     # leg. Run it before broad phrase scans and optional rewrites.
                     # Those rescues run lazily only when dense evidence cannot
