@@ -21,7 +21,9 @@ passes 70/70 under an isolated temporary HOME.
 
 - Correctly wired PROVE runs: 1, passed.
 - Evidence failures: 0.
-- Review rounds: 0 before PR open.
+- Review rounds: 1. The staged diff, JSON artifacts, content-safety scan, and
+  GitHub mergeability check had no findings; no automated reviewer was
+  configured on the repository.
 - Instrument failure 1: a process check using a broad command-line search
   matched its own invocation and falsely reported CLIProxyAPI as running. It was
   replaced by an exact process-name check; the true baseline is not installed,
@@ -52,8 +54,9 @@ passes 70/70 under an isolated temporary HOME.
 4. Existing tests pass at the recorded baseline HEAD — ✅ 70/70 with
    `HOME=<isolated-temporary-home> npm test`, baseline
    `4005ad281ce5d2e9bd301f82c66a70c8d1ac445f`.
-5. Focused PR merged and verified at merged HEAD — ⏳ filled during MERGE before
-   L1 advances.
+5. Focused PR merged and verified at merged HEAD — ✅
+   [PR #115](https://github.com/miguelrios/unc-skills/pull/115); its merge state
+   and resulting `main` HEAD are checked immediately before L1 advances.
 
 ## The running delta table (L0→Ln)
 
