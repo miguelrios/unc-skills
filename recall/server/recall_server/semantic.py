@@ -8,6 +8,7 @@ import re
 import stat
 import threading
 import time
+import urllib.error
 import urllib.request
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
@@ -130,8 +131,14 @@ class SemanticRuntime:
             and not (embedding_key_file or embedding_key_env)
         ):
             raise ValueError("remote managed embedding endpoint requires a key source")
-        if not 1 <= embedding_batch_size <= 128:
-            raise ValueError("embedding batch size must be between 1 and 128")
+        maximum_embedding_batch_size = (
+            128 if embedding_protocol == "tei" else 512
+        )
+        if not 1 <= embedding_batch_size <= maximum_embedding_batch_size:
+            raise ValueError(
+                "embedding batch size must be between 1 and "
+                f"{maximum_embedding_batch_size}"
+            )
         if not 1 <= planner_samples <= 3:
             raise ValueError("planner samples must be between 1 and 3")
         planner_values = (
@@ -437,31 +444,62 @@ class SemanticRuntime:
                 headers = {}
                 if self.embedding_key_file or self.embedding_key_env:
                     headers["Authorization"] = "Bearer " + self._read_embedding_key()
-                payload: dict[str, object] = {
-                    "model": self.model,
-                    "input": batch,
-                }
-                if self.embedding_protocol == "voyage":
-                    payload.update(
-                        {
-                            "input_type": input_type,
-                            "output_dimension": self.dimensions,
-                            "output_dtype": "float",
-                            "truncation": True,
-                        }
+                result.extend(
+                    self._embed_managed_batch(
+                        batch,
+                        input_type=input_type,
+                        headers=headers,
                     )
-                else:
-                    payload.update(
-                        {
-                            "encoding_format": "float",
-                            "dimensions": self.dimensions,
-                        }
-                    )
-                response = self._post(
-                    self._managed_embedding_endpoint, payload, headers
                 )
-                result.extend(self._openai_vectors(response, len(batch)))
             return result
+
+    def _embed_managed_batch(
+        self,
+        batch: list[str],
+        *,
+        input_type: str,
+        headers: dict[str, str],
+    ) -> list[list[float]]:
+        payload: dict[str, object] = {
+            "model": self.model,
+            "input": batch,
+        }
+        if self.embedding_protocol == "voyage":
+            payload.update(
+                {
+                    "input_type": input_type,
+                    "output_dimension": self.dimensions,
+                    "output_dtype": "float",
+                    "truncation": True,
+                }
+            )
+        else:
+            payload.update(
+                {
+                    "encoding_format": "float",
+                    "dimensions": self.dimensions,
+                }
+            )
+        try:
+            response = self._post(
+                self._managed_embedding_endpoint, payload, headers
+            )
+        except urllib.error.HTTPError as error:
+            splittable = error.code == 413 or 500 <= error.code <= 504
+            if not splittable or len(batch) == 1:
+                raise
+            error.close()
+            midpoint = len(batch) // 2
+            return self._embed_managed_batch(
+                batch[:midpoint],
+                input_type=input_type,
+                headers=headers,
+            ) + self._embed_managed_batch(
+                batch[midpoint:],
+                input_type=input_type,
+                headers=headers,
+            )
+        return self._openai_vectors(response, len(batch))
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         return self._embed(texts, input_type="document")

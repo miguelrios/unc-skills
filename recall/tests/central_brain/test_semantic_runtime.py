@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
@@ -196,6 +197,70 @@ class SemanticRuntimeContractTest(unittest.TestCase):
         self.assertEqual(runtime.revision, "voyage-synthetic")
         self.assertEqual(runtime.embedding_batch_size, 64)
         self.assertEqual(runtime.query_prefix, "")
+
+    def test_managed_embedding_batch_supports_bounded_bulk_backfill(self) -> None:
+        runtime = SemanticRuntime(
+            embedding_protocol="voyage",
+            embedding_url="https://api.voyage.example",
+            embedding_approved_url="https://api.voyage.example",
+            embedding_key_env="VOYAGE_API_KEY",
+            model="voyage-synthetic",
+            revision="voyage-synthetic-v1",
+            dimensions=512,
+            embedding_batch_size=512,
+        )
+        self.assertEqual(runtime.embedding_batch_size, 512)
+        with self.assertRaisesRegex(ValueError, "between 1 and 512"):
+            SemanticRuntime(
+                embedding_protocol="voyage",
+                embedding_url="https://api.voyage.example",
+                embedding_approved_url="https://api.voyage.example",
+                embedding_key_env="VOYAGE_API_KEY",
+                model="voyage-synthetic",
+                revision="voyage-synthetic-v1",
+                dimensions=512,
+                embedding_batch_size=513,
+            )
+
+    def test_managed_embedding_batch_splits_bounded_upstream_failures(self) -> None:
+        runtime = SemanticRuntime(
+            embedding_protocol="voyage",
+            embedding_url="https://api.voyage.example",
+            embedding_approved_url="https://api.voyage.example",
+            embedding_key_env="VOYAGE_API_KEY",
+            model="voyage-synthetic",
+            revision="voyage-synthetic-v1",
+            dimensions=512,
+            embedding_batch_size=512,
+        )
+        batch_sizes: list[int] = []
+
+        def limited_upstream(url, payload, headers):
+            batch_sizes.append(len(payload["input"]))
+            if len(payload["input"]) > 128:
+                raise urllib.error.HTTPError(url, 500, "synthetic", {}, None)
+            return {
+                "data": [
+                    {"index": index, "embedding": [float(index)] * 512}
+                    for index in range(len(payload["input"]))
+                ]
+            }
+
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"VOYAGE_API_KEY": "short-lived-synthetic-embedding-key"},
+                clear=True,
+            ),
+            mock.patch.object(runtime, "_post", side_effect=limited_upstream),
+        ):
+            vectors = runtime.embed_documents(
+                [f"synthetic-document-{index}" for index in range(300)]
+            )
+        self.assertEqual(len(vectors), 300)
+        self.assertEqual(batch_sizes, [300, 150, 75, 75, 150, 75, 75])
+        self.assertEqual(vectors[0][0], 0.0)
+        self.assertEqual(vectors[75][0], 0.0)
 
     def test_managed_key_may_come_from_a_named_secret_environment_variable(
         self,
