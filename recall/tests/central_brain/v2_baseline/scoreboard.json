@@ -1,0 +1,60 @@
+{
+  "contract": "recall.public-evidence.v1",
+  "git_sha": "2933e88554286a5f606290c942a8dc4e0871e647",
+  "loop_id": "l0_recall_v2_measurement",
+  "manifest_sha256": "32285195fedffe121661d5411b66e5e950681248c8896147c8b512539f503615",
+  "metrics": {
+    "federation": {
+      "high_quality_source_precision": 1.0,
+      "mrr": 1.0,
+      "no_answer_false_positives": 0,
+      "privacy_canary_hits": 0,
+      "recall@5": 1.0,
+      "stale_conflict_accuracy": 1.0
+    },
+    "owner_holdout": {
+      "backend_error_rate": 0.0,
+      "hit@1": 0.1,
+      "latency_p50_ms": 1389.237,
+      "latency_p95_ms": 5320.10315,
+      "questions": 50,
+      "qrels": 50,
+      "recall@5": 0.1,
+      "sources": 1
+    },
+    "safety": {
+      "cross_principal_search_hits": 0,
+      "cross_principal_show_hits": 0,
+      "cross_source_deletes": 0,
+      "deletion_resurrection_rate": 0.0,
+      "duplicate_acknowledged_versions": 0,
+      "privacy_canary_rows": 0,
+      "secret_projection_leaks": 0,
+      "unauthorized_hit_rate": 0.0
+    },
+    "synthetic_retrieval": {
+      "cross_session_recall@5": 1.0,
+      "deduplication_accuracy": 1.0,
+      "embedded_items": 0,
+      "embedding_lag": 180,
+      "exact_hit@1": 1.0,
+      "queries": 132,
+      "semantic_recall@5": 0.0,
+      "session_reconstruction_accuracy": 1.0,
+      "source_routing_backend_error_rate": 0.0,
+      "workflow_recall@5": 0.0
+    }
+  },
+  "schema_version": 1,
+  "status": "complete",
+  "test_counts": {
+    "baseline_node_passed": 3,
+    "baseline_python_passed": 518,
+    "current_node_passed": 3,
+    "current_python_passed": 537,
+    "fresh_postgres_e2e_passed": 8,
+    "private_holdout_cases": 50,
+    "v2_boundary_tests_passed": 13,
+    "v2_holdout_tests_passed": 5
+  }
+}
