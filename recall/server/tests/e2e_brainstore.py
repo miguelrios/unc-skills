@@ -94,7 +94,11 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="recall-c1-e2e-") as tmp:
         log_path = Path(tmp) / "server.log"
         log = log_path.open("w")
-        env = os.environ | {"PYTHONPATH": str(SERVER), "RECALL_DATABASE_URL": dsn, "RECALL_PORT": str(port)}
+        env = os.environ | {
+            "PYTHONPATH": os.pathsep.join((str(RECALL), str(SERVER))),
+            "RECALL_DATABASE_URL": dsn,
+            "RECALL_PORT": str(port),
+        }
         process = subprocess.Popen([sys.executable, "-m", "recall_server.app"], env=env, stdout=log, stderr=log)
         try:
             for _ in range(50):
@@ -392,6 +396,39 @@ def main() -> None:
             assert status == 409 and "different request" in conflict["error"]
             status, revision_ack = request(base, "POST", "/v1/ingest/batches", {"events": [changed]}, "batch-revision")
             assert status == 201 and revision_ack["receipts"][0].endswith("?rev=2")
+            with store.connect() as conn:
+                revision_projection = conn.execute(
+                    """SELECT item.text_redacted,item.deleted_at,event.revision
+                       FROM items item
+                       JOIN source_events event ON event.id=item.event_id
+                       WHERE item.source_id='codex:linux'
+                         AND item.event_native_id='session-1:turn-1'
+                       ORDER BY event.revision"""
+                ).fetchall()
+            assert len(revision_projection) == 2, revision_projection
+            assert revision_projection[0]["deleted_at"] is not None, revision_projection
+            assert revision_projection[1]["deleted_at"] is None, revision_projection
+            assert revision_projection[1]["text_redacted"] == "quartz decision revised"
+            with store.connect() as conn:
+                conn.execute(
+                    """UPDATE items item SET deleted_at=NULL
+                       FROM source_events event
+                       WHERE event.id=item.event_id
+                         AND event.source_id='codex:linux'
+                         AND event.native_id='session-1:turn-1'
+                         AND event.revision=1"""
+                )
+                conn.execute("DELETE FROM schema_migrations WHERE version=26")
+            store.migrate()
+            with store.connect() as conn:
+                live_revision_projection = conn.execute(
+                    """SELECT count(*) AS n
+                       FROM items
+                       WHERE source_id='codex:linux'
+                         AND event_native_id='session-1:turn-1'
+                         AND deleted_at IS NULL"""
+                ).fetchone()["n"]
+            assert live_revision_projection == 1, live_revision_projection
 
             # Same native ID in different sources remains two independently resolvable records.
             collision_a = make_envelope("shared-native:1", {"text": "alpha evidence"}, source="source:alpha", parent="shared")
@@ -668,6 +705,7 @@ def main() -> None:
                     "source_events": conn.execute("SELECT count(*) AS n FROM source_events").fetchone()["n"],
                     "live_items": conn.execute("SELECT count(*) AS n FROM items WHERE deleted_at IS NULL").fetchone()["n"],
                     "revisions_for_session_1_turn_1": conn.execute("SELECT count(*) AS n FROM source_events WHERE source_id='codex:linux' AND native_id='session-1:turn-1'").fetchone()["n"],
+                    "superseded_revision_live_items": 0,
                     "race_duplicates": 0,
                     "same_key_race_single_commit": True,
                     "watermark_advanced_once_per_batch": True,
