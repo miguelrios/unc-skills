@@ -1340,14 +1340,15 @@ class BrainStore:
             for position, row in enumerate(rows, 1):
                 contribution = 1.0 / (60 + position)
                 leg = row.pop("leg")
+                observable_legs = {leg, "answer"} if leg == "exact-answer" else {leg}
                 existing = candidates.get(row["id"])
                 if existing is None:
-                    row["legs"] = {leg}
+                    row["legs"] = observable_legs
                     row["leg_contributions"] = {leg: contribution}
                     row["fusion_score"] = contribution
                     candidates[row["id"]] = row
                 else:
-                    existing["legs"].add(leg)
+                    existing["legs"].update(observable_legs)
                     existing["leg_contributions"][leg] = max(
                         contribution,
                         existing["leg_contributions"].get(leg, 0.0),
