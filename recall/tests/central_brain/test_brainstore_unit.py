@@ -117,6 +117,22 @@ class SchemaMigrationContractTest(unittest.TestCase):
             rendered,
         )
 
+    def test_turn_dedupe_upgrade_collapses_historical_projection_rows(
+        self,
+    ) -> None:
+        migration = SERVER / "schema" / "025_collapse_turn_prompt_duplicates.sql"
+        rendered = " ".join(migration.read_text().split()).casefold()
+        self.assertIn(
+            "row_number() over ( partition by embedding.source_id, "
+            "embedding.session_native_id, anchor.text_redacted "
+            "order by embedding.anchor_item_id desc )",
+            rendered,
+        )
+        self.assertIn(
+            "delete from turn_embeddings duplicate using ranked",
+            rendered,
+        )
+
     def test_v2_canonical_plane_is_tenant_keyed_and_deletion_explicit(self) -> None:
         migration = SERVER / "schema" / "019_v2_canonical_plane.sql"
         rendered = " ".join(migration.read_text().split()).casefold()
@@ -818,6 +834,13 @@ class SemanticRetrievalContractTest(unittest.TestCase):
             implementation,
         )
         self.assertIn("older_anchor.text_redacted=%s", implementation)
+        self.assertLess(
+            implementation.index("_dedupe_turn_embeddings_for_session("),
+            implementation.index(
+                "DELETE FROM turn_embedding_dirty_sessions",
+            ),
+        )
+
 
     def test_turn_projection_uses_one_indexable_response_range(self) -> None:
         implementation = inspect.getsource(BrainStore.embed_pending_turns)
