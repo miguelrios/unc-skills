@@ -30,10 +30,12 @@ class BackupPublicationTest(unittest.TestCase):
             "forget_tombstones",
             "canonical_audit_events",
         ):
-            self.assertIn(f"FROM {table}", rendered)
+            self.assertIn(f"('{table}',", rendered)
         self.assertIn('"database_fingerprint"', rendered)
         self.assertNotIn('"source_fingerprint"', rendered)
         self.assertIn('pg_restore --dbname="$PGDATABASE"', rendered)
+        self.assertIn("to_regclass('public.' || name) IS NOT NULL", rendered)
+        self.assertIn("database fingerprint failed", rendered)
 
     def test_deployment_timer_is_non_overlapping_and_makes_no_false_rpo_claim(self) -> None:
         timer = (ROOT / "server/deploy/recall-brain-backup.timer").read_text()
@@ -88,7 +90,7 @@ case "$input" in
     read ignored < "$fifo"
     ;;
   *'SET TRANSACTION SNAPSHOT'*'max(created_at)'*) echo 0;;
-  *'SET TRANSACTION SNAPSHOT'*) echo '1:synthetic-fingerprint';;
+  *'SET TRANSACTION SNAPSHOT'*) printf 'schema_migrations\t1\td41d8cd98f00b204e9800998ecf8427e\n';;
   *) exit 4;;
 esac
 """
@@ -140,10 +142,13 @@ esac
             backup = root / "latest"
             backup.mkdir()
             original = b"stable-root-owned-dump"
+            digest = hashlib.md5(
+                b"schema_migrations:1:d41d8cd98f00b204e9800998ecf8427e"
+            ).hexdigest()
             (backup / "brain.dump").write_bytes(original)
             (backup / "manifest.json").write_text(json.dumps({
                 "dump_sha256": hashlib.sha256(original).hexdigest(),
-                "database_fingerprint": "1:synthetic-fingerprint",
+                "database_fingerprint": f"1:{digest}",
             }))
             control = root / "control"
             control.mkdir()
@@ -172,7 +177,10 @@ test "$(cat "$mount/brain.dump")" = 'stable-root-owned-dump'
             )
             docker.chmod(0o755)
             psql = binaries / "psql"
-            psql.write_text("#!/bin/sh\necho '1:synthetic-fingerprint'\n")
+            psql.write_text(
+                "#!/bin/sh\n"
+                "printf 'schema_migrations\\t1\\td41d8cd98f00b204e9800998ecf8427e\\n'\n"
+            )
             psql.chmod(0o755)
             forbidden_link = binaries / "ln"
             forbidden_link.write_text("#!/bin/sh\necho 'hardlink forbidden' >&2\nexit 1\n")

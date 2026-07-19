@@ -18,74 +18,95 @@ usage() {
 fingerprint() {
   local url_env=$1
   local snapshot=${2:-}
-  local snapshot_sql=''
+  local snapshot_sql='' rows
   if [ -n "$snapshot" ]; then
     snapshot_sql="SET TRANSACTION SNAPSHOT '$snapshot';"
   fi
+  rows=$(
     python3 "$LIBPQ_ENV" exec --url-env "$url_env" --profile "$DATABASE_PROFILE" -- \
     psql -XAtq -v ON_ERROR_STOP=1 <<SQL
 BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
 $snapshot_sql
-WITH fingerprints(name,row_count,digest) AS (
-  SELECT 'schema_migrations',count(*),
-    COALESCE(md5(string_agg(md5(row_to_json(value)::text),'' ORDER BY version)),md5(''))
-    FROM schema_migrations value
-  UNION ALL SELECT 'source_events',count(*),
-    COALESCE(md5(string_agg(md5(row_to_json(value)::text),'' ORDER BY id)),md5(''))
-    FROM source_events value
-  UNION ALL SELECT 'brain_tenants',count(*),
-    COALESCE(md5(string_agg(md5(row_to_json(value)::text),'' ORDER BY tenant_id)),md5(''))
-    FROM brain_tenants value
-  UNION ALL SELECT 'brain_principals',count(*),
-    COALESCE(md5(string_agg(md5(row_to_json(value)::text),'' ORDER BY tenant_id,principal_id)),md5(''))
-    FROM brain_principals value
-  UNION ALL SELECT 'canonical_sources',count(*),
-    COALESCE(md5(string_agg(md5(row_to_json(value)::text),'' ORDER BY tenant_id,source_id)),md5(''))
-    FROM canonical_sources value
-  UNION ALL SELECT 'raw_artifacts',count(*),
-    COALESCE(md5(string_agg(md5(row_to_json(value)::text),'' ORDER BY tenant_id,source_id,artifact_id)),md5(''))
-    FROM raw_artifacts value
-  UNION ALL SELECT 'canonical_ingest_jobs',count(*),
-    COALESCE(md5(string_agg(md5(row_to_json(value)::text),'' ORDER BY tenant_id,source_id,job_id)),md5(''))
-    FROM canonical_ingest_jobs value
-  UNION ALL SELECT 'canonical_events',count(*),
-    COALESCE(md5(string_agg(md5(row_to_json(value)::text),'' ORDER BY tenant_id,source_id,event_id)),md5(''))
-    FROM canonical_events value
-  UNION ALL SELECT 'canonical_documents',count(*),
-    COALESCE(md5(string_agg(md5(row_to_json(value)::text),'' ORDER BY tenant_id,source_id,document_id)),md5(''))
-    FROM canonical_documents value
-  UNION ALL SELECT 'canonical_chunks',count(*),
-    COALESCE(md5(string_agg(md5(row_to_json(value)::text),'' ORDER BY tenant_id,source_id,chunk_id)),md5(''))
-    FROM canonical_chunks value
-  UNION ALL SELECT 'receipt_redirects',count(*),
-    COALESCE(md5(string_agg(md5(row_to_json(value)::text),'' ORDER BY tenant_id,old_receipt)),md5(''))
-    FROM receipt_redirects value
-  UNION ALL SELECT 'forget_tombstones',count(*),
-    COALESCE(md5(string_agg(md5(row_to_json(value)::text),'' ORDER BY tenant_id,source_id,target_identity_sha256)),md5(''))
-    FROM forget_tombstones value
-  UNION ALL SELECT 'canonical_audit_events',count(*),
-    COALESCE(md5(string_agg(md5(row_to_json(value)::text),'' ORDER BY tenant_id,source_id,audit_id)),md5(''))
-    FROM canonical_audit_events value
+SELECT format(
+  \$query\$SELECT %L || chr(9) || count(*) || chr(9) ||
+    COALESCE(md5(string_agg(md5(row_to_json(value)::text),'' ORDER BY %s)),md5(''))
+    FROM %I value;\$query\$,
+  name, order_by, name
 )
-SELECT COALESCE(sum(row_count),0) || ':' ||
-       md5(string_agg(name || ':' || row_count || ':' || digest,'|' ORDER BY name))
-FROM fingerprints;
+FROM (VALUES
+  ('schema_migrations','version'),
+  ('source_events','id'),
+  ('brain_tenants','tenant_id'),
+  ('brain_principals','tenant_id,principal_id'),
+  ('canonical_sources','tenant_id,source_id'),
+  ('raw_artifacts','tenant_id,source_id,artifact_id'),
+  ('canonical_ingest_jobs','tenant_id,source_id,job_id'),
+  ('canonical_events','tenant_id,source_id,event_id'),
+  ('canonical_documents','tenant_id,source_id,document_id'),
+  ('canonical_chunks','tenant_id,source_id,chunk_id'),
+  ('receipt_redirects','tenant_id,old_receipt'),
+  ('forget_tombstones','tenant_id,source_id,target_identity_sha256'),
+  ('canonical_audit_events','tenant_id,source_id,audit_id')
+) AS approved(name,order_by)
+WHERE to_regclass('public.' || name) IS NOT NULL
+ORDER BY name
+\gexec
 COMMIT;
 SQL
+  )
+  FINGERPRINT_ROWS="$rows" python3 - <<'PY'
+import hashlib
+import os
+import re
+
+approved = {
+    "schema_migrations", "source_events", "brain_tenants", "brain_principals",
+    "canonical_sources", "raw_artifacts", "canonical_ingest_jobs",
+    "canonical_events", "canonical_documents", "canonical_chunks",
+    "receipt_redirects", "forget_tombstones", "canonical_audit_events",
+}
+rows = []
+for line in os.environ["FINGERPRINT_ROWS"].splitlines():
+    fields = line.split("\t")
+    if (
+        len(fields) != 3 or fields[0] not in approved or not fields[1].isdigit()
+        or re.fullmatch(r"[0-9a-f]{32}", fields[2]) is None
+    ):
+        raise SystemExit("database fingerprint failed")
+    rows.append((fields[0], int(fields[1]), fields[2]))
+if not rows or len({row[0] for row in rows}) != len(rows):
+    raise SystemExit("database fingerprint failed")
+rendered = "|".join(f"{name}:{count}:{digest}" for name, count, digest in sorted(rows))
+print(f"{sum(row[1] for row in rows)}:{hashlib.md5(rendered.encode()).hexdigest()}")
+PY
 }
 
 snapshot_newest_epoch() {
-  local url_env=$1 snapshot=$2
-  python3 "$LIBPQ_ENV" exec --url-env "$url_env" --profile "$DATABASE_PROFILE" -- \
+  local url_env=$1 snapshot=$2 epochs
+  epochs=$(
+    python3 "$LIBPQ_ENV" exec --url-env "$url_env" --profile "$DATABASE_PROFILE" -- \
     psql -XAtq -v ON_ERROR_STOP=1 <<SQL
 BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
 SET TRANSACTION SNAPSHOT '$snapshot';
-SELECT GREATEST(
-  COALESCE((SELECT extract(epoch FROM max(created_at))::bigint FROM source_events),0),
-  COALESCE((SELECT extract(epoch FROM max(created_at))::bigint FROM canonical_events),0)
-);
+SELECT format(
+  'SELECT COALESCE(extract(epoch FROM max(created_at))::bigint,0) FROM %I;',
+  name
+)
+FROM (VALUES ('source_events'),('canonical_events')) AS approved(name)
+WHERE to_regclass('public.' || name) IS NOT NULL
+ORDER BY name
+\gexec
 COMMIT;
 SQL
+  )
+  NEWEST_EPOCH_ROWS="$epochs" python3 - <<'PY'
+import os
+
+rows = os.environ["NEWEST_EPOCH_ROWS"].splitlines()
+if not rows or any(not row.isdigit() for row in rows):
+    raise SystemExit("database event watermark failed")
+print(max(map(int, rows)))
+PY
 }
 
 case "$MODE" in
