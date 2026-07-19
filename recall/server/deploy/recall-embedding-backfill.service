@@ -9,6 +9,7 @@ TimeoutStartSec=infinity
 WorkingDirectory=%h/services/recall-brain/recall/server
 EnvironmentFile=%h/.config/recall-brain/service.env
 ExecStart=/usr/bin/env RECALL_EMBEDDING_URL=http://127.0.0.1:8090 RECALL_SEMANTIC_TIMEOUT_SECONDS=120 %h/.config/recall-brain/venv/bin/python -m recall_server.cli backfill-embeddings --batch-size 128 --max-batches 4
+ExecStart=/usr/bin/env RECALL_EMBEDDING_URL=http://127.0.0.1:8090 RECALL_SEMANTIC_TIMEOUT_SECONDS=120 %h/.config/recall-brain/venv/bin/python -m recall_server.cli backfill-turn-embeddings --batch-size 128 --max-batches 4
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true

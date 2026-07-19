@@ -74,6 +74,10 @@ def main() -> None:
     backfill_embeddings.add_argument("--max-batches", type=int)
     backfill_embeddings.add_argument("--source-id")
     backfill_embeddings.add_argument("--surface")
+    backfill_turn_embeddings = sub.add_parser("backfill-turn-embeddings")
+    backfill_turn_embeddings.add_argument("--batch-size", type=int, default=128)
+    backfill_turn_embeddings.add_argument("--max-batches", type=int)
+    backfill_turn_embeddings.add_argument("--source-id")
     sub.add_parser("export")
     conformance = sub.add_parser("mcp-conformance")
     conformance.add_argument("--config", type=Path, required=True)
@@ -265,6 +269,17 @@ def main() -> None:
                     args.max_batches,
                     args.source_id,
                     args.surface,
+                ),
+                sort_keys=True,
+            )
+        )
+    elif args.command == "backfill-turn-embeddings":
+        print(
+            json.dumps(
+                store.embed_pending_turns(
+                    args.batch_size,
+                    args.max_batches,
+                    args.source_id,
                 ),
                 sort_keys=True,
             )

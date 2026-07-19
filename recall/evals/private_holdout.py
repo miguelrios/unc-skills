@@ -148,6 +148,7 @@ def validate_private_holdout(path: Path, *, minimum_cases: int = 50) -> dict[str
         if case["match_method"] not in {
             "exact-indexed-evidence",
             "exact-session-export-evidence",
+            "synthetic-paraphrase-from-indexed-evidence",
             "owner-reviewed",
             "owner-reviewed-no-answer",
         }:

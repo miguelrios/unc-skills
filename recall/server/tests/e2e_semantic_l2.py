@@ -38,7 +38,15 @@ class FakeSemanticRuntime:
     def vector(text: str) -> list[float]:
         value = text.casefold()
         vector = [0.0] * 512
-        if "orchard premise" in value:
+        if (
+            "paired semantic clue" in value
+            or (
+                "context anchor alpha" in value
+                and "final evidence beta" in value
+            )
+        ):
+            vector[3] = 1.0
+        elif "orchard premise" in value:
             vector[2] = 1.0
         else:
             vector[0 if ("trip and cooldown" in value or "circuit breaker" in value) else 1] = 1.0
@@ -247,6 +255,81 @@ def main() -> None:
         authorized_source="source-h",
     )
     assert bounded_answer["results"][0]["native_id"] == "progress", bounded_answer
+    store.ingest("turn-semantic-j", [
+        envelope(
+            "source-j", "turn-question", "Context anchor alpha.", "session-turn",
+            occurred_at="2026-07-16T01:00:00Z",
+        ),
+        envelope(
+            "source-j", "turn-answer", "Final evidence beta.", "session-turn",
+            role="assistant", occurred_at="2026-07-16T01:01:00Z",
+        ),
+        envelope(
+            "source-j", "turn-boundary", "What came after that?", "session-turn",
+            occurred_at="2026-07-16T01:02:00Z",
+        ),
+    ])
+    assert store.embed_pending(batch_size=10, source_id="source-j")["processed"] == 3
+    turn_backfill = store.embed_pending_turns(batch_size=10, source_id="source-j")
+    turn_replay = store.embed_pending_turns(batch_size=10, source_id="source-j")
+    assert turn_backfill["processed"] == 1
+    assert turn_replay["processed"] == 0
+    paired = store.search(
+        "recover the paired semantic clue", {}, 5,
+        authorized_source="source-j",
+    )
+    assert paired["results"][0]["native_id"] == "turn-answer", paired
+    assert {"turn-semantic", "semantic", "answer"} <= set(
+        paired["results"][0]["legs"]
+    )
+    scoped_elsewhere = store.search(
+        "recover the paired semantic clue", {}, 5,
+        authorized_source="source-a",
+    )
+    assert all(
+        row["source_id"] == "source-a" for row in scoped_elsewhere["results"]
+    )
+    assert all(
+        row["native_id"] != "turn-answer"
+        for row in scoped_elsewhere["results"]
+    )
+    with store.connect() as connection:
+        connection.execute(
+            """UPDATE items SET deleted_at=now()
+               WHERE source_id='source-j' AND event_native_id='turn-answer'"""
+        )
+    deleted_turn = store.search(
+        "recover the paired semantic clue", {}, 5,
+        authorized_source="source-j",
+    )
+    assert all(
+        row["native_id"] != "turn-answer" for row in deleted_turn["results"]
+    )
+    store.ingest("turn-late-user-k", [
+        envelope(
+            "source-k", "late-question", "Context anchor alpha.", "session-late",
+            occurred_at="2026-07-16T02:00:00Z",
+        ),
+    ])
+    empty_turn = store.embed_pending_turns(batch_size=10, source_id="source-k")
+    assert empty_turn["processed"] == 0
+    store.ingest("turn-late-answer-k", [
+        envelope(
+            "source-k", "late-answer", "Final evidence beta.", "session-late",
+            role="assistant", occurred_at="2026-07-16T02:01:00Z",
+        ),
+    ])
+    late_turn = store.embed_pending_turns(batch_size=10, source_id="source-k")
+    assert late_turn["processed"] == 1
+    late_result = store.search(
+        "recover the paired semantic clue", {}, 5,
+        authorized_source="source-k",
+    )
+    assert late_result["results"][0]["native_id"] == "late-answer"
+    global_turn_backfill = store.embed_pending_turns(batch_size=100)
+    global_turn_replay = store.embed_pending_turns(batch_size=100)
+    assert global_turn_backfill["processed"] >= 1
+    assert global_turn_replay["processed"] == 0
     exact_question = "What exact orchard premise decision did we make?"
     store.ingest("exact-question-i", [
         envelope(
@@ -386,6 +469,13 @@ def main() -> None:
     print(json.dumps({
         "status": "pass", "semantic_hit": 1, "answer_adjacency_hit": 1,
         "answer_turn_index_used": 1,
+        "turn_semantic_hit": 1,
+        "turn_embedding_backfill": turn_backfill["processed"],
+        "turn_embedding_replay": turn_replay["processed"],
+        "global_turn_embedding_backfill": global_turn_backfill["processed"],
+        "global_turn_embedding_replay": global_turn_replay["processed"],
+        "turn_deleted_hits": 0,
+        "late_assistant_turn_backfill": late_turn["processed"],
         "unauthorized_hits": 0,
         "first_backfill": first["processed"] + remaining["processed"],
         "idempotent_replay": second["processed"], "source_scoped_replay": 0,

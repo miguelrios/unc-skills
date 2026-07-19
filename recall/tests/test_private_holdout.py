@@ -55,6 +55,29 @@ class PrivateOwnerHoldoutTest(unittest.TestCase):
             self.assertNotIn("query", json.dumps(receipt))
             self.assertNotIn("task-001", json.dumps(receipt))
 
+    def test_validates_synthetic_paraphrases_without_owner_review_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = private_dir(root, "private")
+            holdout = directory / "holdout.jsonl"
+            rows = [{
+                "id": f"semantic-{index:03d}",
+                "stratum": "owner-semantic",
+                "query": f"What decision did the indexed evidence describe for topic {index:03d}?",
+                "answers": [f"recall://synthetic:source/task-{index:03d}"],
+                "match_method": "synthetic-paraphrase-from-indexed-evidence",
+            } for index in range(50)]
+            private_write(
+                holdout,
+                "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+            )
+
+            receipt = validate_private_holdout(holdout)
+
+            self.assertEqual(receipt["case_count"], 50)
+            self.assertEqual(receipt["positive_cases"], 50)
+            self.assertEqual(receipt["strata_count"], 1)
+
     def test_rejects_private_boundary_schema_and_qrel_failures(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
