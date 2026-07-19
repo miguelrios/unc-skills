@@ -768,6 +768,23 @@ class RelatedRetrievalContractTest(unittest.TestCase):
 
 
 class SemanticRetrievalContractTest(unittest.TestCase):
+    def test_turn_projection_uses_one_indexable_response_range(self) -> None:
+        implementation = inspect.getsource(BrainStore.embed_pending_turns)
+        response_range = implementation.split(
+            "FROM items candidate", 1,
+        )[1].split("HAVING count(*)>0", 1)[0]
+        response_range = " ".join(response_range.split())
+
+        self.assertNotIn("next_user.id IS NULL", response_range)
+        self.assertIn(
+            "COALESCE( next_user.occurred_at, 'infinity'::timestamptz )",
+            response_range,
+        )
+        self.assertIn(
+            "COALESCE( next_user.id,9223372036854775807 )",
+            response_range,
+        )
+
     def test_turn_projection_preserves_question_head_and_final_answer_tail(self) -> None:
         rendered = turn_embedding_text(
             "Why did we choose the managed database?",
