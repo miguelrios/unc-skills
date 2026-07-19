@@ -1190,10 +1190,14 @@ class BrainStore:
             """
             WITH anchors AS (
               SELECT *
-              FROM unnest(%s::bigint[],%s::double precision[],%s::integer[])
-                   WITH ORDINALITY AS value(anchor_id,lexical_rank,anchor_tier,anchor_order)
+              FROM unnest(
+                %s::bigint[],%s::double precision[],%s::integer[],%s::boolean[]
+              ) WITH ORDINALITY AS value(
+                anchor_id,lexical_rank,anchor_tier,exact_question,anchor_order
+              )
             ), answers AS (
-              SELECT value.lexical_rank,value.anchor_tier,value.anchor_order,response.id
+              SELECT value.lexical_rank,value.anchor_tier,value.exact_question,
+                     value.anchor_order,response.id
               FROM anchors value
               JOIN items anchor ON anchor.id=value.anchor_id
               LEFT JOIN LATERAL (
@@ -1236,7 +1240,7 @@ class BrainStore:
                    coalesce(sp.freshness_half_life_days,180) AS freshness_half_life_days,
                    (sp.source_id IS NOT NULL) AS source_profiled,
                    answers.lexical_rank::real AS lexical_rank,
-                   answers.anchor_tier
+                   answers.anchor_tier,answers.exact_question
             FROM answers
             JOIN items i ON i.id=answers.id
             JOIN sessions s ON s.source_id=i.source_id AND s.native_id=i.session_native_id
@@ -1248,6 +1252,7 @@ class BrainStore:
                 [int(row["id"]) for row in bounded],
                 [float(row.get("lexical_rank", 0.0)) for row in bounded],
                 [int(row.get("tier", 1)) for row in bounded],
+                ["exact-question" in row.get("legs", ()) for row in bounded],
                 filters.get("since"), filters.get("since"),
                 filters.get("until"), filters.get("until"),
             ],
@@ -1255,9 +1260,16 @@ class BrainStore:
         ).fetchall()
         return [
             {
-                **{key: value for key, value in dict(row).items() if key != "anchor_tier"},
-                "leg": "answer",
-                "tier": max(2, int(row["anchor_tier"])),
+                **{
+                    key: value
+                    for key, value in dict(row).items()
+                    if key not in {"anchor_tier", "exact_question"}
+                },
+                "leg": "exact-answer" if row["exact_question"] else "answer",
+                "tier": max(
+                    4 if row["exact_question"] else 2,
+                    int(row["anchor_tier"]),
+                ),
             }
             for row in rows
         ]
@@ -1328,14 +1340,15 @@ class BrainStore:
             for position, row in enumerate(rows, 1):
                 contribution = 1.0 / (60 + position)
                 leg = row.pop("leg")
+                observable_legs = {leg, "answer"} if leg == "exact-answer" else {leg}
                 existing = candidates.get(row["id"])
                 if existing is None:
-                    row["legs"] = {leg}
+                    row["legs"] = observable_legs
                     row["leg_contributions"] = {leg: contribution}
                     row["fusion_score"] = contribution
                     candidates[row["id"]] = row
                 else:
-                    existing["legs"].add(leg)
+                    existing["legs"].update(observable_legs)
                     existing["leg_contributions"][leg] = max(
                         contribution,
                         existing["leg_contributions"].get(leg, 0.0),
@@ -1550,7 +1563,7 @@ class BrainStore:
                         authorized_source=authorized_source, deadline_at=deadline_at,
                         routed_source_ids=routed_source_ids,
                     )))
-                if not identifiers and candidates:
+                if candidates:
                     merge(run_leg("answer", lambda: self._answer_leg(
                         conn, list(candidates.values()), filters, deadline_at=deadline_at,
                     )))
