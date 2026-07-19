@@ -32,6 +32,7 @@ from recall_server.app import Handler, serve, serve_unix, validate_http_profile
 from recall_server.capture import build_capture_event
 from recall_server.db import (
     BrainStore,
+    bounded_search_text,
     enough_session_anchors,
     optional_rescue_deadline,
     related_candidate_limit,
@@ -753,6 +754,18 @@ class RelatedRetrievalContractTest(unittest.TestCase):
 
 
 class SemanticRetrievalContractTest(unittest.TestCase):
+    def test_search_results_bound_large_evidence_and_keep_show_receipt(self) -> None:
+        exact, exact_truncated = bounded_search_text("x" * 4096)
+        oversized, oversized_truncated = bounded_search_text("🙂" * 4097)
+
+        self.assertEqual(exact, "x" * 4096)
+        self.assertFalse(exact_truncated)
+        self.assertEqual(oversized, "🙂" * 4096)
+        self.assertTrue(oversized_truncated)
+        implementation = inspect.getsource(BrainStore.search)
+        self.assertIn("bounded_search_text", implementation)
+        self.assertIn('"text_truncated"', implementation)
+
     @mock.patch("recall_server.db.ConnectionPool")
     def test_brainstore_reuses_a_bounded_connection_pool(self, pool_type) -> None:
         pool = pool_type.return_value
