@@ -326,10 +326,48 @@ def main() -> None:
         authorized_source="source-k",
     )
     assert late_result["results"][0]["native_id"] == "late-answer"
+    store.ingest("turn-watermark-low", [
+        envelope(
+            "source-l", "watermark-low-question", "Low turn question.",
+            "session-watermark-low", occurred_at="2026-07-16T03:00:00Z",
+        ),
+        envelope(
+            "source-l", "watermark-low-answer", "Low turn answer.",
+            "session-watermark-low", role="assistant",
+            occurred_at="2026-07-16T03:01:00Z",
+        ),
+    ])
+    with store.connect() as connection:
+        connection.execute(
+            """DELETE FROM turn_embedding_dirty_sessions
+               WHERE source_id='source-l'
+                 AND session_native_id='session-watermark-low'"""
+        )
+    store.ingest("turn-watermark-high", [
+        envelope(
+            "source-m", "watermark-high-question", "High turn question.",
+            "session-watermark-high", occurred_at="2026-07-16T04:00:00Z",
+        ),
+        envelope(
+            "source-m", "watermark-high-answer", "High turn answer.",
+            "session-watermark-high", role="assistant",
+            occurred_at="2026-07-16T04:01:00Z",
+        ),
+    ])
+    dirty_first = store.embed_pending_turns(batch_size=100, max_batches=1)
+    assert dirty_first["processed"] == 1
     global_turn_backfill = store.embed_pending_turns(batch_size=100)
     global_turn_replay = store.embed_pending_turns(batch_size=100)
     assert global_turn_backfill["processed"] >= 1
     assert global_turn_replay["processed"] == 0
+    with store.connect() as connection:
+        projected_watermark_turns = connection.execute(
+            """SELECT count(*) AS value
+               FROM turn_embeddings embedding
+               JOIN items item ON item.id=embedding.anchor_item_id
+               WHERE item.source_id IN ('source-l','source-m')"""
+        ).fetchone()["value"]
+    assert projected_watermark_turns == 2
     exact_question = "What exact orchard premise decision did we make?"
     store.ingest("exact-question-i", [
         envelope(
