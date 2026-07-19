@@ -76,6 +76,19 @@ class SchemaMigrationContractTest(unittest.TestCase):
                 rf"schema_migrations\(version\) VALUES \({version}\)",
             )
 
+    def test_turn_backfill_anchor_cursor_has_a_session_id_index(self) -> None:
+        migration = SERVER / "schema" / "022_turn_anchor_cursor_index.sql"
+        rendered = " ".join(migration.read_text().split()).casefold()
+        self.assertIn(
+            "on items(source_id, session_native_id, id)",
+            rendered,
+        )
+        self.assertIn(
+            "where deleted_at is null and role='user' "
+            "and btrim(text_redacted)<>''",
+            rendered,
+        )
+
     def test_v2_canonical_plane_is_tenant_keyed_and_deletion_explicit(self) -> None:
         migration = SERVER / "schema" / "019_v2_canonical_plane.sql"
         rendered = " ".join(migration.read_text().split()).casefold()
