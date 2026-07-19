@@ -296,6 +296,14 @@ class SchemaMigrationContractTest(unittest.TestCase):
         self.assertIn("refresh runtime grants after every migration", guide)
         self.assertIn("on all tables in schema public", guide)
         self.assertIn("on all sequences in schema public", guide)
+        self.assertIn(
+            "revoke all privileges on table public.schema_migrations",
+            guide,
+        )
+        self.assertIn(
+            "grant select on table public.schema_migrations",
+            guide,
+        )
 
 
 class EmbeddingBackfillWatermarkTest(unittest.TestCase):
