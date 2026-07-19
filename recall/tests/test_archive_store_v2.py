@@ -1,0 +1,259 @@
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import tempfile
+import unittest
+from dataclasses import replace
+from pathlib import Path
+
+from server.recall_server.archive import (
+    ArchiveCorruption,
+    ArchiveNotFound,
+    ArchiveRequest,
+    FilesystemArchiveStore,
+    S3ArchiveStore,
+)
+
+
+PAYLOAD = b'{"kind":"synthetic","text":"private source bytes"}'
+TENANT = "tenant:synthetic"
+SOURCE = "source:synthetic"
+
+
+def request(**overrides) -> ArchiveRequest:
+    values = {
+        "tenant_id": TENANT,
+        "source_id": SOURCE,
+        "native_id": "native:synthetic-1",
+        "revision": 1,
+        "media_type": "application/json",
+        "payload": PAYLOAD,
+    }
+    values.update(overrides)
+    return ArchiveRequest(**values)
+
+
+class FakeBody:
+    def __init__(self, payload: bytes):
+        self.payload = payload
+        self.offset = 0
+
+    def read(self, size: int) -> bytes:
+        chunk = self.payload[self.offset:self.offset + size]
+        self.offset += len(chunk)
+        return chunk
+
+
+class FakeS3:
+    def __init__(self):
+        self.objects: dict[tuple[str, str, str], dict] = {}
+        self.put_calls: list[dict] = []
+        self.version = 0
+
+    def put_object(self, **kwargs):
+        self.put_calls.append(kwargs)
+        self.version += 1
+        version = f"version-{self.version}"
+        self.objects[(kwargs["Bucket"], kwargs["Key"], version)] = dict(kwargs)
+        return {"VersionId": version}
+
+    def get_object(self, **kwargs):
+        try:
+            value = self.objects[(kwargs["Bucket"], kwargs["Key"], kwargs["VersionId"])]
+        except KeyError as error:
+            raise ArchiveNotFound("archive object not found") from error
+        return {
+            "Body": FakeBody(value["Body"]),
+            "ContentLength": value["ContentLength"],
+            "Metadata": value["Metadata"],
+            "VersionId": kwargs["VersionId"],
+        }
+
+    def head_object(self, **kwargs):
+        matches = [
+            (version, value)
+            for (bucket, key, version), value in self.objects.items()
+            if (
+                bucket == kwargs["Bucket"]
+                and key == kwargs["Key"]
+                and (
+                    "VersionId" not in kwargs
+                    or version == kwargs["VersionId"]
+                )
+            )
+        ]
+        if not matches:
+            raise ArchiveNotFound("archive object not found")
+        version, value = matches[-1]
+        return {
+            "ContentLength": value["ContentLength"],
+            "Metadata": value["Metadata"],
+            "VersionId": version,
+        }
+
+    def delete_object(self, **kwargs):
+        self.objects.pop(
+            (kwargs["Bucket"], kwargs["Key"], kwargs["VersionId"]),
+            None,
+        )
+        return {}
+
+
+class ArchiveStoreParityTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.key = b"k" * 32
+        self.temporary = tempfile.TemporaryDirectory()
+        self.filesystem = FilesystemArchiveStore(
+            Path(self.temporary.name) / "archive",
+            namespace_key=self.key,
+        )
+        self.s3_client = FakeS3()
+        self.s3 = S3ArchiveStore(
+            bucket="recall-synthetic",
+            endpoint_url="https://objects.example.test",
+            namespace_key=self.key,
+            client=self.s3_client,
+        )
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_filesystem_and_s3_create_read_version_delete_with_receipt_parity(self):
+        for store in (self.filesystem, self.s3):
+            first = store.put(request())
+            replay = store.put(request())
+            changed = store.put(request(revision=2, payload=PAYLOAD + b"\n"))
+
+            self.assertEqual(first.artifact_id, replay.artifact_id)
+            self.assertEqual(first.object_key, replay.object_key)
+            self.assertEqual(first.version_id, replay.version_id)
+            self.assertNotEqual(first.object_key, changed.object_key)
+            self.assertEqual(
+                store.read(first, tenant_id=TENANT, source_id=SOURCE),
+                PAYLOAD,
+            )
+            self.assertTrue(
+                store.delete(first, tenant_id=TENANT, source_id=SOURCE),
+            )
+            self.assertFalse(
+                store.delete(first, tenant_id=TENANT, source_id=SOURCE),
+            )
+            with self.assertRaises(ArchiveNotFound):
+                store.read(first, tenant_id=TENANT, source_id=SOURCE)
+
+        fs_ref = self.filesystem.put(request(native_id="native:parity"))
+        s3_ref = self.s3.put(request(native_id="native:parity"))
+        self.assertEqual(fs_ref.artifact_id, s3_ref.artifact_id)
+        self.assertEqual(fs_ref.object_key, s3_ref.object_key)
+        self.assertEqual(fs_ref.content_sha256, s3_ref.content_sha256)
+
+    def test_scope_and_integrity_fail_closed(self):
+        for store in (self.filesystem, self.s3):
+            reference = store.put(request())
+            with self.assertRaises(ArchiveNotFound):
+                store.read(
+                    reference,
+                    tenant_id="tenant:other",
+                    source_id=SOURCE,
+                )
+            with self.assertRaises(ArchiveNotFound):
+                store.read(
+                    reference,
+                    tenant_id=TENANT,
+                    source_id="source:other",
+                )
+            with self.assertRaises(ArchiveNotFound):
+                store.delete(
+                    reference,
+                    tenant_id="tenant:other",
+                    source_id=SOURCE,
+                )
+            with self.assertRaises(ArchiveNotFound):
+                store.read(
+                    replace(reference, object_key="../../private"),
+                    tenant_id=TENANT,
+                    source_id=SOURCE,
+                )
+
+        reference = self.filesystem.put(request(native_id="native:corrupt"))
+        data_path = self.filesystem.root / reference.object_key / "data"
+        data_path.write_bytes(b"tampered")
+        with self.assertRaises(ArchiveCorruption):
+            self.filesystem.read(reference, tenant_id=TENANT, source_id=SOURCE)
+
+    def test_filesystem_rejects_a_symlinked_parent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            real = base / "real"
+            real.mkdir()
+            alias = base / "alias"
+            alias.symlink_to(real, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                FilesystemArchiveStore(
+                    alias / "archive",
+                    namespace_key=self.key,
+                )
+
+    def test_private_files_and_content_free_metadata(self):
+        reference = self.filesystem.put(request())
+        self.assertEqual(self.filesystem.root.stat().st_mode & 0o777, 0o700)
+        object_dir = self.filesystem.root / reference.object_key
+        self.assertEqual(object_dir.stat().st_mode & 0o777, 0o700)
+        self.assertEqual((object_dir / "data").stat().st_mode & 0o777, 0o600)
+        metadata_path = object_dir / "metadata.json"
+        self.assertEqual(metadata_path.stat().st_mode & 0o777, 0o600)
+        metadata = metadata_path.read_text()
+        self.assertNotIn("tenant:synthetic", metadata)
+        self.assertNotIn("source:synthetic", metadata)
+        self.assertNotIn("native:synthetic", metadata)
+        self.assertNotIn("private source bytes", metadata)
+        self.assertEqual(json.loads(metadata)["content_sha256"], hashlib.sha256(PAYLOAD).hexdigest())
+
+    def test_s3_requires_tls_versioning_encryption_and_no_public_acl(self):
+        reference = self.s3.put(request())
+        call = self.s3_client.put_calls[-1]
+        self.assertEqual(call["ServerSideEncryption"], "AES256")
+        self.assertEqual(
+            call["ChecksumSHA256"],
+            "RW5gu2b9qyDQaDdLdNAHMy5DQJky1WS9GXbmIGr1p3E=",
+        )
+        self.assertNotIn("ACL", call)
+        self.assertNotIn("tenant:synthetic", json.dumps(call["Metadata"]))
+        self.assertTrue(reference.version_id)
+
+        with self.assertRaisesRegex(ValueError, "HTTPS"):
+            S3ArchiveStore(
+                bucket="recall-synthetic",
+                endpoint_url="http://objects.example.test",
+                namespace_key=self.key,
+                client=self.s3_client,
+            )
+        self.assertEqual(len(self.s3_client.put_calls), 1)
+
+    def test_bounds_are_enforced_before_storage_io(self):
+        oversized = b"x" * 1025
+        bounded = S3ArchiveStore(
+            bucket="recall-synthetic",
+            endpoint_url="https://objects.example.test",
+            namespace_key=self.key,
+            client=self.s3_client,
+            maximum_bytes=1024,
+        )
+        before = len(self.s3_client.put_calls)
+        with self.assertRaisesRegex(ValueError, "byte bound"):
+            bounded.put(request(payload=oversized))
+        self.assertEqual(len(self.s3_client.put_calls), before)
+
+        with self.assertRaisesRegex(ValueError, "byte bound"):
+            bounded.put_stream(
+                request(payload=b""),
+                io.BytesIO(oversized),
+                size_bytes=len(oversized),
+                content_sha256=hashlib.sha256(oversized).hexdigest(),
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()
