@@ -16,7 +16,7 @@ from pathlib import Path
 from .transport import open_no_redirect
 
 
-POLICY_VERSION = "recall-privacy-v1"
+POLICY_VERSION = "recall-privacy-v2"
 REDACTION = "[REDACTED:{category}]"
 ALLOWED_JUDGE_CATEGORIES = {
     "contextual_name",
@@ -27,6 +27,21 @@ ALLOWED_JUDGE_CATEGORIES = {
 }
 SENSITIVE_KEY = re.compile(
     r"(?:litellm.*master.*key|api[_-]?key|password|secret|authorization|bearer|access[_-]?token|refresh[_-]?token|private[_-]?key)$",
+    re.I,
+)
+PROVIDER_CREDENTIAL = re.compile(
+    r"(?<![A-Za-z0-9_])(?:"
+    r"sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{40,}|"
+    r"sk-(?!ant-|or-v1-)[A-Za-z0-9_-]{32,}|"
+    r"sk-ant-(?:api03|admin01)-[A-Za-z0-9_-]{80,}AA|"
+    r"sk-or-v1-[A-Za-z0-9_-]{20,}|gsk_[A-Za-z0-9]{20,}|"
+    r"xai-[A-Za-z0-9_-]{20,}|pplx-[A-Za-z0-9_-]{20,}|csk-[A-Za-z0-9_-]{20,}|"
+    r"xox[baprs]-[A-Za-z0-9-]{20,}|"
+    r"(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}|ops_[A-Za-z0-9_-]{20,}|"
+    r"A[KS]IA[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{35}|"
+    r"(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,}|"
+    r"pcsk_[A-Za-z0-9_-]{20,}|lsv2_[A-Za-z0-9_-]{20,}"
+    r")(?![A-Za-z0-9_-])",
     re.I,
 )
 APPROVED_JUDGE_BASE_URL_ENV = "RECALL_PRIVACY_JUDGE_ALLOWED_BASE_URL"
@@ -116,6 +131,7 @@ def _structural_spans(text: str) -> list[dict[str, Any]]:
 
     add(r"\b(?:api[_-]?key|password|secret|access[_-]?token|refresh[_-]?token)\s*[=:]\s*[^\s,;]+", "credential", flags=re.I)
     add(r"\bBearer\s+[^\s,;]+", "credential", flags=re.I)
+    add(PROVIDER_CREDENTIAL.pattern, "credential", flags=PROVIDER_CREDENTIAL.flags)
     add(r"(?<![\w.+-])([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})(?![\w.-])", "email", flags=re.I, group=1)
     add(r"(?<![\w.])((?:\+1\s+|\(\d{3}\)\s*)\d{3}[- ]\d{4}|\+1\s+\d{3}[- ]\d{3}[- ]\d{4})(?![\w.-])", "phone", group=1)
     add(r"(?<![\w.])(\d{3}-\d{3}-\d{4})(?![\w.-])", "phone", group=1)

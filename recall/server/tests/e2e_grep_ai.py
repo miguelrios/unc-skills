@@ -29,6 +29,7 @@ SOURCE = "grep-ai:synthetic:postgres"
 OTHER_SOURCE = "grep-ai:synthetic:other"
 KEY = "parcha-synthetic-" + "b" * 32
 CANARY = "grep-ai-private-canary-77"
+PROVIDER_CANARY = "sk-proj-" + "A" * 48
 RAW_CANARY = "grep-ai-raw-response-canary-98"
 CORPUS = ROOT / "recall/tests/grep_ai_v2/corpus.jsonl"
 
@@ -37,6 +38,8 @@ def fixtures() -> tuple[dict, dict]:
     rows = {row["case"]: row for row in map(json.loads, CORPUS.read_text().splitlines())}
     safe, private = rows["complete"], rows["sensitive-complete"]
     details = {**safe["details"], **private["details"]}
+    private_detail = details[private["list"]["items"][0]["job_id"]]
+    private_detail["report"]["markdown"] += " standalone " + PROVIDER_CANARY
     next(iter(details.values()))["context"] = {"ignored": RAW_CANARY}
     page = {
         "items": [safe["list"]["items"][0], private["list"]["items"][0]],
@@ -164,6 +167,7 @@ def main() -> None:
             requests_after_commit = state.requests
             assert requests_after_commit == 3
             assert CANARY.encode() not in spool.read_bytes()
+            assert PROVIDER_CANARY.encode() not in spool.read_bytes()
             assert RAW_CANARY.encode() not in spool.read_bytes()
             runner.close()
 
@@ -177,6 +181,7 @@ def main() -> None:
             safe_results = store.search("Safe report citation", authorized_source=SOURCE)["results"]
             assert len(safe_results) == 1
             assert store.search(CANARY, authorized_source=SOURCE)["results"] == []
+            assert store.search(PROVIDER_CANARY, authorized_source=SOURCE)["results"] == []
             safe_native_id = safe_results[0]["native_id"]
             recovered.close()
             record = ConnectorRecord(

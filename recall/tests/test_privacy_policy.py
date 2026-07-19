@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from privacy.policy import AgenticJudge, PrivacyPolicy
+from privacy.policy import AgenticJudge, POLICY_VERSION, PrivacyPolicy
 
 
 CORPUS = Path(__file__).with_name("privacy_eval_v1") / "corpus.jsonl"
@@ -27,6 +27,7 @@ class FrozenPrivacyEvalTest(unittest.TestCase):
         manifest = json.loads(MANIFEST.read_text())
         rows = corpus()
         self.assertEqual(hashlib.sha256(CORPUS.read_bytes()).hexdigest(), manifest["corpus_sha256"])
+        self.assertEqual(manifest["policy_version"], POLICY_VERSION)
         self.assertEqual(manifest["counts"], {
             "benign": sum(not row["sensitive"] for row in rows),
             "sensitive": sum(row["sensitive"] for row in rows),
@@ -73,6 +74,40 @@ class FrozenPrivacyEvalTest(unittest.TestCase):
         decision = PrivacyPolicy(mode="off").apply(value)
         self.assertEqual(decision.action, "keep")
         self.assertIs(decision.value, value)
+
+    def test_provider_credential_shapes_are_scrubbed_without_assignment_context(self) -> None:
+        credentials = (
+            "sk-proj-" + "A" * 48,
+            "sk-ant-api03-" + "A" * 90 + "AA",
+            "sk-or-v1-" + "R" * 40,
+            "gsk_" + "Q" * 40,
+            "xai-" + "X" * 40,
+            "pplx-" + "P" * 40,
+            "csk-" + "C" * 40,
+            "github_pat_" + "J" * 60,
+            "xoxb-" + "S" * 40,
+            "ops_" + "W" * 40,
+            "AKIA" + "Z" * 16,
+            "AIza" + "G" * 35,
+            "sk_live_" + "T" * 32,
+            "hf_" + "F" * 40,
+            "pcsk_" + "N" * 40,
+            "lsv2_" + "L" * 40,
+        )
+        for credential in credentials:
+            with self.subTest(prefix=credential[:10]):
+                decision = PrivacyPolicy(mode="scrub").apply(
+                    {"text": f"safe prefix {credential} safe suffix"}
+                )
+                self.assertEqual(decision.action, "scrub")
+                self.assertEqual(decision.categories, {"credential": 1})
+                self.assertNotIn(credential, json.dumps(decision.value))
+        self.assertEqual(
+            PrivacyPolicy(mode="scrub").apply(
+                {"text": "sketch-projection is ordinary prose"}
+            ).action,
+            "keep",
+        )
 
     def test_agent_failure_obeys_fail_closed_drop_without_echoing_input(self) -> None:
         canary = "contextual-canary-must-not-escape"

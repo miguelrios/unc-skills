@@ -134,7 +134,7 @@ search and its prior receipt no longer resolves.
 
 ## Pre-ingest privacy policy
 
-Privacy policy version `recall-privacy-v1` runs on parsed content before a
+Privacy policy version `recall-privacy-v2` runs on parsed content before a
 collector writes version hashes or outbox rows and before export or memory code
 makes an HTTP request:
 
