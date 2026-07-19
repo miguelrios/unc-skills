@@ -25,7 +25,9 @@ def evidence_rank_components(*, legs: set[str], surface: str, lexical_rank: floa
                              corroborating_families: int = 1,
                              fusion_score: float = 0.0) -> dict:
     """Return an observable, content-free evidence vector and its ordering key."""
-    if "identifier" in legs or ("entity" in legs and has_identifier):
+    if "exact-answer" in legs:
+        evidence_class, class_priority = "exact-answer", 5
+    elif "identifier" in legs or ("entity" in legs and has_identifier):
         evidence_class, class_priority = "identifier", 4
     elif "answer" in legs:
         evidence_class, class_priority = "answer", 3
@@ -40,7 +42,7 @@ def evidence_rank_components(*, legs: set[str], surface: str, lexical_rank: floa
     else:
         evidence_class, class_priority = "broad", 0
     origin_priority = (
-        2 if evidence_class == "answer"
+        2 if evidence_class in {"answer", "exact-answer"}
         else 1 if evidence_class == "phrase" and surface == "tool_input"
         else 0
     )

@@ -217,6 +217,8 @@ class SchemaMigrationContractTest(unittest.TestCase):
         self.assertIn("LEFT JOIN LATERAL", implementation)
         self.assertIn("boundary.role='user'", implementation)
         self.assertIn("candidate.role='assistant'", implementation)
+        self.assertIn("%s::boolean[]", implementation)
+        self.assertIn('"exact-answer"', implementation)
         self.assertNotIn("NOT EXISTS", implementation)
 
     def test_webhook_privacy_is_host_owned_credential_state(self) -> None:
@@ -820,6 +822,7 @@ class SemanticRetrievalContractTest(unittest.TestCase):
             retrieval_leg_order(["ticket-123"]),
             ("exact-question", "entity", "identifier"),
         )
+        self.assertNotIn("if not identifiers and candidates:", implementation)
 
     def test_similarity_threshold_is_applied_after_bounded_hnsw_retrieval(self) -> None:
         runtime = mock.Mock(
@@ -1145,6 +1148,11 @@ class EnvelopeContractTest(unittest.TestCase):
         self.assertEqual(phrase_query_spec(["504 gateway timeout"]), ("504 gateway timeout", "phraseto_tsquery"))
 
     def test_rank_components_keep_identifier_phrase_and_error_evidence_distinct(self) -> None:
+        exact_answer = evidence_rank_components(
+            legs={"exact-answer"}, surface="assistant", lexical_rank=1.0,
+            matched_count=4, informative_count=4, has_identifier=True,
+            recency_factor=0.5,
+        )
         identifier = evidence_rank_components(
             legs={"entity"}, surface="tool_output", lexical_rank=1.0,
             matched_count=1, informative_count=8, has_identifier=True,
@@ -1173,6 +1181,10 @@ class EnvelopeContractTest(unittest.TestCase):
         self.assertEqual(identifier["evidence_class"], "identifier")
         self.assertEqual(answer["evidence_class"], "answer")
         self.assertGreater(tuple(identifier["rank_key"]), tuple(answer["rank_key"]))
+        self.assertGreater(
+            tuple(exact_answer["rank_key"]),
+            tuple(identifier["rank_key"]),
+        )
         self.assertGreater(tuple(answer["rank_key"]), tuple(phrase_command["rank_key"]))
         self.assertGreater(tuple(phrase_command["rank_key"]), tuple(phrase_echo["rank_key"]))
         self.assertGreater(tuple(phrase_echo["rank_key"]), tuple(error_entity["rank_key"]))
