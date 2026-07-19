@@ -1249,6 +1249,17 @@ class BrainStore:
             )
             return
         items, metadata = project(envelope, revision)
+        # A source/native identity is one logical record whose immutable
+        # source_events rows retain its history. Only the latest revision may
+        # remain in the live search projection.
+        conn.execute(
+            """UPDATE items
+               SET deleted_at=now()
+               WHERE source_id=%s
+                 AND event_native_id=%s
+                 AND deleted_at IS NULL""",
+            (envelope["source_id"], envelope["native_id"]),
+        )
         if not items and set(metadata) <= {"projector_version", "harness"}:
             return
         conn.execute(
