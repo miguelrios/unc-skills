@@ -73,6 +73,8 @@ REMOTE_WRITE_COMMANDS = frozenset({"put", "delete"})
 CLIENT_CONFIG_FIELDS = {"schema_version", "url", "token_file"}
 MAX_CLIENT_CONFIG_BYTES = 16_384
 MAX_TOKEN_FILE_BYTES = 16_384
+MAX_REMOTE_RESPONSE_BYTES = 1024 * 1024
+MCP_PROTOCOL_VERSION = "2025-11-25"
 
 
 class RemoteRecallError(RuntimeError):
@@ -102,7 +104,7 @@ def _validated_remote_base(value: str) -> str:
         or parsed.password is not None
         or parsed.query
         or parsed.fragment
-        or parsed.path not in {"", "/"}
+        or parsed.path not in {"", "/", "/mcp"}
         or (port is not None and not 1 <= port <= 65535)
     ):
         raise RemoteRecallError("remote URL is invalid")
@@ -177,7 +179,7 @@ def load_client_config() -> dict | None:
     if (
         not isinstance(url, str) or not ((parsed.scheme == "https" and parsed.hostname) or loopback)
         or parsed.username or parsed.password or parsed.query or parsed.fragment
-        or parsed.path not in {"", "/"} or (port is not None and not 1 <= port <= 65535)
+        or parsed.path not in {"", "/", "/mcp"} or (port is not None and not 1 <= port <= 65535)
     ):
         raise RemoteRecallError("client config URL is invalid")
     token_file = value["token_file"]
@@ -212,6 +214,121 @@ def remote_headers() -> dict[str, str]:
     return headers
 
 
+def _read_remote_object(response) -> dict:
+    raw = response.read(MAX_REMOTE_RESPONSE_BYTES + 1)
+    if len(raw) > MAX_REMOTE_RESPONSE_BYTES:
+        raise RemoteRecallError("server response is too large")
+    rendered = json.loads(raw)
+    if not isinstance(rendered, dict):
+        raise RemoteRecallError("server returned a non-object response")
+    return rendered
+
+
+def _mcp_call(base: str, method: str, path: str, body: dict | None) -> dict:
+    if path == "/v1/session-export":
+        raise RemoteRecallError("session export is not available over MCP")
+    tool = {
+        "/v1/search": "recall_search",
+        "/v1/show": "recall_show",
+        "/v1/related": "recall_related",
+    }.get(path)
+    arguments = body or {}
+    if path == "/v1/doctor":
+        if method != "GET":
+            raise RemoteRecallError("unsupported MCP operation")
+        message = {"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}}
+    elif path == "/v1/ingest/batches":
+        events = arguments.get("events")
+        if method != "POST" or not isinstance(events, list) or len(events) != 1:
+            raise RemoteRecallError("unsupported MCP ingest request")
+        event = events[0]
+        if not isinstance(event, dict):
+            raise RemoteRecallError("unsupported MCP ingest request")
+        if event.get("kind") == "memory":
+            content = event.get("content")
+            text = content.get("text") if isinstance(content, dict) else None
+            provenance = event.get("provenance")
+            uri = provenance.get("uri") if isinstance(provenance, dict) else None
+            if not isinstance(text, str) or not text.strip() or len(text) > 32_000:
+                raise RemoteRecallError("MCP memory body is invalid")
+            title = next((line.strip() for line in text.splitlines() if line.strip()), text.strip())
+            tool = "recall_capture"
+            arguments = {
+                "schema_version": 1,
+                "title": title[:500],
+                "body": text,
+                "occurred_at": event.get("occurred_at"),
+                "provenance": {"uri": uri},
+            }
+        elif event.get("kind") == "tombstone":
+            content = event.get("content")
+            receipt = content.get("deleted_receipt") if isinstance(content, dict) else None
+            tool = "recall_forget"
+            arguments = {"receipt": receipt}
+        else:
+            raise RemoteRecallError("unsupported MCP ingest event")
+        message = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": tool, "arguments": arguments},
+        }
+    elif tool is not None and method == "POST":
+        message = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": tool, "arguments": arguments},
+        }
+    else:
+        raise RemoteRecallError("unsupported MCP operation")
+
+    headers = remote_headers()
+    headers["Accept"] = "application/json, text/event-stream"
+    headers["MCP-Protocol-Version"] = MCP_PROTOCOL_VERSION
+    request = urllib.request.Request(
+        base,
+        data=json.dumps(message, sort_keys=True).encode(),
+        method="POST",
+        headers=headers,
+    )
+    try:
+        with _open_remote(
+            request,
+            timeout=float(os.environ.get("RECALL_TIMEOUT", "15")),
+        ) as response:
+            rendered = _read_remote_object(response)
+    except urllib.error.HTTPError as exc:
+        exc.read(MAX_REMOTE_RESPONSE_BYTES + 1)
+        raise RemoteRecallError(f"HTTP {exc.code}: MCP request failed") from exc
+    except (OSError, urllib.error.URLError, json.JSONDecodeError, ValueError) as exc:
+        raise RemoteRecallError(type(exc).__name__) from exc
+
+    error = rendered.get("error")
+    if isinstance(error, dict):
+        code = error.get("code")
+        raise RemoteRecallError(f"MCP {code}: tool call failed")
+    if rendered.get("id") != message["id"] or not isinstance(rendered.get("result"), dict):
+        raise RemoteRecallError("MCP response is invalid")
+    result = rendered["result"]
+    if message["method"] == "ping":
+        return {"status": "ok", "transport": "mcp"}
+    structured = result.get("structuredContent")
+    if result.get("isError") is True or not isinstance(structured, dict):
+        raise RemoteRecallError("MCP tool result is invalid")
+    if path == "/v1/ingest/batches":
+        receipt = structured.get("receipt")
+        if not isinstance(receipt, str) or not receipt:
+            raise RemoteRecallError("MCP write result has no receipt")
+        return {
+            "status": structured.get("status"),
+            "inserted": 0 if structured.get("duplicate") else 1,
+            "duplicate_events": 1 if structured.get("duplicate") else 0,
+            "receipts": [receipt],
+        }
+    return structured
+
+
 def remote_request(method: str, path: str, body: dict | None = None,
                    idempotency_key: str | None = None) -> dict:
     config = load_client_config()
@@ -220,6 +337,8 @@ def remote_request(method: str, path: str, body: dict | None = None,
     ))
     if not base:
         raise RemoteRecallError("RECALL_URL is required for remote mode")
+    if urllib.parse.urlsplit(base).path == "/mcp":
+        return _mcp_call(base, method, path, body)
     data = None if body is None else json.dumps(body, sort_keys=True).encode()
     headers = remote_headers()
     if idempotency_key:
@@ -227,10 +346,7 @@ def remote_request(method: str, path: str, body: dict | None = None,
     request = urllib.request.Request(base + path, data=data, method=method, headers=headers)
     try:
         with _open_remote(request, timeout=float(os.environ.get("RECALL_TIMEOUT", "15"))) as response:
-            rendered = json.loads(response.read())
-            if not isinstance(rendered, dict):
-                raise RemoteRecallError("server returned a non-object response")
-            return rendered
+            return _read_remote_object(response)
     except urllib.error.HTTPError as exc:
         try:
             detail = json.loads(exc.read()).get("error", "HTTP error")
@@ -243,7 +359,14 @@ def remote_request(method: str, path: str, body: dict | None = None,
 
 def remote_execute(args) -> tuple[str, dict]:
     if args.command in REMOTE_WRITE_COMMANDS:
+        config = load_client_config()
+        configured_base = _validated_remote_base(os.environ.get("RECALL_URL") or (
+            config["url"] if config is not None else ""
+        ))
+        is_mcp = urllib.parse.urlsplit(configured_base).path == "/mcp"
         source_id = args.source_id or os.environ.get("RECALL_WRITE_SOURCE_ID", "")
+        if is_mcp and not source_id:
+            source_id = "mcp:host-bound"
         if not re.fullmatch(r"[A-Za-z0-9_.:@-]{3,160}", source_id):
             raise RemoteRecallError("--source-id or RECALL_WRITE_SOURCE_ID is required")
         principal_id = args.principal_id or os.environ.get("RECALL_PRINCIPAL_ID", "owner")
@@ -271,7 +394,7 @@ def remote_execute(args) -> tuple[str, dict]:
                     raise ValueError
             except (ValueError, TypeError) as exc:
                 raise RemoteRecallError("invalid receipt") from exc
-            if receipt_source != source_id:
+            if not is_mcp and receipt_source != source_id:
                 raise RemoteRecallError("receipt source does not match write source")
             kind = "tombstone"
             content = {"target_native_id": native_id, "deleted_receipt": event_part}

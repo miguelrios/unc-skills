@@ -810,6 +810,17 @@ class SemanticRetrievalContractTest(unittest.TestCase):
             result_limit=5,
         ))
 
+    def test_exact_question_precedes_identifier_routing_for_answer_promotion(self) -> None:
+        implementation = inspect.getsource(BrainStore.search)
+        self.assertLess(
+            implementation.index("exact_question_rows = run_leg("),
+            implementation.index("if identifiers:"),
+        )
+        self.assertEqual(
+            retrieval_leg_order(["ticket-123"]),
+            ("exact-question", "entity", "identifier"),
+        )
+
     def test_similarity_threshold_is_applied_after_bounded_hnsw_retrieval(self) -> None:
         runtime = mock.Mock(
             model="voyage-4",
@@ -1107,7 +1118,10 @@ class EnvelopeContractTest(unittest.TestCase):
         )
 
     def test_identifier_plan_runs_exact_legs_before_any_phrase(self) -> None:
-        self.assertEqual(retrieval_leg_order(["api-prod-6fcdc84dd4-mmjpj"]), ("entity", "identifier"))
+        self.assertEqual(
+            retrieval_leg_order(["api-prod-6fcdc84dd4-mmjpj"]),
+            ("exact-question", "entity", "identifier"),
+        )
         self.assertEqual(
             retrieval_leg_order([]),
             ("exact-question", "semantic", "phrase", "entity", "partial", "all"),
