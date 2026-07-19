@@ -348,6 +348,19 @@ class FilesystemArchiveStore(_ArchiveStore):
             raise ValueError("archive root must be an owner-only directory")
         self.root = root.resolve()
 
+    @staticmethod
+    def _ensure_private_directory(path: Path) -> None:
+        try:
+            path.mkdir(mode=0o700, exist_ok=True)
+            details = path.lstat()
+            if stat.S_ISLNK(details.st_mode) or not stat.S_ISDIR(details.st_mode):
+                raise ArchiveCorruption("archive object path is unsafe")
+            path.chmod(0o700)
+        except ArchiveCorruption:
+            raise
+        except OSError as error:
+            raise ArchiveCorruption("archive object path is unsafe") from error
+
     def put_stream(
         self,
         request: ArchiveRequest,
@@ -370,8 +383,11 @@ class FilesystemArchiveStore(_ArchiveStore):
             version_id="fs-" + content_sha256[:32],
         )
         directory = self.root / reference.object_key
-        directory.mkdir(parents=True, mode=0o700, exist_ok=True)
-        directory.chmod(0o700)
+        relative = directory.relative_to(self.root)
+        current = self.root
+        for component in relative.parts:
+            current = current / component
+            self._ensure_private_directory(current)
         metadata = json.dumps(_metadata(reference), sort_keys=True, separators=(",", ":")).encode()
         self._publish(directory / "data", payload)
         self._publish(directory / "metadata.json", metadata)

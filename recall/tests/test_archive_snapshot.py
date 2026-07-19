@@ -60,6 +60,12 @@ class ArchiveSnapshotTest(unittest.TestCase):
                     source_id="source:snapshot",
                 ),
             )
+        for directory in (
+            self.archive.root / "objects",
+            *list((self.archive.root / "objects").glob("*")),
+            *list((self.archive.root / "objects").glob("*/*")),
+        ):
+            self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
         self.assertEqual(backup.stat().st_mode & 0o777, 0o700)
         self.assertEqual(restored.stat().st_mode & 0o777, 0o700)
         rendered = json.dumps(result)
