@@ -74,6 +74,48 @@ class SchemaMigrationContractTest(unittest.TestCase):
                 rf"schema_migrations\(version\) VALUES \({version}\)",
             )
 
+    def test_v2_canonical_plane_is_tenant_keyed_and_deletion_explicit(self) -> None:
+        migration = SERVER / "schema" / "019_v2_canonical_plane.sql"
+        rendered = " ".join(migration.read_text().split()).casefold()
+        required_tables = {
+            "brain_tenants",
+            "brain_principals",
+            "canonical_sources",
+            "raw_artifacts",
+            "canonical_events",
+            "canonical_documents",
+            "canonical_chunks",
+            "canonical_ingest_jobs",
+            "receipt_redirects",
+            "forget_tombstones",
+            "canonical_audit_events",
+        }
+        for table in required_tables:
+            self.assertIn(f"create table if not exists {table}", rendered)
+        self.assertGreaterEqual(rendered.count("tenant_id text not null"), 10)
+        self.assertIn(
+            "unique(tenant_id, source_id, native_id, revision)",
+            rendered,
+        )
+        self.assertIn(
+            "unique(storage_backend, object_key, version_id)",
+            rendered,
+        )
+        self.assertIn(
+            "check ((state='live' and deleted_at is null) or "
+            "(state='deleted' and deleted_at is not null))",
+            rendered,
+        )
+        self.assertIn("target_identity_sha256 char(64) not null", rendered)
+        audit = rendered.split(
+            "create table if not exists canonical_audit_events", 1
+        )[1].split(");", 1)[0]
+        self.assertNotIn("jsonb", audit)
+        self.assertIn("item_count integer", audit)
+        self.assertIn("byte_count bigint", audit)
+        self.assertNotIn("raw_payload", rendered)
+        self.assertNotIn("password", rendered)
+
     def test_connector_v2_source_families_are_host_owned_and_migrated(self) -> None:
         added = {
             "communications", "schedule", "contacts", "social", "documents",

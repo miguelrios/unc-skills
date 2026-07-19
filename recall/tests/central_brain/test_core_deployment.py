@@ -186,6 +186,20 @@ class DatabaseCapabilityContractTest(unittest.TestCase):
         lowered = CAPABILITY_SQL.casefold()
         self.assertIn("pg_extension", lowered)
         self.assertIn("pg_stat_ssl", lowered)
+        for table in (
+            "brain_tenants",
+            "brain_principals",
+            "canonical_sources",
+            "raw_artifacts",
+            "canonical_events",
+            "canonical_documents",
+            "canonical_chunks",
+            "canonical_ingest_jobs",
+            "receipt_redirects",
+            "forget_tombstones",
+            "canonical_audit_events",
+        ):
+            self.assertIn(f"('{table}')", lowered)
         for provider in ("planetscale", "render", "supabase", "neon"):
             self.assertNotIn(provider, lowered)
 
