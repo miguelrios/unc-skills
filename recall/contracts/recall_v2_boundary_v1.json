@@ -1,0 +1,512 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://parcha.com/recall/contracts/recall_v2_boundary_v1.json",
+  "title": "Recall v2 boundary contract catalog",
+  "oneOf": [
+    {"$ref": "#/$defs/principal_authority"},
+    {"$ref": "#/$defs/artifact_ref"},
+    {"$ref": "#/$defs/canonical_document"},
+    {"$ref": "#/$defs/canonical_chunk"},
+    {"$ref": "#/$defs/ingest_job"},
+    {"$ref": "#/$defs/forget_request"},
+    {"$ref": "#/$defs/receipt_redirect"},
+    {"$ref": "#/$defs/retrieval_request"},
+    {"$ref": "#/$defs/retrieval_result"},
+    {"$ref": "#/$defs/mcp_principal"},
+    {"$ref": "#/$defs/model_payload"},
+    {"$ref": "#/$defs/public_evidence"}
+  ],
+  "$defs": {
+    "identity": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@/-]+$"
+    },
+    "opaque_id": {
+      "type": "string",
+      "maxLength": 160,
+      "pattern": "^[a-z][a-z0-9_]{2,31}_[A-Za-z0-9_-]{16,128}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "receipt": {
+      "type": "string",
+      "minLength": 10,
+      "maxLength": 2048,
+      "pattern": "^recall://[^/]+/.+$"
+    },
+    "source_ids": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/identity"}
+    },
+    "principal_authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "schema_version",
+        "tenant_id",
+        "principal_id",
+        "subject",
+        "audience",
+        "scopes",
+        "source_ids",
+        "expires_at"
+      ],
+      "properties": {
+        "contract": {"const": "recall.principal-authority.v1"},
+        "schema_version": {"const": 1},
+        "tenant_id": {"$ref": "#/$defs/identity"},
+        "principal_id": {"$ref": "#/$defs/identity"},
+        "subject": {"type": "string", "minLength": 1, "maxLength": 320},
+        "audience": {"type": "string", "minLength": 1, "maxLength": 320},
+        "scopes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "recall:search",
+              "recall:show",
+              "recall:related",
+              "recall:answer",
+              "recall:capture",
+              "recall:forget",
+              "recall:status",
+              "recall:ingest",
+              "recall:archive:read",
+              "recall:archive:write",
+              "recall:admin"
+            ]
+          }
+        },
+        "source_ids": {"$ref": "#/$defs/source_ids"},
+        "expires_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "artifact_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "schema_version",
+        "tenant_id",
+        "source_id",
+        "artifact_id",
+        "storage_backend",
+        "object_key",
+        "content_sha256",
+        "size_bytes",
+        "media_type",
+        "encryption",
+        "version_id",
+        "created_at"
+      ],
+      "properties": {
+        "contract": {"const": "recall.artifact-ref.v1"},
+        "schema_version": {"const": 1},
+        "tenant_id": {"$ref": "#/$defs/identity"},
+        "source_id": {"$ref": "#/$defs/identity"},
+        "artifact_id": {"$ref": "#/$defs/opaque_id"},
+        "storage_backend": {"enum": ["filesystem", "s3"]},
+        "object_key": {
+          "type": "string",
+          "maxLength": 256,
+          "pattern": "^objects/[0-9a-f]{2}/[A-Za-z0-9_-]{32,128}$"
+        },
+        "content_sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"type": "integer", "minimum": 0, "maximum": 1125899906842624},
+        "media_type": {"type": "string", "minLength": 1, "maxLength": 255},
+        "encryption": {"enum": ["filesystem-owner-only", "sse-s3", "sse-kms", "sse-c"]},
+        "version_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "created_at": {"type": "string", "format": "date-time"},
+        "deleted_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "canonical_document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "schema_version",
+        "tenant_id",
+        "principal_id",
+        "source_id",
+        "document_id",
+        "native_id",
+        "revision",
+        "kind",
+        "occurred_at",
+        "observed_at",
+        "content_sha256",
+        "text_redacted",
+        "text_sha256",
+        "artifact_id",
+        "visibility",
+        "is_current"
+      ],
+      "properties": {
+        "contract": {"const": "recall.canonical-document.v1"},
+        "schema_version": {"const": 1},
+        "tenant_id": {"$ref": "#/$defs/identity"},
+        "principal_id": {"$ref": "#/$defs/identity"},
+        "source_id": {"$ref": "#/$defs/identity"},
+        "document_id": {"$ref": "#/$defs/opaque_id"},
+        "native_id": {"$ref": "#/$defs/identity"},
+        "native_parent_id": {"$ref": "#/$defs/identity"},
+        "revision": {"type": "integer", "minimum": 1},
+        "kind": {"type": "string", "minLength": 1, "maxLength": 128},
+        "occurred_at": {"type": "string", "format": "date-time"},
+        "observed_at": {"type": "string", "format": "date-time"},
+        "content_sha256": {"$ref": "#/$defs/sha256"},
+        "text_redacted": {"type": "string", "maxLength": 1000000},
+        "text_sha256": {"$ref": "#/$defs/sha256"},
+        "artifact_id": {"$ref": "#/$defs/opaque_id"},
+        "visibility": {"enum": ["private", "shared"]},
+        "is_current": {"type": "boolean"},
+        "supersedes_receipt": {"$ref": "#/$defs/receipt"},
+        "deleted_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "canonical_chunk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "schema_version",
+        "tenant_id",
+        "source_id",
+        "document_id",
+        "chunk_id",
+        "ordinal",
+        "text_redacted",
+        "text_sha256",
+        "receipt"
+      ],
+      "properties": {
+        "contract": {"const": "recall.canonical-chunk.v1"},
+        "schema_version": {"const": 1},
+        "tenant_id": {"$ref": "#/$defs/identity"},
+        "source_id": {"$ref": "#/$defs/identity"},
+        "document_id": {"$ref": "#/$defs/opaque_id"},
+        "chunk_id": {"$ref": "#/$defs/opaque_id"},
+        "ordinal": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "text_redacted": {"type": "string", "maxLength": 64000},
+        "text_sha256": {"$ref": "#/$defs/sha256"},
+        "receipt": {"$ref": "#/$defs/receipt"}
+      }
+    },
+    "ingest_job": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "schema_version",
+        "tenant_id",
+        "source_id",
+        "job_id",
+        "connector_id",
+        "mode",
+        "status",
+        "attempt",
+        "created_at",
+        "updated_at"
+      ],
+      "properties": {
+        "contract": {"const": "recall.ingest-job.v1"},
+        "schema_version": {"const": 1},
+        "tenant_id": {"$ref": "#/$defs/identity"},
+        "source_id": {"$ref": "#/$defs/identity"},
+        "job_id": {"$ref": "#/$defs/opaque_id"},
+        "connector_id": {"$ref": "#/$defs/identity"},
+        "mode": {"enum": ["backfill", "incremental", "reconcile", "forget"]},
+        "status": {"enum": ["queued", "leased", "committed", "retryable", "parked", "failed"]},
+        "attempt": {"type": "integer", "minimum": 0, "maximum": 10000},
+        "cursor_sha256": {"$ref": "#/$defs/sha256"},
+        "error_code": {"$ref": "#/$defs/identity"},
+        "created_at": {"type": "string", "format": "date-time"},
+        "updated_at": {"type": "string", "format": "date-time"},
+        "completed_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "forget_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "schema_version",
+        "tenant_id",
+        "principal_id",
+        "source_id",
+        "target_receipt",
+        "mode",
+        "reason",
+        "requested_at",
+        "idempotency_key"
+      ],
+      "properties": {
+        "contract": {"const": "recall.forget-request.v1"},
+        "schema_version": {"const": 1},
+        "tenant_id": {"$ref": "#/$defs/identity"},
+        "principal_id": {"$ref": "#/$defs/identity"},
+        "source_id": {"$ref": "#/$defs/identity"},
+        "target_receipt": {"$ref": "#/$defs/receipt"},
+        "mode": {"enum": ["authoritative_delete", "explicit_forget"]},
+        "reason": {"enum": ["upstream_deleted", "owner_requested", "retention_expired"]},
+        "requested_at": {"type": "string", "format": "date-time"},
+        "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 200}
+      }
+    },
+    "receipt_redirect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "schema_version",
+        "tenant_id",
+        "source_id",
+        "old_receipt",
+        "new_receipt",
+        "reason",
+        "created_at"
+      ],
+      "properties": {
+        "contract": {"const": "recall.receipt-redirect.v1"},
+        "schema_version": {"const": 1},
+        "tenant_id": {"$ref": "#/$defs/identity"},
+        "source_id": {"$ref": "#/$defs/identity"},
+        "old_receipt": {"$ref": "#/$defs/receipt"},
+        "new_receipt": {"$ref": "#/$defs/receipt"},
+        "reason": {"enum": ["v2_migration", "identity_repair"]},
+        "created_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "retrieval_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "schema_version",
+        "tenant_id",
+        "principal_id",
+        "request_id",
+        "query",
+        "source_ids",
+        "mode",
+        "limit"
+      ],
+      "properties": {
+        "contract": {"const": "recall.retrieval-request.v1"},
+        "schema_version": {"const": 1},
+        "tenant_id": {"$ref": "#/$defs/identity"},
+        "principal_id": {"$ref": "#/$defs/identity"},
+        "request_id": {"$ref": "#/$defs/opaque_id"},
+        "query": {"type": "string", "minLength": 1, "maxLength": 8192},
+        "source_ids": {"$ref": "#/$defs/source_ids"},
+        "source_families": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/identity"}
+        },
+        "mode": {"enum": ["fast", "planned", "exact"]},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+        "since": {"type": "string", "format": "date-time"},
+        "until": {"type": "string", "format": "date-time"},
+        "include_superseded": {"type": "boolean"}
+      }
+    },
+    "retrieval_result_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "receipt",
+        "source_id",
+        "document_id",
+        "chunk_id",
+        "text_redacted",
+        "score",
+        "why",
+        "occurred_at",
+        "is_current"
+      ],
+      "properties": {
+        "receipt": {"$ref": "#/$defs/receipt"},
+        "source_id": {"$ref": "#/$defs/identity"},
+        "document_id": {"$ref": "#/$defs/opaque_id"},
+        "chunk_id": {"$ref": "#/$defs/opaque_id"},
+        "text_redacted": {"type": "string", "maxLength": 64000},
+        "score": {"type": "number", "minimum": 0, "maximum": 1},
+        "why": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 64}
+        },
+        "occurred_at": {"type": "string", "format": "date-time"},
+        "is_current": {"type": "boolean"},
+        "supersedes_receipt": {"$ref": "#/$defs/receipt"}
+      }
+    },
+    "retrieval_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "schema_version",
+        "tenant_id",
+        "principal_id",
+        "request_id",
+        "results",
+        "gaps",
+        "contradictions",
+        "semantic_complete",
+        "elapsed_ms"
+      ],
+      "properties": {
+        "contract": {"const": "recall.retrieval-result.v1"},
+        "schema_version": {"const": 1},
+        "tenant_id": {"$ref": "#/$defs/identity"},
+        "principal_id": {"$ref": "#/$defs/identity"},
+        "request_id": {"$ref": "#/$defs/opaque_id"},
+        "results": {
+          "type": "array",
+          "maxItems": 20,
+          "items": {"$ref": "#/$defs/retrieval_result_item"}
+        },
+        "gaps": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 512}
+        },
+        "contradictions": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "maxLength": 1024}
+        },
+        "semantic_complete": {"type": "boolean"},
+        "elapsed_ms": {"type": "number", "minimum": 0, "maximum": 120000}
+      }
+    },
+    "mcp_principal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "schema_version",
+        "tenant_id",
+        "principal_id",
+        "subject",
+        "audience",
+        "scopes",
+        "source_ids",
+        "expires_at"
+      ],
+      "properties": {
+        "contract": {"const": "recall.mcp-principal.v1"},
+        "schema_version": {"const": 1},
+        "tenant_id": {"$ref": "#/$defs/identity"},
+        "principal_id": {"$ref": "#/$defs/identity"},
+        "subject": {"type": "string", "minLength": 1, "maxLength": 320},
+        "audience": {"type": "string", "minLength": 1, "maxLength": 320},
+        "scopes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "recall:search",
+              "recall:show",
+              "recall:related",
+              "recall:answer",
+              "recall:capture",
+              "recall:forget",
+              "recall:status"
+            ]
+          }
+        },
+        "source_ids": {
+          "allOf": [
+            {"$ref": "#/$defs/source_ids"},
+            {"minItems": 1}
+          ]
+        },
+        "expires_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "model_text": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["receipt", "text_redacted", "text_sha256"],
+      "properties": {
+        "receipt": {"$ref": "#/$defs/receipt"},
+        "text_redacted": {"type": "string", "maxLength": 64000},
+        "text_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "model_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "schema_version",
+        "tenant_id",
+        "principal_id",
+        "purpose",
+        "privacy_policy_version",
+        "texts"
+      ],
+      "properties": {
+        "contract": {"const": "recall.model-payload.v1"},
+        "schema_version": {"const": 1},
+        "tenant_id": {"$ref": "#/$defs/identity"},
+        "principal_id": {"$ref": "#/$defs/identity"},
+        "purpose": {"enum": ["embedding", "rerank", "answer", "privacy_judge"]},
+        "privacy_policy_version": {"type": "string", "minLength": 1, "maxLength": 128},
+        "texts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "items": {"$ref": "#/$defs/model_text"}
+        }
+      }
+    },
+    "aggregate_tree": {
+      "description": "Runtime validation additionally forbids content-bearing key names and strings.",
+      "type": "object",
+      "maxProperties": 128
+    },
+    "public_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "schema_version",
+        "loop_id",
+        "status",
+        "git_sha",
+        "manifest_sha256",
+        "test_counts",
+        "metrics"
+      ],
+      "properties": {
+        "contract": {"const": "recall.public-evidence.v1"},
+        "schema_version": {"const": 1},
+        "loop_id": {"$ref": "#/$defs/identity"},
+        "status": {"enum": ["complete", "at_bound"]},
+        "git_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "test_counts": {"$ref": "#/$defs/aggregate_tree"},
+        "metrics": {"$ref": "#/$defs/aggregate_tree"}
+      }
+    }
+  }
+}

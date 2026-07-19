@@ -1,0 +1,172 @@
+[
+  {
+    "audience": "https://recall.example.test",
+    "contract": "recall.principal-authority.v1",
+    "expires_at": "2026-07-20T00:00:00Z",
+    "principal_id": "principal:owner",
+    "schema_version": 1,
+    "scopes": ["recall:search", "recall:ingest"],
+    "source_ids": ["synthetic:source"],
+    "subject": "synthetic-owner",
+    "tenant_id": "tenant:synthetic"
+  },
+  {
+    "artifact_id": "art_0123456789abcdef",
+    "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "contract": "recall.artifact-ref.v1",
+    "created_at": "2026-07-19T00:00:00Z",
+    "encryption": "sse-s3",
+    "media_type": "application/json",
+    "object_key": "objects/01/0123456789abcdef0123456789abcdef",
+    "schema_version": 1,
+    "size_bytes": 128,
+    "source_id": "synthetic:source",
+    "storage_backend": "s3",
+    "tenant_id": "tenant:synthetic",
+    "version_id": "version-1"
+  },
+  {
+    "artifact_id": "art_0123456789abcdef",
+    "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "contract": "recall.canonical-document.v1",
+    "document_id": "doc_0123456789abcdef",
+    "is_current": true,
+    "kind": "document.v1",
+    "native_id": "native:record-1",
+    "observed_at": "2026-07-19T00:00:01Z",
+    "occurred_at": "2026-07-19T00:00:00Z",
+    "principal_id": "principal:owner",
+    "revision": 1,
+    "schema_version": 1,
+    "source_id": "synthetic:source",
+    "tenant_id": "tenant:synthetic",
+    "text_redacted": "safe canonical text",
+    "text_sha256": "d170e68ca282c5aa0deb1b311d909bca6d11572e6d066a8335c74c79210cb879",
+    "visibility": "private"
+  },
+  {
+    "chunk_id": "chk_0123456789abcdef",
+    "contract": "recall.canonical-chunk.v1",
+    "document_id": "doc_0123456789abcdef",
+    "ordinal": 0,
+    "receipt": "recall://synthetic:source/item-1?rev=1#item=0",
+    "schema_version": 1,
+    "source_id": "synthetic:source",
+    "tenant_id": "tenant:synthetic",
+    "text_redacted": "safe chunk",
+    "text_sha256": "a15da1f4814602c2e67d9b3ffd49351fd463267f69de2a61b6cabf35fe68b012"
+  },
+  {
+    "attempt": 0,
+    "connector_id": "connector.synthetic",
+    "contract": "recall.ingest-job.v1",
+    "created_at": "2026-07-19T00:00:00Z",
+    "job_id": "job_0123456789abcdef",
+    "mode": "incremental",
+    "schema_version": 1,
+    "source_id": "synthetic:source",
+    "status": "queued",
+    "tenant_id": "tenant:synthetic",
+    "updated_at": "2026-07-19T00:00:00Z"
+  },
+  {
+    "contract": "recall.forget-request.v1",
+    "idempotency_key": "synthetic-forget-1",
+    "mode": "explicit_forget",
+    "principal_id": "principal:owner",
+    "reason": "owner_requested",
+    "requested_at": "2026-07-19T00:00:00Z",
+    "schema_version": 1,
+    "source_id": "synthetic:source",
+    "target_receipt": "recall://synthetic:source/item-1?rev=1#item=0",
+    "tenant_id": "tenant:synthetic"
+  },
+  {
+    "contract": "recall.receipt-redirect.v1",
+    "created_at": "2026-07-19T00:00:00Z",
+    "new_receipt": "recall://synthetic:source/item-1?rev=2#item=0",
+    "old_receipt": "recall://synthetic:source/item-1?rev=1#item=0",
+    "reason": "v2_migration",
+    "schema_version": 1,
+    "source_id": "synthetic:source",
+    "tenant_id": "tenant:synthetic"
+  },
+  {
+    "contract": "recall.retrieval-request.v1",
+    "limit": 5,
+    "mode": "fast",
+    "principal_id": "principal:owner",
+    "query": "What was the synthetic decision?",
+    "request_id": "req_0123456789abcdef",
+    "schema_version": 1,
+    "source_ids": ["synthetic:source"],
+    "tenant_id": "tenant:synthetic"
+  },
+  {
+    "contract": "recall.retrieval-result.v1",
+    "contradictions": [],
+    "elapsed_ms": 12.5,
+    "gaps": [],
+    "principal_id": "principal:owner",
+    "request_id": "req_0123456789abcdef",
+    "results": [
+      {
+        "chunk_id": "chk_0123456789abcdef",
+        "document_id": "doc_0123456789abcdef",
+        "is_current": true,
+        "occurred_at": "2026-07-19T00:00:00Z",
+        "receipt": "recall://synthetic:source/item-1?rev=1#item=0",
+        "score": 0.9,
+        "source_id": "synthetic:source",
+        "text_redacted": "safe chunk",
+        "why": ["lexical", "temporal"]
+      }
+    ],
+    "schema_version": 1,
+    "semantic_complete": true,
+    "tenant_id": "tenant:synthetic"
+  },
+  {
+    "audience": "https://recall.example.test",
+    "contract": "recall.mcp-principal.v1",
+    "expires_at": "2026-07-20T00:00:00Z",
+    "principal_id": "principal:owner",
+    "schema_version": 1,
+    "scopes": ["recall:search", "recall:show"],
+    "source_ids": ["synthetic:source"],
+    "subject": "synthetic-agent",
+    "tenant_id": "tenant:synthetic"
+  },
+  {
+    "contract": "recall.model-payload.v1",
+    "principal_id": "principal:owner",
+    "privacy_policy_version": "synthetic-v1",
+    "purpose": "embedding",
+    "schema_version": 1,
+    "tenant_id": "tenant:synthetic",
+    "texts": [
+      {
+        "receipt": "recall://synthetic:source/item-1?rev=1#item=0",
+        "text_redacted": "safe model text",
+        "text_sha256": "62824be38de5d7af6b6c457731d6217e36349a93a92e00350504d74e0bb83d65"
+      }
+    ]
+  },
+  {
+    "contract": "recall.public-evidence.v1",
+    "git_sha": "0123456789abcdef0123456789abcdef01234567",
+    "loop_id": "l0_recall_v2",
+    "manifest_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "metrics": {
+      "authorization_leak_rate": 0.0,
+      "deletion_resurrection_rate": 0.0,
+      "recall@5": 0.8
+    },
+    "schema_version": 1,
+    "status": "complete",
+    "test_counts": {
+      "failed": 0,
+      "passed": 100
+    }
+  }
+]
