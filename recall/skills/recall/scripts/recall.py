@@ -274,6 +274,9 @@ def _mcp_call(base: str, method: str, path: str, body: dict | None) -> dict:
             "params": {"name": tool, "arguments": arguments},
         }
     elif tool is not None and method == "POST":
+        arguments = {
+            key: value for key, value in arguments.items() if value is not None
+        }
         message = {
             "jsonrpc": "2.0",
             "id": 1,

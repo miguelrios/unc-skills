@@ -1021,9 +1021,26 @@ class RemoteTransportTest(unittest.TestCase):
 
             target = "recall://claude:linux/mcp-session:1?rev=1#item=0"
             self.assertIn("remote MCP prompt", self.call("show", target, "--prompts")[1])
+            self.assertEqual(
+                McpRemoteHandler.requests[-1]["body"]["params"]["arguments"],
+                {"target": target, "prompts": True, "tail": 0},
+            )
             self.assertIn(
                 "overlap=2",
                 self.call("related", "--cwd", "/work/grep123/project", "--branch", "feature/mcp")[1],
+            )
+            self.assertIn(
+                "overlap=2",
+                self.call("related", "--cwd", "/work/grep123/project")[1],
+            )
+            self.assertEqual(
+                McpRemoteHandler.requests[-1]["body"]["params"]["arguments"],
+                {
+                    "cwd": "/work/grep123/project",
+                    "limit": 10,
+                    "mains_only": False,
+                    "fast": False,
+                },
             )
             self.assertIn("OK remote", self.call("doctor")[1])
             self.assertEqual(McpRemoteHandler.requests[-1]["body"]["method"], "ping")
