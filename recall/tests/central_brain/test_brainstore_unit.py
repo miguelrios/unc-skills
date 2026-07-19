@@ -97,6 +97,26 @@ class SchemaMigrationContractTest(unittest.TestCase):
             rendered,
         )
 
+    def test_turn_dedupe_upgrade_requeues_historical_duplicate_sessions(
+        self,
+    ) -> None:
+        migration = SERVER / "schema" / "024_requeue_turn_prompt_duplicates.sql"
+        rendered = " ".join(migration.read_text().split()).casefold()
+        self.assertIn("insert into turn_embedding_dirty_sessions(", rendered)
+        self.assertIn(
+            "source_id,session_native_id,last_anchor_item_id,updated_at",
+            rendered,
+        )
+        self.assertIn(
+            "having count(*)>count(distinct anchor.text_redacted)",
+            rendered,
+        )
+        self.assertIn(
+            "on conflict(source_id,session_native_id) do update set "
+            "last_anchor_item_id=0",
+            rendered,
+        )
+
     def test_v2_canonical_plane_is_tenant_keyed_and_deletion_explicit(self) -> None:
         migration = SERVER / "schema" / "019_v2_canonical_plane.sql"
         rendered = " ".join(migration.read_text().split()).casefold()
