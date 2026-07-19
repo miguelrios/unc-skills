@@ -152,9 +152,10 @@ the approved router:
 printf '%s' "$VALUE" | recall-brain privacy-preview --privacy-mode scrub
 ```
 
-The local structural policy covers credential assignments and structured email,
-phone, postal, government, financial, and medical identifiers. Contextual names
-and meaning require the optional agentic judge. It accepts only an HTTPS staging
+The local structural policy covers credential assignments, standalone common
+provider credential shapes, and structured email, phone, postal, government,
+financial, and medical identifiers. Contextual names and meaning require the
+optional agentic judge. It accepts only an HTTPS staging
 LiteLLM URL, a model alias, and a mode-0600 file containing a short-lived scoped
 virtual key as `{"virtual_key":"...","scope":"recall-privacy-judge",`
 `"expires_at":"...Z"}`; provider-direct URLs, wrong scopes, and expired files are
