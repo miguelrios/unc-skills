@@ -197,6 +197,30 @@ class SemanticRuntimeContractTest(unittest.TestCase):
         self.assertEqual(runtime.embedding_batch_size, 64)
         self.assertEqual(runtime.query_prefix, "")
 
+    def test_managed_embedding_batch_supports_bounded_bulk_backfill(self) -> None:
+        runtime = SemanticRuntime(
+            embedding_protocol="voyage",
+            embedding_url="https://api.voyage.example",
+            embedding_approved_url="https://api.voyage.example",
+            embedding_key_env="VOYAGE_API_KEY",
+            model="voyage-synthetic",
+            revision="voyage-synthetic-v1",
+            dimensions=512,
+            embedding_batch_size=512,
+        )
+        self.assertEqual(runtime.embedding_batch_size, 512)
+        with self.assertRaisesRegex(ValueError, "between 1 and 512"):
+            SemanticRuntime(
+                embedding_protocol="voyage",
+                embedding_url="https://api.voyage.example",
+                embedding_approved_url="https://api.voyage.example",
+                embedding_key_env="VOYAGE_API_KEY",
+                model="voyage-synthetic",
+                revision="voyage-synthetic-v1",
+                dimensions=512,
+                embedding_batch_size=513,
+            )
+
     def test_managed_key_may_come_from_a_named_secret_environment_variable(
         self,
     ) -> None:

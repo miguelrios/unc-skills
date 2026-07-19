@@ -130,8 +130,14 @@ class SemanticRuntime:
             and not (embedding_key_file or embedding_key_env)
         ):
             raise ValueError("remote managed embedding endpoint requires a key source")
-        if not 1 <= embedding_batch_size <= 128:
-            raise ValueError("embedding batch size must be between 1 and 128")
+        maximum_embedding_batch_size = (
+            128 if embedding_protocol == "tei" else 512
+        )
+        if not 1 <= embedding_batch_size <= maximum_embedding_batch_size:
+            raise ValueError(
+                "embedding batch size must be between 1 and "
+                f"{maximum_embedding_batch_size}"
+            )
         if not 1 <= planner_samples <= 3:
             raise ValueError("planner samples must be between 1 and 3")
         planner_values = (
