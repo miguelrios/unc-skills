@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/miguelrios/unc-skills/blob/main/parable/docs/evidence/subscription-canary-receipt.schema.json",
+  "title": "Parable subscription routing canary receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "proof",
+    "canary_id",
+    "started_at_utc",
+    "finished_at_utc",
+    "runtime",
+    "requests",
+    "artifact",
+    "safety"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "proof": {
+      "enum": [
+        "P1",
+        "P2"
+      ]
+    },
+    "canary_id": {
+      "type": "string",
+      "pattern": "^canary-[a-f0-9]{12}$"
+    },
+    "started_at_utc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "finished_at_utc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "claude_code_version",
+        "cliproxyapi_release",
+        "cliproxyapi_commit",
+        "isolated_proxy"
+      ],
+      "properties": {
+        "claude_code_version": {
+          "type": "string"
+        },
+        "cliproxyapi_release": {
+          "type": "string"
+        },
+        "cliproxyapi_commit": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "isolated_proxy": {
+          "const": true
+        }
+      }
+    },
+    "requests": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "role",
+          "provider_channel",
+          "auth_kind",
+          "requested_model",
+          "http_status",
+          "stream_completed",
+          "tool_calls"
+        ],
+        "properties": {
+          "role": {
+            "enum": [
+              "parent",
+              "child"
+            ]
+          },
+          "provider_channel": {
+            "enum": [
+              "openai-codex",
+              "kimi"
+            ]
+          },
+          "auth_kind": {
+            "const": "oauth"
+          },
+          "requested_model": {
+            "enum": [
+              "gpt-5.6-sol",
+              "kimi-k3"
+            ]
+          },
+          "http_status": {
+            "type": "integer",
+            "minimum": 200,
+            "maximum": 299
+          },
+          "stream_completed": {
+            "type": "boolean"
+          },
+          "tool_calls": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "sha256",
+        "deterministic_check"
+      ],
+      "properties": {
+        "kind": {
+          "const": "synthetic"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "deterministic_check": {
+          "enum": [
+            "PASS",
+            "FAIL"
+          ]
+        }
+      }
+    },
+    "safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "direct_provider_api_key_used",
+        "raw_content_committed",
+        "credential_material_committed"
+      ],
+      "properties": {
+        "direct_provider_api_key_used": {
+          "const": false
+        },
+        "raw_content_committed": {
+          "const": false
+        },
+        "credential_material_committed": {
+          "const": false
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-07-19",
+  "parable": {
+    "baseline_head": "4005ad281ce5d2e9bd301f82c66a70c8d1ac445f",
+    "package_version": "0.1.8",
+    "repository": "miguelrios/unc-skills",
+    "directory": "parable"
+  },
+  "runtime": {
+    "os": "Linux",
+    "architecture": "x86_64",
+    "node": "20.20.0",
+    "python": "3.11.9",
+    "claude_code": "2.1.215",
+    "claude_code_binary_sha256": "c1efffaaf370aa187cb6a09dd93d4e511c646899b0078476f83791b664bde7fe"
+  },
+  "cliproxyapi": {
+    "installed_at_baseline": false,
+    "running_at_baseline": false,
+    "release": "v7.2.88",
+    "commit": "93d74a890a44802f656d7f39a573916b2611896e",
+    "checksums_file_sha256": "20e1b4dc3a5ac2b20471aa84a3e62c890c585fc3986d240d2309353c5e5e5319",
+    "linux_amd64_archive_sha256": "2cc3b38e3ba2474d0cdeb7a3f25b026891ba34e34d3a7e0501d4efd03c01f6fe"
+  },
+  "baseline_tests": {
+    "command": "HOME=<isolated-temporary-home> npm test",
+    "result": "PASS",
+    "tests": 70
+  }
+}
