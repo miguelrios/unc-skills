@@ -401,3 +401,15 @@ Back up and run a blank-database restore proof:
 RECALL_DATABASE_URL=... recall/server/scripts/backup_restore.sh backup /secure/backup/dir
 RECALL_RESTORE_DATABASE_URL=... recall/server/scripts/backup_restore.sh restore-test /secure/backup/dir
 ```
+
+The database fingerprint covers both legacy events and every v2 canonical truth, projection,
+redirect, and forget-fence table. The laptop OSS profile backs up its exact raw archive separately
+and proves it into an empty root:
+
+```bash
+python -m recall_server.archive_snapshot backup /private/archive /secure/archive-snapshot
+python -m recall_server.archive_snapshot restore-test /secure/archive-snapshot /private/empty-restore
+```
+
+Both commands emit aggregate counts and fingerprints only. The restore refuses a symlink, a
+non-owner-only tree, tampered bytes or metadata, and any nonempty destination.

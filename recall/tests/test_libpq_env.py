@@ -78,6 +78,22 @@ class LibpqEnvironmentTest(unittest.TestCase):
                 with self.assertRaises(MODULE.ConnectionPolicyError):
                     MODULE.libpq_environment(url)
 
+    def test_local_fixture_is_explicit_disabled_tls_and_loopback_only(self) -> None:
+        values = MODULE.libpq_environment(
+            "postgresql://user:password@127.0.0.1:55439/recall?sslmode=disable",
+            profile="local-fixture",
+        )
+        self.assertEqual(values["PGSSLMODE"], "disable")
+        with self.assertRaises(MODULE.ConnectionPolicyError):
+            MODULE.libpq_environment(
+                "postgresql://user:password@db.invalid/recall?sslmode=disable",
+                profile="local-fixture",
+            )
+        with self.assertRaises(MODULE.ConnectionPolicyError):
+            MODULE.libpq_environment(
+                "postgresql://user:password@127.0.0.1/recall?sslmode=disable",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

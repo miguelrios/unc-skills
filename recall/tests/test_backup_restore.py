@@ -15,6 +15,28 @@ SCRIPT = ROOT / "server/scripts/backup_restore.sh"
 
 
 class BackupPublicationTest(unittest.TestCase):
+    def test_database_fingerprint_covers_v2_truth_projections_and_forget_fence(self) -> None:
+        rendered = SCRIPT.read_text()
+        for table in (
+            "brain_tenants",
+            "brain_principals",
+            "canonical_sources",
+            "raw_artifacts",
+            "canonical_ingest_jobs",
+            "canonical_events",
+            "canonical_documents",
+            "canonical_chunks",
+            "receipt_redirects",
+            "forget_tombstones",
+            "canonical_audit_events",
+        ):
+            self.assertIn(f"('{table}',", rendered)
+        self.assertIn('"database_fingerprint"', rendered)
+        self.assertNotIn('"source_fingerprint"', rendered)
+        self.assertIn('pg_restore --dbname="$PGDATABASE"', rendered)
+        self.assertIn("to_regclass('public.' || name) IS NOT NULL", rendered)
+        self.assertIn("database fingerprint failed", rendered)
+
     def test_deployment_timer_is_non_overlapping_and_makes_no_false_rpo_claim(self) -> None:
         timer = (ROOT / "server/deploy/recall-brain-backup.timer").read_text()
         service = (ROOT / "server/deploy/recall-brain-backup.service").read_text()
@@ -68,7 +90,7 @@ case "$input" in
     read ignored < "$fifo"
     ;;
   *'SET TRANSACTION SNAPSHOT'*'max(created_at)'*) echo 0;;
-  *'SET TRANSACTION SNAPSHOT'*) echo '1:synthetic-fingerprint';;
+  *'SET TRANSACTION SNAPSHOT'*) printf 'schema_migrations\t1\td41d8cd98f00b204e9800998ecf8427e\n';;
   *) exit 4;;
 esac
 """
@@ -99,7 +121,7 @@ esac
                 manifest = json.loads((backup / "manifest.json").read_text())
                 self.assertTrue(manifest["dump_sha256"])
                 self.assertEqual(manifest["database_snapshot"], "00000001-00000001-1")
-                self.assertIn('"schema_version": 1', stdout)
+                self.assertIn('"schema_version": 2', stdout)
                 self.assertEqual(backup.stat().st_mode & 0o777, 0o700)
                 self.assertEqual((backup / "brain.dump").stat().st_mode & 0o777, 0o600)
                 self.assertEqual((backup / "manifest.json").stat().st_mode & 0o777, 0o600)
@@ -120,10 +142,14 @@ esac
             backup = root / "latest"
             backup.mkdir()
             original = b"stable-root-owned-dump"
+            digest = hashlib.md5(
+                b"schema_migrations:1:d41d8cd98f00b204e9800998ecf8427e",
+                usedforsecurity=False,
+            ).hexdigest()
             (backup / "brain.dump").write_bytes(original)
             (backup / "manifest.json").write_text(json.dumps({
                 "dump_sha256": hashlib.sha256(original).hexdigest(),
-                "source_fingerprint": "1:synthetic-fingerprint",
+                "database_fingerprint": f"1:{digest}",
             }))
             control = root / "control"
             control.mkdir()
@@ -152,7 +178,10 @@ test "$(cat "$mount/brain.dump")" = 'stable-root-owned-dump'
             )
             docker.chmod(0o755)
             psql = binaries / "psql"
-            psql.write_text("#!/bin/sh\necho '1:synthetic-fingerprint'\n")
+            psql.write_text(
+                "#!/bin/sh\n"
+                "printf 'schema_migrations\\t1\\td41d8cd98f00b204e9800998ecf8427e\\n'\n"
+            )
             psql.chmod(0o755)
             forbidden_link = binaries / "ln"
             forbidden_link.write_text("#!/bin/sh\necho 'hardlink forbidden' >&2\nexit 1\n")
