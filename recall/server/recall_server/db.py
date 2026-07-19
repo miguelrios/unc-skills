@@ -830,11 +830,16 @@ class BrainStore:
                             AND btrim(candidate.text_redacted)<>''
                             AND (candidate.occurred_at,candidate.id)>
                                 (anchor.occurred_at,anchor.id)
-                            AND (
-                              next_user.id IS NULL
-                              OR (candidate.occurred_at,candidate.id)<
-                                 (next_user.occurred_at,next_user.id)
-                            )
+                            AND (candidate.occurred_at,candidate.id)<
+                                (
+                                  COALESCE(
+                                    next_user.occurred_at,
+                                    'infinity'::timestamptz
+                                  ),
+                                  COALESCE(
+                                    next_user.id,9223372036854775807
+                                  )
+                                )
                           HAVING count(*)>0
                         ) response ON true
                         LEFT JOIN turn_embeddings embedding
