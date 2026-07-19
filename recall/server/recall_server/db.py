@@ -716,6 +716,31 @@ class BrainStore:
             "surface_scoped": surface is not None,
         }
 
+    @staticmethod
+    def _dedupe_turn_embeddings_for_session(
+        connection: Any,
+        source_id: str,
+        session_native_id: str,
+    ) -> None:
+        connection.execute(
+            """WITH ranked AS (
+                 SELECT embedding.anchor_item_id,
+                        row_number() OVER (
+                          PARTITION BY anchor.text_redacted
+                          ORDER BY embedding.anchor_item_id DESC
+                        ) AS position
+                 FROM turn_embeddings embedding
+                 JOIN items anchor ON anchor.id=embedding.anchor_item_id
+                 WHERE embedding.source_id=%s
+                   AND embedding.session_native_id=%s
+               )
+               DELETE FROM turn_embeddings duplicate
+               USING ranked
+               WHERE duplicate.anchor_item_id=ranked.anchor_item_id
+                 AND ranked.position>1""",
+            (source_id, session_native_id),
+        )
+
     def embed_pending_turns(
         self,
         batch_size: int = 128,
@@ -913,6 +938,11 @@ class BrainStore:
                     ).fetchall()
                     if not rows:
                         if dirty is not None:
+                            self._dedupe_turn_embeddings_for_session(
+                                conn,
+                                dirty["source_id"],
+                                dirty["session_native_id"],
+                            )
                             conn.execute(
                                 """DELETE FROM turn_embedding_dirty_sessions
                                    WHERE source_id=%s
