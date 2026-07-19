@@ -721,6 +721,7 @@ class BrainStore:
         batch_size: int = 128,
         max_batches: int | None = None,
         source_id: str | None = None,
+        dirty_only: bool = False,
     ) -> dict[str, Any]:
         """Embed user request plus its complete assistant response as one retrieval unit."""
         if self.semantic_runtime is None:
@@ -729,18 +730,25 @@ class BrainStore:
             raise ValueError("invalid turn embedding backfill bounds")
         if source_id is not None and not SOURCE_ID_RE.fullmatch(source_id):
             raise ValueError("invalid embedding source")
+        if not isinstance(dirty_only, bool):
+            raise ValueError("invalid dirty-only mode")
         fingerprint = turn_runtime_fingerprint(self.semantic_runtime.fingerprint)
         processed = batches = 0
         with self.connect() as conn:
             lock_name = "recall:turn-embeddings"
+            lock_function = (
+                "pg_try_advisory_lock_shared"
+                if dirty_only
+                else "pg_try_advisory_lock"
+            )
             locked = conn.execute(
-                "SELECT pg_try_advisory_lock(hashtextextended(%s,0)) AS value",
+                f"SELECT {lock_function}(hashtextextended(%s,0)) AS value",
                 (lock_name,),
             ).fetchone()["value"]
             if not locked:
                 return {"status": "busy", "processed": 0, "batches": 0}
             try:
-                use_watermark = source_id is None
+                use_watermark = source_id is None and not dirty_only
                 watermark = 0
                 if use_watermark:
                     conn.execute(
@@ -771,6 +779,8 @@ class BrainStore:
                            FOR UPDATE SKIP LOCKED""",
                         (source_id, source_id),
                     ).fetchone()
+                    if dirty is None and dirty_only:
+                        break
                     scan_source_id = (
                         dirty["source_id"] if dirty is not None else source_id
                     )
@@ -1005,8 +1015,13 @@ class BrainStore:
                     processed += len(rows)
                     batches += 1
             finally:
+                unlock_function = (
+                    "pg_advisory_unlock_shared"
+                    if dirty_only
+                    else "pg_advisory_unlock"
+                )
                 conn.execute(
-                    "SELECT pg_advisory_unlock(hashtextextended(%s,0))",
+                    f"SELECT {unlock_function}(hashtextextended(%s,0))",
                     (lock_name,),
                 )
         return {
