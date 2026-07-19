@@ -29,6 +29,8 @@ from .projectors import KIND_RE, SOURCE_ID_RE, advisory_lock_key, canonical_json
 from .ranking import DEFAULT_SEARCH_DEADLINE_MS, evidence_rank_components, should_run_partial
 from .semantic import SemanticRuntime
 
+MAX_SEARCH_RESULT_TEXT_CHARS = 4096
+
 
 class IdempotencyConflict(Exception):
     pass
@@ -36,6 +38,11 @@ class IdempotencyConflict(Exception):
 
 class SearchDeadlineExceeded(Exception):
     pass
+
+
+def bounded_search_text(value: str) -> tuple[str, bool]:
+    """Return an agent-sized search snippet; show resolves the full receipt."""
+    return value[:MAX_SEARCH_RESULT_TEXT_CHARS], len(value) > MAX_SEARCH_RESULT_TEXT_CHARS
 
 
 def semantic_candidate_limit(result_limit: int) -> int:
@@ -1631,13 +1638,15 @@ class BrainStore:
             metadata = row["metadata"] or {}
             path = row["path"] or metadata.get("original_path") or f"recall://{row['source_id']}/{row['session_native_id']}"
             cwd = metadata.get("cwd")
+            text, text_truncated = bounded_search_text(row["text_redacted"])
             results.append({
                 "source_id": row["source_id"], "native_id": row["event_native_id"],
                 "session_native_id": row["session_native_id"], "path": path,
                 "occurred_at": row["occurred_at"], "observed_at": row["observed_at"],
                 "cwd": cwd, "slot": metadata.get("slot") or (re.search(r"grep\d+", cwd or "").group(0) if re.search(r"grep\d+", cwd or "") else None),
                 "branch": metadata.get("branch"), "harness": metadata.get("harness"),
-                "surface": row["surface"], "text": row["text_redacted"],
+                "surface": row["surface"], "text": text,
+                "text_truncated": text_truncated,
                 "receipt": row["receipt"], "matched_terms": row["matched_terms"],
                 "legs": sorted(row["legs"]), "tier": row["evidence"]["class_priority"],
                 "evidence": row["evidence"],
