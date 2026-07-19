@@ -163,10 +163,16 @@ GRANT SELECT, INSERT, UPDATE, DELETE
   ON ALL TABLES IN SCHEMA public TO recall_runtime;
 GRANT USAGE, SELECT
   ON ALL SEQUENCES IN SCHEMA public TO recall_runtime;
+REVOKE ALL PRIVILEGES
+  ON TABLE public.schema_migrations FROM recall_runtime;
+GRANT SELECT
+  ON TABLE public.schema_migrations TO recall_runtime;
 ```
 
-Apply only the grants the enabled runtime operations need. Reassign objects to the
-durable owner before deleting a temporary migration role.
+The final two statements are mandatory after the broad table refresh: the runtime
+capability gate requires migration history to remain read-only. Apply only the grants
+the enabled runtime operations need. Reassign objects to the durable owner before
+deleting a temporary migration role.
 
 After reviewing the zero-network preview and mode-0600 approval document, run
 the exact approved apply under 1Password injection:
