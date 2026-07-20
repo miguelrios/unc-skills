@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "loop": "Y3",
+  "captured_at_utc": "2026-07-20T17:09:18Z",
+  "parable_baseline_head": "1152e63b61de7415be67ed552303ab87552efeee",
+  "runtime": {
+    "cliproxyapi_upstream_release": "v7.2.88",
+    "cliproxyapi_upstream_commit": "93d74a890a44802f656d7f39a573916b2611896e",
+    "cliproxyapi_local_fix_commit": "ad20a87efbbd41a9d4f24c83ca8bdd934bf34ab7",
+    "cliproxyapi_binary_sha256": "139e1305a878e08026dd0fb6d85a3817801f32e40a40c1954ea1973c5bb9d697",
+    "loopback_only": true,
+    "local_model_catalog": true
+  },
+  "catalog": {
+    "endpoint": "/v1/models",
+    "authenticated": true,
+    "http_status": 200,
+    "total_models": 37,
+    "owner_counts": {
+      "anthropic": 14,
+      "openai": 10,
+      "xai": 13
+    },
+    "model_turns_spent": 0
+  },
+  "pinned_claude_children": [
+    {
+      "lane": "sonnet",
+      "id": "claude-sonnet-5",
+      "owned_by": "anthropic",
+      "count": 1
+    },
+    {
+      "lane": "opus",
+      "id": "claude-opus-4-8",
+      "owned_by": "anthropic",
+      "count": 1
+    },
+    {
+      "lane": "haiku",
+      "id": "claude-haiku-4-5-20251001",
+      "owned_by": "anthropic",
+      "count": 1
+    }
+  ],
+  "preserved_children": [
+    {
+      "id": "gpt-5.6-sol",
+      "owned_by": "openai",
+      "count": 1
+    },
+    {
+      "id": "gpt-5.6-terra",
+      "owned_by": "openai",
+      "count": 1
+    },
+    {
+      "id": "gpt-5.6-luna",
+      "owned_by": "openai",
+      "count": 1
+    },
+    {
+      "id": "grok-4.5",
+      "owned_by": "xai",
+      "count": 1
+    }
+  ],
+  "routing": {
+    "claude_oauth_records": 1,
+    "codex_oauth_records": 1,
+    "xai_oauth_records": 1,
+    "anthropic_api_key_set": false,
+    "openai_api_key_set": false,
+    "xai_api_key_set": false
+  },
+  "safety": {
+    "credential_material_committed": false,
+    "oauth_state_committed": false,
+    "account_identifier_committed": false,
+    "raw_catalog_committed": false,
+    "private_path_committed": false
+  }
+}
