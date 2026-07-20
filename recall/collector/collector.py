@@ -369,9 +369,9 @@ class Collector:
 
                 with path.open("rb") as source:
                     source.seek(start_offset)
-                    while True:
+                    while source.tell() < stat.st_size:
                         line_start = source.tell()
-                        line = source.readline()
+                        line = source.readline(stat.st_size - line_start)
                         if not line:
                             break
                         if not line.endswith(b"\n"):
