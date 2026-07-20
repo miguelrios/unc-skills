@@ -884,5 +884,256 @@ if args and args[0] == "build":
             self.assertTrue(expected.is_file())
 
 
+class TestVendorAuthAndProxyLifecycle(unittest.TestCase):
+    def make_proxy(self, root: Path) -> tuple[Path, Path]:
+        root.mkdir(parents=True, exist_ok=True)
+        proxy = root / "fake-proxy"
+        capture = root / "calls.jsonl"
+        proxy.write_text("""#!/usr/bin/env python3
+import json
+import os
+import sys
+with open(os.environ["FAKE_PROXY_CAPTURE"], "a") as handle:
+    handle.write(json.dumps(sys.argv[1:]) + "\\n")
+if os.environ.get("FAKE_PROXY_STDOUT"):
+    print(os.environ["FAKE_PROXY_STDOUT"])
+raise SystemExit(int(os.environ.get("FAKE_PROXY_EXIT", "0")))
+""")
+        proxy.chmod(0o755)
+        return proxy, capture
+
+    def run_cli(
+        self,
+        home: Path,
+        proxy: Path,
+        capture: Path,
+        *args: str,
+        extra_env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess:
+        env = os.environ | {
+            "HOME": str(home),
+            "FAKE_PROXY_CAPTURE": str(capture),
+        }
+        env.pop("PARABLE_CONFIG", None)
+        env.pop("PARABLE_CLIPROXY_BIN", None)
+        if extra_env:
+            env.update(extra_env)
+        return subprocess.run(
+            [NODE, str(REPO / "bin" / "parable.js"), *args],
+            cwd=home,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+    def setup(
+        self,
+        home: Path,
+        proxy: Path,
+        capture: Path,
+        vendors: str = "chatgpt,claude,xai",
+    ) -> subprocess.CompletedProcess:
+        return self.run_cli(
+            home,
+            proxy,
+            capture,
+            "setup", "--non-interactive", "--vendors", vendors,
+            "--proxy-bin", str(proxy), "--no-auth",
+        )
+
+    def calls(self, capture: Path) -> list[list[str]]:
+        if not capture.exists():
+            return []
+        return [json.loads(line) for line in capture.read_text().splitlines()]
+
+    def test_auth_add_delegates_only_exact_native_flags_and_preserves_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            proxy, capture = self.make_proxy(home / "tools")
+            setup = self.setup(home, proxy, capture)
+            self.assertEqual(setup.returncode, 0, setup.stdout + setup.stderr)
+            auth_dir = home / ".cli-proxy-api"
+            existing = auth_dir / "existing.json"
+            existing.write_text('{"type":"codex","access_token":"SECRET-KEEP"}\n')
+            existing.chmod(0o600)
+            before = existing.read_bytes()
+            config = home / ".config" / "parable" / "cliproxy.yaml"
+
+            cases = [
+                (("auth", "add", "chatgpt"),
+                 ["--config", str(config), "--codex-login"]),
+                (("auth", "add", "chatgpt", "--device"),
+                 ["--config", str(config), "--codex-device-login"]),
+                (("auth", "add", "claude"),
+                 ["--config", str(config), "--claude-login", "--no-browser"]),
+                (("auth", "add", "xai"),
+                 ["--config", str(config), "--xai-login", "--no-browser"]),
+            ]
+            for command, expected in cases:
+                proc = self.run_cli(home, proxy, capture, *command)
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                self.assertEqual(self.calls(capture)[-1], expected)
+                self.assertEqual(existing.read_bytes(), before)
+            self.assertIn("localhost:54545", self.run_cli(
+                home, proxy, capture, "auth", "add", "claude"
+            ).stdout)
+            self.assertEqual(existing.read_bytes(), before)
+
+    def test_setup_runs_selected_auth_additively_unless_no_auth(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            proxy, capture = self.make_proxy(home / "tools")
+            proc = self.run_cli(
+                home,
+                proxy,
+                capture,
+                "setup", "--non-interactive", "--vendors", "chatgpt,claude,xai",
+                "--proxy-bin", str(proxy),
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            config = home / ".config" / "parable" / "cliproxy.yaml"
+            self.assertEqual(self.calls(capture), [
+                ["--config", str(config), "--codex-login"],
+                ["--config", str(config), "--claude-login", "--no-browser"],
+                ["--config", str(config), "--xai-login", "--no-browser"],
+            ])
+            self.assertIn("authorization complete", proc.stdout)
+
+    def test_auth_rejects_missing_unselected_unsupported_and_bad_device_before_spawn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            home.mkdir()
+            proxy, capture = self.make_proxy(root / "tools")
+            setup = self.setup(home, proxy, capture, vendors="chatgpt")
+            self.assertEqual(setup.returncode, 0, setup.stdout + setup.stderr)
+            rejected = (
+                (("auth", "add", "xai"), "not selected"),
+                (("auth", "add", "kimi"), "unsupported auth vendor"),
+                (("auth", "add", "claude", "--device"), "only for chatgpt"),
+            )
+            for command, message in rejected:
+                proc = self.run_cli(home, proxy, capture, *command)
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn(message, proc.stderr)
+                self.assertEqual(self.calls(capture), [])
+
+            missing_home = root / "missing"
+            missing_home.mkdir()
+            missing = self.run_cli(
+                missing_home, proxy, capture, "auth", "add", "chatgpt"
+            )
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn("setup is missing", missing.stderr)
+            self.assertEqual(self.calls(capture), [])
+
+            proxy.unlink()
+            missing_binary = self.run_cli(home, proxy, capture, "auth", "add", "chatgpt")
+            self.assertNotEqual(missing_binary.returncode, 0)
+            self.assertIn("configured proxy binary", missing_binary.stderr)
+            self.assertEqual(self.calls(capture), [])
+
+    def test_auth_status_is_aggregate_only_and_does_not_require_proxy_binary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            proxy, capture = self.make_proxy(home / "tools")
+            setup = self.setup(home, proxy, capture)
+            self.assertEqual(setup.returncode, 0, setup.stdout + setup.stderr)
+            auth_dir = home / ".cli-proxy-api"
+            records = {
+                "account-alpha.json": {"type": "codex", "access_token": "SECRET-CODEX",
+                                       "email": "private@example.invalid"},
+                "account-beta.json": {"type": "claude", "refresh_token": "SECRET-CLAUDE"},
+                "account-gamma.json": {"type": "xai", "id_token": "SECRET-XAI"},
+                "other.json": {"type": "kimi", "access_token": "SECRET-KIMI"},
+            }
+            for name, value in records.items():
+                target = auth_dir / name
+                target.write_text(json.dumps(value))
+                target.chmod(0o600)
+            malformed = auth_dir / "malformed.json"
+            malformed.write_text("{SECRET-MALFORMED")
+            malformed.chmod(0o600)
+            bad_mode = auth_dir / "bad-mode.json"
+            bad_mode.write_text('{"type":"codex","access_token":"SECRET-BAD-MODE"}')
+            bad_mode.chmod(0o644)
+            outside = home / "outside-record"
+            outside.write_text('{"type":"xai","access_token":"SECRET-SYMLINK"}')
+            (auth_dir / "linked.json").symlink_to(outside)
+
+            proxy.unlink()
+            status_proc = self.run_cli(
+                home, proxy, capture, "auth", "status", "--json"
+            )
+            self.assertEqual(status_proc.returncode, 0, status_proc.stdout + status_proc.stderr)
+            status = json.loads(status_proc.stdout)
+            self.assertEqual(status["providers"], {
+                "chatgpt": {"present": True, "recordCount": 1},
+                "claude": {"present": True, "recordCount": 1},
+                "xai": {"present": True, "recordCount": 1},
+            })
+            self.assertEqual(status["records"], {
+                "total": 7,
+                "userOnly": 4,
+                "invalidMode": 2,
+                "parseErrors": 1,
+                "unrecognized": 1,
+                "allModesValid": False,
+            })
+            self.assertTrue(status["directoryModeValid"])
+            self.assertTrue(status["scanned"])
+            forbidden = [
+                "SECRET-", "private@example.invalid", "account-alpha", "bad-mode",
+                "linked.json", str(auth_dir), str(outside), "kimi",
+            ]
+            for value in forbidden:
+                self.assertNotIn(value, status_proc.stdout + status_proc.stderr)
+
+            text_status = self.run_cli(home, proxy, capture, "auth", "status")
+            self.assertEqual(text_status.returncode, 0, text_status.stdout + text_status.stderr)
+            self.assertIn("chatgpt  present=yes records=1", text_status.stdout)
+            for value in forbidden:
+                self.assertNotIn(value, text_status.stdout + text_status.stderr)
+
+            auth_dir.chmod(0o755)
+            unsafe = self.run_cli(home, proxy, capture, "auth", "status", "--json")
+            self.assertEqual(unsafe.returncode, 0, unsafe.stdout + unsafe.stderr)
+            unsafe_status = json.loads(unsafe.stdout)
+            self.assertFalse(unsafe_status["directoryModeValid"])
+            self.assertFalse(unsafe_status["scanned"])
+            self.assertEqual(unsafe_status["records"]["total"], 0)
+            for value in forbidden:
+                self.assertNotIn(value, unsafe.stdout + unsafe.stderr)
+
+    def test_proxy_start_is_foreground_exact_and_preserves_child_exit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            proxy, capture = self.make_proxy(home / "tools")
+            setup = self.setup(home, proxy, capture)
+            self.assertEqual(setup.returncode, 0, setup.stdout + setup.stderr)
+            config = home / ".config" / "parable" / "cliproxy.yaml"
+            proc = self.run_cli(
+                home,
+                proxy,
+                capture,
+                "proxy", "start",
+                extra_env={"FAKE_PROXY_EXIT": "17", "FAKE_PROXY_STDOUT": "native-proxy-output"},
+            )
+            self.assertEqual(proc.returncode, 17, proc.stdout + proc.stderr)
+            self.assertEqual(
+                self.calls(capture),
+                [["--config", str(config), "--local-model"]],
+            )
+            self.assertIn("native-proxy-output", proc.stdout)
+
+            capture.unlink()
+            proxy.unlink()
+            missing = self.run_cli(home, proxy, capture, "proxy", "start")
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn("configured proxy binary", missing.stderr)
+            self.assertEqual(self.calls(capture), [])
+
+
 if __name__ == "__main__":
     unittest.main()

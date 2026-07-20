@@ -5,7 +5,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const readline = require("readline/promises");
-const { spawnSync } = require("child_process");
+const { spawn, spawnSync } = require("child_process");
 
 const PACKAGE_ROOT = path.resolve(__dirname, "..");
 const PARABLE_PY = path.join(
@@ -22,6 +22,11 @@ const PROXY_COMMIT = "93d74a890a44802f656d7f39a573916b2611896e";
 const PROXY_PATCH_SHA256 = "d35b422da321265150fe393da80a686862ef642ee45c65a3e2fb908d689d5d1f";
 const PROXY_BINARY_NAME = "parable-cliproxy-api";
 const VENDOR_ORDER = Object.freeze(["chatgpt", "claude", "xai"]);
+const AUTH_FLAGS = Object.freeze({
+  chatgpt: Object.freeze({ browser: "--codex-login", device: "--codex-device-login" }),
+  claude: Object.freeze({ browser: "--claude-login", extra: "--no-browser" }),
+  xai: Object.freeze({ browser: "--xai-login", extra: "--no-browser" }),
+});
 const VENDORS = Object.freeze({
   chatgpt: Object.freeze({
     models: Object.freeze(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]),
@@ -442,9 +447,11 @@ function readExistingToken(paths) {
   return match[1];
 }
 
-function validateExistingSetup(configDir, authDir, paths, desired) {
+function validateExistingSetup(configDir, authDir, paths, desired, options = {}) {
   requirePrivateDirectory(configDir, "configuration directory");
-  requirePrivateDirectory(authDir, "CLIProxyAPI auth directory");
+  if (options.requireAuthMode !== false) {
+    requirePrivateDirectory(authDir, "CLIProxyAPI auth directory");
+  }
   for (const [name, target] of Object.entries(paths)) requirePrivateFile(target, name);
 
   const actualManifest = readManifest(paths);
@@ -465,7 +472,9 @@ function validateExistingSetup(configDir, authDir, paths, desired) {
       throw new OnboardingError(`generated setup file has changed; refusing to overwrite: ${target}`);
     }
   }
-  requireExecutable(desired.proxyBinary, "configured proxy binary");
+  if (options.requireProxy !== false) {
+    requireExecutable(desired.proxyBinary, "configured proxy binary");
+  }
 }
 
 function writePrivateFileSet(entries) {
@@ -656,6 +665,282 @@ function existingManifestSkeleton(configDir, paths) {
   return manifest;
 }
 
+function activeSetupDirectory() {
+  if (process.env.PARABLE_CONFIG) {
+    return path.dirname(path.resolve(process.env.PARABLE_CONFIG));
+  }
+  return path.join(os.homedir(), ".config", "parable");
+}
+
+function loadSetupContext(options = {}) {
+  const configDir = path.resolve(activeSetupDirectory());
+  const authDir = path.resolve(path.join(os.homedir(), ".cli-proxy-api"));
+  const paths = setupPaths(configDir);
+  if (stateOf(paths) !== "complete") {
+    throw new OnboardingError("setup is missing; run `parable setup` first");
+  }
+  const manifest = existingManifestSkeleton(configDir, paths);
+  let vendors;
+  try {
+    vendors = parseVendors(manifest.vendors.join(","));
+  } catch {
+    throw new OnboardingError("setup.json contains an invalid vendor selection");
+  }
+  if (manifest.port < 1 || manifest.port > 65535) {
+    throw new OnboardingError("setup.json contains an invalid proxy port");
+  }
+  const desired = manifestFor(
+    configDir,
+    authDir,
+    paths,
+    vendors,
+    manifest.proxyBinary,
+    manifest.port,
+  );
+  validateExistingSetup(configDir, authDir, paths, desired, options);
+  return { configDir, authDir, paths, manifest: desired, vendors };
+}
+
+function authUsage() {
+  return [
+    "usage: parable auth add chatgpt [--device]",
+    "       parable auth add claude",
+    "       parable auth add xai",
+    "       parable auth status [--json]",
+  ].join("\n");
+}
+
+function proxyStartUsage() {
+  return "usage: parable proxy start";
+}
+
+function nativeAuthArgs(context, vendor, device) {
+  if (!Object.hasOwn(AUTH_FLAGS, vendor)) {
+    throw new OnboardingError(
+      `unsupported auth vendor '${vendor}' (supported: ${VENDOR_ORDER.join(", ")})`,
+    );
+  }
+  if (!context.vendors.includes(vendor)) {
+    throw new OnboardingError(
+      `vendor '${vendor}' is not selected in setup; rerun from a clean setup directory to change vendors`,
+    );
+  }
+  if (device && vendor !== "chatgpt") {
+    throw new OnboardingError("--device is supported only for chatgpt");
+  }
+  const mapping = AUTH_FLAGS[vendor];
+  const loginFlag = device ? mapping.device : mapping.browser;
+  const args = ["--config", context.paths.proxyConfig, loginFlag];
+  if (mapping.extra) args.push(mapping.extra);
+  return args;
+}
+
+function runNativeAuth(context, vendor, device, log) {
+  const args = nativeAuthArgs(context, vendor, device);
+  if (vendor === "claude") {
+    log("Claude OAuth returns to localhost:54545. On a remote host, forward that port first:");
+    log("  ssh -L 54545:localhost:54545 <host>");
+    log("Keep this same authorization process running until its new callback completes.");
+  }
+  log(`starting native ${vendor} authorization`);
+  const result = spawnSync(context.manifest.proxyBinary, args, {
+    stdio: "inherit",
+    env: process.env,
+  });
+  if (result.error) {
+    throw new OnboardingError(`could not start native ${vendor} authorization: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    const ended = result.signal ? `signal ${result.signal}` : `exit status ${result.status}`;
+    throw new OnboardingError(`native ${vendor} authorization failed with ${ended}`);
+  }
+}
+
+async function runAuthAdd(argv, log) {
+  const options = parseOptions(argv, new Set(), new Set(["--device", "--help"]));
+  if (options.help) {
+    log(authUsage());
+    return;
+  }
+  if (options._.length !== 1) {
+    throw new OnboardingError("auth add requires exactly one vendor: chatgpt, claude, or xai");
+  }
+  const vendor = options._[0];
+  if (!Object.hasOwn(AUTH_FLAGS, vendor)) {
+    throw new OnboardingError(
+      `unsupported auth vendor '${vendor}' (supported: ${VENDOR_ORDER.join(", ")})`,
+    );
+  }
+  if (options.device && vendor !== "chatgpt") {
+    throw new OnboardingError("--device is supported only for chatgpt");
+  }
+  const context = loadSetupContext();
+  runNativeAuth(context, vendor, Boolean(options.device), log);
+}
+
+function emptyAuthStatus(directoryModeValid) {
+  return {
+    schemaVersion: 1,
+    directoryModeValid,
+    scanned: directoryModeValid,
+    providers: {
+      chatgpt: { present: false, recordCount: 0 },
+      claude: { present: false, recordCount: 0 },
+      xai: { present: false, recordCount: 0 },
+    },
+    records: {
+      total: 0,
+      userOnly: 0,
+      invalidMode: 0,
+      parseErrors: 0,
+      unrecognized: 0,
+      allModesValid: directoryModeValid,
+    },
+  };
+}
+
+function authDirectoryModeValid(authDir) {
+  const stat = lstatOrNull(authDir);
+  return Boolean(
+    stat
+    && !stat.isSymbolicLink()
+    && stat.isDirectory()
+    && modeOf(stat) === 0o700
+  );
+}
+
+function scanAuthStatus(authDir) {
+  const directoryModeValid = authDirectoryModeValid(authDir);
+  const status = emptyAuthStatus(directoryModeValid);
+  if (!directoryModeValid) {
+    status.scanned = false;
+    return status;
+  }
+  const providerByType = { codex: "chatgpt", claude: "claude", xai: "xai" };
+  for (const entry of fs.readdirSync(authDir, { withFileTypes: true })) {
+    if (!entry.name.endsWith(".json")) continue;
+    status.records.total += 1;
+    const target = path.join(authDir, entry.name);
+    const initial = lstatOrNull(target);
+    if (
+      !initial
+      || initial.isSymbolicLink()
+      || !initial.isFile()
+      || modeOf(initial) !== 0o600
+    ) {
+      status.records.invalidMode += 1;
+      continue;
+    }
+    let descriptor;
+    try {
+      const noFollow = fs.constants.O_NOFOLLOW || 0;
+      descriptor = fs.openSync(target, fs.constants.O_RDONLY | noFollow);
+      const opened = fs.fstatSync(descriptor);
+      if (!opened.isFile() || modeOf(opened) !== 0o600) {
+        status.records.invalidMode += 1;
+        continue;
+      }
+      const record = JSON.parse(fs.readFileSync(descriptor, "utf8"));
+      if (!record || Array.isArray(record) || typeof record !== "object") {
+        throw new Error("record is not a JSON object");
+      }
+      status.records.userOnly += 1;
+      const provider = providerByType[record.type];
+      if (!provider) {
+        status.records.unrecognized += 1;
+        continue;
+      }
+      status.providers[provider].recordCount += 1;
+      status.providers[provider].present = true;
+    } catch {
+      status.records.parseErrors += 1;
+    } finally {
+      if (descriptor !== undefined) fs.closeSync(descriptor);
+    }
+  }
+  status.records.allModesValid = status.records.invalidMode === 0;
+  return status;
+}
+
+function renderAuthStatus(status) {
+  const lines = VENDOR_ORDER.map((vendor) => {
+    const item = status.providers[vendor];
+    return `${vendor.padEnd(8)} present=${item.present ? "yes" : "no"} records=${item.recordCount}`;
+  });
+  lines.push(
+    `records  total=${status.records.total} user_only=${status.records.userOnly} `
+      + `invalid_mode=${status.records.invalidMode} parse_errors=${status.records.parseErrors} `
+      + `unrecognized=${status.records.unrecognized}`,
+  );
+  lines.push(
+    `auth_dir mode_valid=${status.directoryModeValid ? "yes" : "no"} `
+      + `scanned=${status.scanned ? "yes" : "no"}`,
+  );
+  return lines.join("\n");
+}
+
+async function runAuthStatus(argv, log) {
+  const options = parseOptions(argv, new Set(), new Set(["--json", "--help"]));
+  if (options._.length) {
+    throw new OnboardingError(`unexpected auth status argument: ${options._[0]}`);
+  }
+  if (options.help) {
+    log(authUsage());
+    return;
+  }
+  const context = loadSetupContext({ requireAuthMode: false, requireProxy: false });
+  const status = scanAuthStatus(context.authDir);
+  log(options.json ? JSON.stringify(status, null, 2) : renderAuthStatus(status));
+}
+
+function forwardSignals(child) {
+  const handlers = new Map();
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+    const handler = () => {
+      if (!child.killed) child.kill(signal);
+    };
+    handlers.set(signal, handler);
+    process.on(signal, handler);
+  }
+  return () => {
+    for (const [signal, handler] of handlers) process.removeListener(signal, handler);
+  };
+}
+
+async function runProxyStart(argv, log) {
+  const options = parseOptions(argv, new Set(), new Set(["--help"]));
+  if (options._.length) {
+    throw new OnboardingError(`unexpected proxy start argument: ${options._[0]}`);
+  }
+  if (options.help) {
+    log(proxyStartUsage());
+    return 0;
+  }
+  const context = loadSetupContext();
+  const child = spawn(
+    context.manifest.proxyBinary,
+    ["--config", context.paths.proxyConfig, "--local-model"],
+    { stdio: "inherit", env: process.env },
+  );
+  const stopForwarding = forwardSignals(child);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      stopForwarding();
+      reject(new OnboardingError(`could not start CLIProxyAPI: ${error.message}`));
+    });
+    child.once("exit", (code, signal) => {
+      if (settled) return;
+      settled = true;
+      stopForwarding();
+      if (code !== null) resolve(code);
+      else resolve(128 + (os.constants.signals[signal] || 0));
+    });
+  });
+}
+
 async function runSetup(argv, log) {
   const options = parseSetupOptions(argv);
   if (options.help) {
@@ -671,6 +956,7 @@ async function runSetup(argv, log) {
   if (!options.non_interactive && (!existing || options.vendors === undefined)) {
     prompt = new PromptSession(process.stdin, process.stdout);
   }
+  let context;
   try {
     const vendors = await selectVendors(options, existing, prompt);
     const port = options.port ?? existing?.port ?? DEFAULT_PORT;
@@ -702,39 +988,45 @@ async function runSetup(argv, log) {
       validateExistingSetup(configDir, authDir, paths, desired);
       validateParableConfig(paths.parableConfig, configDir);
       log(`setup is valid and unchanged -> ${configDir}`);
-      return;
+    } else {
+      const configCreated = createPrivateDirectory(configDir, "configuration directory");
+      const authCreated = createPrivateDirectory(authDir, "CLIProxyAPI auth directory");
+      const token = crypto.randomBytes(32).toString("hex");
+      const entries = [
+        [paths.proxyConfig, renderProxyYaml(port, authDir, token)],
+        [paths.proxyEnv, renderProxyEnv(token)],
+        [paths.parableConfig, renderParableToml(port, vendors)],
+        [paths.manifest, renderManifest(desired)],
+      ];
+      try {
+        writePrivateFileSet(entries);
+        validateParableConfig(paths.parableConfig, configDir);
+      } catch (error) {
+        for (const [target] of entries) {
+          try { fs.unlinkSync(target); } catch { /* best-effort rollback */ }
+        }
+        if (authCreated) {
+          try { fs.rmdirSync(authDir); } catch { /* keep non-empty auth state */ }
+        }
+        if (configCreated) {
+          try { fs.rmdirSync(configDir); } catch { /* keep unexpected state for inspection */ }
+        }
+        throw error;
+      }
+      log(`created private setup -> ${configDir}`);
+      log(`selected vendors: ${vendors.join(", ")}`);
     }
-
-    const configCreated = createPrivateDirectory(configDir, "configuration directory");
-    const authCreated = createPrivateDirectory(authDir, "CLIProxyAPI auth directory");
-    const token = crypto.randomBytes(32).toString("hex");
-    const entries = [
-      [paths.proxyConfig, renderProxyYaml(port, authDir, token)],
-      [paths.proxyEnv, renderProxyEnv(token)],
-      [paths.parableConfig, renderParableToml(port, vendors)],
-      [paths.manifest, renderManifest(desired)],
-    ];
-    try {
-      writePrivateFileSet(entries);
-      validateParableConfig(paths.parableConfig, configDir);
-    } catch (error) {
-      for (const [target] of entries) {
-        try { fs.unlinkSync(target); } catch { /* best-effort rollback */ }
-      }
-      if (authCreated) {
-        try { fs.rmdirSync(authDir); } catch { /* keep non-empty auth state */ }
-      }
-      if (configCreated) {
-        try { fs.rmdirSync(configDir); } catch { /* keep unexpected state for inspection */ }
-      }
-      throw error;
-    }
-    log(`created private setup -> ${configDir}`);
-    log(`selected vendors: ${vendors.join(", ")}`);
-    log("next: authorize each selected subscription, then start the local proxy");
+    context = { configDir, authDir, paths, manifest: desired, vendors };
   } finally {
     if (prompt) prompt.close();
   }
+  if (!options.no_auth) {
+    for (const vendor of context.vendors) runNativeAuth(context, vendor, false, log);
+    log("authorization complete; next: parable proxy start");
+  } else {
+    log("next: authorize each selected subscription, then start the local proxy");
+  }
+  return context;
 }
 
 module.exports = {
@@ -742,7 +1034,12 @@ module.exports = {
   PROXY_COMMIT,
   PROXY_PATCH_SHA256,
   VENDORS,
+  authUsage,
+  proxyStartUsage,
+  runAuthAdd,
+  runAuthStatus,
   runProxyBuild,
+  runProxyStart,
   runSetup,
   setupUsage,
   proxyBuildUsage,
