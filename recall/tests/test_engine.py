@@ -822,6 +822,7 @@ class McpRemoteHandler(BaseHTTPRequestHandler):
     requests: list[dict] = []
     target_path = "/source/mcp-session.jsonl"
     fail_tool = False
+    omit_search_path = False
 
     def log_message(self, *_args):
         pass
@@ -861,8 +862,7 @@ class McpRemoteHandler(BaseHTTPRequestHandler):
             name = body["params"]["name"]
             arguments = body["params"]["arguments"]
             if name == "recall_search":
-                value = {"results": [{
-                    "path": type(self).target_path,
+                result = {
                     "occurred_at": "2026-01-01T00:00:00Z",
                     "cwd": "/work/grep123/project",
                     "slot": "grep123",
@@ -872,7 +872,13 @@ class McpRemoteHandler(BaseHTTPRequestHandler):
                     "matched_terms": ["deadbeef"],
                     "legs": ["exact"],
                     "receipt": "recall://claude:linux/mcp-session:1?rev=1#item=0",
-                }], "diagnostics": {"deadline_ms": 300, "elapsed_ms": 11.0}}
+                }
+                if not type(self).omit_search_path:
+                    result["path"] = type(self).target_path
+                value = {
+                    "results": [result],
+                    "diagnostics": {"deadline_ms": 300, "elapsed_ms": 11.0},
+                }
             elif name == "recall_show":
                 value = {"chunks": [{
                     "occurred_at": "2026-01-01T00:00:00Z",
@@ -1045,6 +1051,24 @@ class RemoteTransportTest(unittest.TestCase):
             self.assertIn("OK remote", self.call("doctor")[1])
             self.assertEqual(McpRemoteHandler.requests[-1]["body"]["method"], "ping")
         finally:
+            mcp.shutdown()
+            mcp.server_close()
+
+    def test_mcp_search_uses_receipt_when_managed_result_has_no_local_path(self):
+        mcp = ThreadingHTTPServer(("127.0.0.1", 0), McpRemoteHandler)
+        thread = threading.Thread(target=mcp.serve_forever, daemon=True)
+        thread.start()
+        McpRemoteHandler.requests = []
+        McpRemoteHandler.omit_search_path = True
+        os.environ["RECALL_URL"] = f"http://127.0.0.1:{mcp.server_port}/mcp"
+        receipt = "recall://claude:linux/mcp-session:1?rev=1#item=0"
+        try:
+            code, output, error = self.call("search", "deadbeef")
+            self.assertEqual((code, error), (0, ""))
+            self.assertIn(f"1. {receipt}", output)
+            self.assertEqual(self.call("search", "deadbeef", "--paths")[1].strip(), receipt)
+        finally:
+            McpRemoteHandler.omit_search_path = False
             mcp.shutdown()
             mcp.server_close()
 
