@@ -1,0 +1,156 @@
+{
+  "schema_version": 1,
+  "loop": "X2",
+  "captured_at_utc": "2026-07-20T06:19:56Z",
+  "parable_baseline_head": "0562cd71e4442ec7f7dc9385b313beab9a88cc1b",
+  "runtime": {
+    "claude_code_version": "2.1.215",
+    "cliproxyapi_upstream_release": "v7.2.88",
+    "cliproxyapi_upstream_commit": "93d74a890a44802f656d7f39a573916b2611896e",
+    "cliproxyapi_local_fix_commit": "ad20a87efbbd41a9d4f24c83ca8bdd934bf34ab7",
+    "cliproxyapi_binary_sha256": "139e1305a878e08026dd0fb6d85a3817801f32e40a40c1954ea1973c5bb9d697",
+    "loopback_only": true,
+    "fresh_named_sessions": 8,
+    "session_persistence": false
+  },
+  "text_cells": [
+    {
+      "requested_effort": "low",
+      "inbound_effort": "low",
+      "upstream_effort": "low",
+      "classification": "exact",
+      "http_status": 200,
+      "exit_code": 0,
+      "deterministic_marker": true,
+      "synthetic_marker_sha256": "e086e4c0e735fc0e52aa3a2a7e664ceb44e4606a62a69e9f6668864d2ff09139",
+      "xai_oauth_route": true
+    },
+    {
+      "requested_effort": "medium",
+      "inbound_effort": "medium",
+      "upstream_effort": "medium",
+      "classification": "exact",
+      "http_status": 200,
+      "exit_code": 0,
+      "deterministic_marker": true,
+      "synthetic_marker_sha256": "956ca25e36092f1fcae06503f7ff58edfbeb58c3f51a72f4fa7999aa422c75e8",
+      "xai_oauth_route": true
+    },
+    {
+      "requested_effort": "high",
+      "inbound_effort": "high",
+      "upstream_effort": "high",
+      "classification": "exact",
+      "http_status": 200,
+      "exit_code": 0,
+      "deterministic_marker": true,
+      "synthetic_marker_sha256": "a0c291140c7820ce419b102db1c84be77d42f9ba65a10342538a8ac96a4009e6",
+      "xai_oauth_route": true
+    },
+    {
+      "requested_effort": "xhigh",
+      "inbound_effort": "xhigh",
+      "upstream_effort": "high",
+      "classification": "clamped_to_high",
+      "http_status": 200,
+      "exit_code": 0,
+      "deterministic_marker": true,
+      "synthetic_marker_sha256": "ebab79b6318ef4473bc52535bc012a1bd7e416e7641d89493f861572d1405ee5",
+      "xai_oauth_route": true
+    },
+    {
+      "requested_effort": "max",
+      "inbound_effort": "max",
+      "upstream_effort": "high",
+      "classification": "clamped_to_high",
+      "http_status": 200,
+      "exit_code": 0,
+      "deterministic_marker": true,
+      "synthetic_marker_sha256": "1f988e8805ccef9f55d0db2f80051bc3ed97572e0970fc89a7e8950cad97e2cc",
+      "xai_oauth_route": true
+    }
+  ],
+  "tool_cells": [
+    {
+      "requested_effort": "low",
+      "inbound_efforts": [
+        "low",
+        "low"
+      ],
+      "upstream_efforts": [
+        "low",
+        "low"
+      ],
+      "classification": "exact",
+      "model_requests": 2,
+      "http_status": 200,
+      "exit_code": 0,
+      "deterministic_artifact": true,
+      "artifact_sha256": "196e7dcc49f9ab9547c9578493647aaa842a158c615e775b1d0b4038ce08be06",
+      "xai_oauth_route": true
+    },
+    {
+      "requested_effort": "medium",
+      "inbound_efforts": [
+        "medium",
+        "medium"
+      ],
+      "upstream_efforts": [
+        "medium",
+        "medium"
+      ],
+      "classification": "exact",
+      "model_requests": 2,
+      "http_status": 200,
+      "exit_code": 0,
+      "deterministic_artifact": true,
+      "artifact_sha256": "44b17d1301efe4f2ee1f3e3b2a1678460baa49cb4e16dc75b345a7bbae6a8415",
+      "xai_oauth_route": true
+    },
+    {
+      "requested_effort": "high",
+      "inbound_efforts": [
+        "high",
+        "high"
+      ],
+      "upstream_efforts": [
+        "high",
+        "high"
+      ],
+      "classification": "exact",
+      "model_requests": 2,
+      "http_status": 200,
+      "exit_code": 0,
+      "deterministic_artifact": true,
+      "artifact_sha256": "f59c8bab40d915ec4d1fbe6e0f91b2f5269e030617fda2a3b0ea561368e78962",
+      "xai_oauth_route": true
+    }
+  ],
+  "summary": {
+    "text_cells_passed": "5/5",
+    "exact_supported_text_efforts": "3/3",
+    "unsupported_efforts_clamped_to_high": "2/2",
+    "tool_cells_passed": "3/3",
+    "tool_model_requests": 6,
+    "all_requests_exact_model": true,
+    "all_requests_xai_oauth": true
+  },
+  "routing": {
+    "model": "grok-4.5",
+    "provider": "xai",
+    "auth_kind": "oauth",
+    "xai_api_key_set": false,
+    "openai_api_key_set": false,
+    "anthropic_api_key_set": false
+  },
+  "safety": {
+    "local_proxy_key_committed": false,
+    "credential_material_committed": false,
+    "oauth_state_committed": false,
+    "account_identifier_committed": false,
+    "raw_prompt_committed": false,
+    "raw_response_committed": false,
+    "raw_proxy_log_committed": false,
+    "private_path_committed": false
+  }
+}
