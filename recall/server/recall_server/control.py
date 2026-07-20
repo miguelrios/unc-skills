@@ -356,6 +356,10 @@ class GoogleOAuthProvider:
         ):
             raise ControlError("google_oauth_scope_invalid", 502)
         credentials = {
+            "type": "authorized_user",
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "token_uri": self.token_endpoint,
             "access_token": access_token,
             "refresh_token": refresh_token,
             "token_type": token.get("token_type", "Bearer"),
@@ -569,6 +573,9 @@ class ControlPlane:
                           installation.privacy_mode,installation.selectors,
                           installation.revision,installation.last_error_code,
                           installation.last_success_at,
+                          installation.last_started_at,
+                          installation.run_after,
+                          installation.failure_count,
                           connection.provider,connection.status AS connection_status
                    FROM connector_installations installation
                    LEFT JOIN provider_connections connection

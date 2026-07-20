@@ -63,7 +63,7 @@ infrastructure. The example is synthetic; a live manifest belongs in a private m
 location and contains references, never credential values.
 
 The production database gate requires a standard PostgreSQL URL with
-`sslmode=verify-full` and an explicit trust root, schema migrations 1 through 30,
+`sslmode=verify-full` and an explicit trust root, schema migrations 1 through 31,
 pgvector 0.8.0 or newer, and a runtime role without superuser, database/role creation,
 replication, or RLS-bypass privilege:
 
@@ -211,7 +211,7 @@ grant on the exact source.
 
 ## Unified connector administration
 
-Schemas 029–030 add one tenant-aware connector control plane for the web
+Schemas 029–031 add one tenant-aware connector control plane for the web
 switchboard and native utilities. A connector installation is always bound to one principal,
 one destination brain, and one opaque source ID. Connecting the same provider to
 personal and company memory creates separate installations; it never implies a
@@ -266,6 +266,25 @@ Native clients use the same versioned `/admin/api/v1` session, state, OAuth, and
 lifecycle contract. They must store the bootstrap or browser-session authority
 in the operating-system credential store and must not copy provider tokens out
 of Recall.
+
+Run one or more managed workers from the same immutable Recall Core image:
+
+```bash
+python -m recall_server.cli managed-worker \
+  --state-root /var/lib/recall --interval-seconds 60
+```
+
+The worker claims only due, enabled `remote_worker` installations with a
+database lease. It decrypts one provider capability in memory, materializes any
+short-lived CLI authority beneath an owner-private worker directory, archives
+raw records before projection, commits through the tenant-scoped canonical
+plane, advances the connector cursor only after acknowledgement, and updates
+the same installation row shown in the web UI. Pause, revoke, tenant selection,
+and provider disconnect therefore affect execution without a second config
+surface. Mount `/var/lib/recall` on persistent encrypted storage so ACK-gated
+spools survive image restarts. Every worker replica must receive the same
+database, R2, embedding, and control-encryption settings as the API service; it
+does not listen on a network port.
 
 `RECALL_DATABASE_URL` must be a PlanetScale application role URL with
 `sslmode=verify-full` and an explicit trust root. Prefer

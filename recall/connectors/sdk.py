@@ -685,7 +685,7 @@ class ConnectorRunner:
         return {
             "privacy": privacy, "staged": len(events), "dropped": dropped,
             "deduplicated": deduplicated, "archived": archived,
-            "forgotten": forgotten,
+            "forgotten": forgotten, "has_more": page.has_more,
         }
 
     def _commit_page(self, page_id: int, cursor: str | None) -> None:
@@ -741,9 +741,16 @@ class ConnectorRunner:
     def run_once(self) -> dict[str, Any]:
         if not self.enabled:
             return {"status": "disabled", "error_code": "connector_disabled"}
-        if self.db.execute("SELECT 1 FROM pages LIMIT 1").fetchone():
+        pending = self.db.execute(
+            "SELECT has_more FROM pages ORDER BY id LIMIT 1"
+        ).fetchone()
+        if pending:
             flushed = self.flush()
-            return {"status": "committed", **flushed}
+            return {
+                "status": "committed",
+                "has_more": bool(pending["has_more"]),
+                **flushed,
+            }
         cursor = self._cursor()
         try:
             page = self.connector.pull(cursor)

@@ -4,6 +4,7 @@ import json
 import hashlib
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -325,6 +326,76 @@ class CollectorTest(unittest.TestCase):
         self.assertIn("artifact_ref", ingested[0]["provenance"])
         self.assertNotIn(canary, json.dumps(ingested))
         self.assertNotIn(canary.encode(), self.spool.read_bytes())
+        collector.close()
+
+    def test_canonical_scan_archives_concurrently_but_spools_in_source_order(self) -> None:
+        (self.root / "session.jsonl").write_text(
+            "".join(claude_line(f"record-{index}") for index in range(12))
+        )
+        lock = threading.Lock()
+        active = 0
+        peak = 0
+
+        class Archive:
+            def put_raw(inner, **kwargs):
+                nonlocal active, peak
+                with lock:
+                    active += 1
+                    peak = max(peak, active)
+                time.sleep(0.02)
+                with lock:
+                    active -= 1
+                digest = hashlib.sha256(kwargs["payload"]).hexdigest()
+                return {
+                    "contract": "recall.artifact-ref.v1",
+                    "schema_version": 1,
+                    "tenant_id": kwargs["tenant_id"],
+                    "source_id": kwargs["source_id"],
+                    "artifact_id": "art_" + digest[:32],
+                    "storage_backend": "s3",
+                    "object_key": "objects/aa/" + digest,
+                    "content_sha256": digest,
+                    "size_bytes": len(kwargs["payload"]),
+                    "media_type": kwargs["media_type"],
+                    "encryption": "sse-s3",
+                    "version_id": "synthetic-version",
+                    "created_at": kwargs["created_at"],
+                }
+
+        class Writer:
+            def ingest(self, events):
+                return {
+                    "status": "committed",
+                    "inserted": len(events),
+                    "duplicate_events": 0,
+                    "receipts": [
+                        f"recall://{event['source_id']}/{event['native_id']}?rev=1"
+                        for event in events
+                    ],
+                    "replay": False,
+                }
+
+        collector = Collector(
+            root=self.root,
+            harness="claude",
+            source_id="claude:linux:test",
+            spool_path=self.spool,
+            endpoint=self.endpoint,
+            token="test-token-not-a-secret",
+            principal_id="owner",
+            privacy=PrivacyPolicy(mode="scrub"),
+            brain_writer=Writer(),
+            archive=Archive(),
+            tenant_id="tenant:personal",
+            archive_workers=4,
+        )
+        self.assertEqual(collector.scan()["records_queued"], 12)
+        self.assertGreaterEqual(peak, 2)
+        starts = [
+            event["provenance"]["byte_start"]
+            for event in collector.pending_envelopes()
+        ]
+        self.assertEqual(starts, sorted(starts))
         collector.close()
 
     def test_enabling_drop_compacts_sensitive_pending_bytes_from_legacy_spool(self) -> None:

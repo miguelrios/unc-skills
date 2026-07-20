@@ -9,17 +9,26 @@ WORKDIR /opt/recall
 COPY server/requirements.txt /opt/recall/requirements.txt
 RUN python -m pip install --no-cache-dir --disable-pip-version-check --no-compile -r requirements.txt \
     && groupadd --gid 10001 recall \
-    && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin recall
+    && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin recall \
+    && install -d -m 0700 -o 10001 -g 10001 /var/lib/recall
 
 COPY --chown=10001:10001 server/recall_server /opt/recall/recall_server
 COPY --chown=10001:10001 server/schema /opt/recall/schema
 COPY --chown=10001:10001 contracts /opt/contracts
 COPY --chown=10001:10001 connectors /opt/connectors
+COPY --chown=10001:10001 client /opt/recall/client
+COPY --chown=10001:10001 collector /opt/recall/collector
 COPY --chown=10001:10001 privacy /opt/recall/privacy
+COPY --chown=10001:10001 scripts/install_gws.py /opt/recall/scripts/install_gws.py
 COPY --chown=10001:10001 skills/recall/scripts/recall.py /opt/skills/recall/scripts/recall.py
+
+RUN python /opt/recall/scripts/install_gws.py \
+      --target x86_64-unknown-linux-gnu \
+      --prefix /opt/recall/vendor/gws/0.22.5
 
 USER 10001:10001
 EXPOSE 8788
+VOLUME ["/var/lib/recall"]
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD ["python", "-c", "import http.client; connection=http.client.HTTPConnection('127.0.0.1',8788,timeout=2); connection.request('GET','/readyz'); response=connection.getresponse(); raise SystemExit(0 if response.status==200 else 1)"]

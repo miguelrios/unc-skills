@@ -76,6 +76,7 @@ jobs:
             e2e_public_mcp_principal.py \
             e2e_webhook_ingest.py \
             e2e_remote_worker.py \
+            e2e_managed_connector_worker.py \
             e2e_workspace_rail.py \
             e2e_retrieval_eval.py
           do

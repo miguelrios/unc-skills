@@ -27,6 +27,7 @@ from .managed_apply import (
     load_approvals,
     reconcile_infrastructure,
 )
+from .managed_worker import run_managed_worker
 from .mcp_conformance import (
     ConformanceError,
     McpConformanceConfig,
@@ -143,6 +144,18 @@ def main() -> None:
     create_admin_token.add_argument("--output", required=True)
     revoke_admin_token = sub.add_parser("admin-token-revoke")
     revoke_admin_token.add_argument("name")
+    managed_worker = sub.add_parser("managed-worker")
+    managed_worker.add_argument(
+        "--state-root",
+        type=Path,
+        default=Path("/var/lib/recall"),
+    )
+    managed_worker.add_argument("--once", action="store_true")
+    managed_worker.add_argument(
+        "--interval-seconds",
+        type=int,
+        default=60,
+    )
     source_profile = sub.add_parser("source-profile-set")
     source_profile.add_argument("source_id")
     source_profile.add_argument(
@@ -284,6 +297,18 @@ def main() -> None:
         print(json.dumps({"status": "ok", "schema_version": SCHEMA_VERSION}))
     elif args.command == "rebuild":
         print(json.dumps(store.rebuild(), sort_keys=True))
+    elif args.command == "managed-worker":
+        print(
+            json.dumps(
+                run_managed_worker(
+                    store,
+                    state_root=args.state_root,
+                    once=args.once,
+                    interval_seconds=args.interval_seconds,
+                ),
+                sort_keys=True,
+            )
+        )
     elif args.command == "backfill-entities":
         print(
             json.dumps(

@@ -132,10 +132,17 @@ function renderInstallations() {
     const revoke = item.state === "revoked"
       ? ""
       : `<button data-action="revoke" data-id="${item.id}">revoke</button>`;
+    const runtime = item.last_error_code
+      ? `attention · ${item.last_error_code}`
+      : item.last_success_at
+        ? "synced"
+        : item.execution === "remote_worker" && item.state === "enabled"
+          ? "waiting for first sync"
+          : item.state;
     row.innerHTML = `
       <strong>${escapeText(item.connector_id)}</strong>
       <span>${escapeText(brains.get(item.tenant_id) || item.tenant_id)}</span>
-      <span class="state">${escapeText(item.state)}</span>
+      <span class="state">${escapeText(runtime)}</span>
       <div class="installation-actions">
         <button data-action="${action}" data-id="${item.id}">${action}</button>
         ${revoke}
