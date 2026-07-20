@@ -219,12 +219,114 @@ def main():
         )
         assert status == 200
         assert len(initial["brains"]) == 2
+        assert initial["providers"] == [{"id": "google", "status": "available"}]
         assert {item["connector_id"] for item in initial["catalog"]}.issuperset(
             {"google.gmail", "google.calendar", "custom.webhook"}
         )
         rendered = json.dumps(initial)
         assert SECRET_CANARY not in rendered
         assert "token_sha256" not in rendered
+
+        device_body = {
+            "connector_id": "local.codex",
+            "tenant_id": PERSONAL,
+            "device_id": "mac-synthetic-e2e",
+            "source_id": "codex:mac:synthetic-e2e",
+            "privacy_mode": "scrub",
+            "selectors": {},
+        }
+        status, _, denied = request(
+            server,
+            "POST",
+            "/admin/api/v1/device/installations",
+            body=device_body,
+            cookie=owner_cookie,
+        )
+        assert status == 403 and denied["error"] == "admin_csrf_invalid"
+        outsider_device = {**device_body, "tenant_id": PERSONAL}
+        status, _, denied = request(
+            server,
+            "POST",
+            "/admin/api/v1/device/installations",
+            body=outsider_device,
+            cookie=outsider_cookie,
+            csrf=outsider_csrf,
+        )
+        assert status == 403 and denied["error"] == "device_brain_forbidden"
+        status, _, device_route = request(
+            server,
+            "POST",
+            "/admin/api/v1/device/installations",
+            body=device_body,
+            cookie=owner_cookie,
+            csrf=owner_csrf,
+        )
+        assert status == 201 and device_route["state"] == "enabled"
+        assert store.authenticate_bearer(device_route["token"], "write")
+        device_action = (
+            "/admin/api/v1/installations/"
+            + device_route["installation_id"]
+            + "/actions"
+        )
+        status, _, paused_device = request(
+            server,
+            "POST",
+            device_action,
+            body={"action": "pause"},
+            cookie=owner_cookie,
+            csrf=owner_csrf,
+        )
+        assert status == 200 and paused_device["state"] == "paused"
+        assert store.authenticate_bearer(device_route["token"], "write") is None
+        status, _, resumed_device = request(
+            server,
+            "POST",
+            device_action,
+            body={"action": "resume"},
+            cookie=owner_cookie,
+            csrf=owner_csrf,
+        )
+        assert status == 200 and resumed_device["state"] == "enabled"
+        reroute_body = {**device_body, "tenant_id": COMPANY}
+        status, _, rerouted = request(
+            server,
+            "POST",
+            "/admin/api/v1/device/installations",
+            body=reroute_body,
+            cookie=owner_cookie,
+            csrf=owner_csrf,
+        )
+        assert status == 201 and rerouted["replaced"] == 1
+        assert store.authenticate_bearer(device_route["token"], "write") is None
+        credential = store.authenticate_bearer(rerouted["token"], "write")
+        assert credential and credential["tenant_id"] == COMPANY
+        rerouted_action = (
+            "/admin/api/v1/installations/"
+            + rerouted["installation_id"]
+            + "/actions"
+        )
+        status, _, revoked_device = request(
+            server,
+            "POST",
+            rerouted_action,
+            body={"action": "revoke"},
+            cookie=owner_cookie,
+            csrf=owner_csrf,
+        )
+        assert status == 200 and revoked_device["state"] == "revoked"
+        assert store.authenticate_bearer(rerouted["token"], "write") is None
+        with store.connect() as connection:
+            connection.execute(
+                """DELETE FROM collector_credentials
+                   WHERE installation_id IN (
+                       SELECT id FROM connector_installations
+                       WHERE device_id='mac-synthetic-e2e'
+                   )"""
+            )
+            connection.execute(
+                """DELETE FROM connector_installations
+                   WHERE device_id='mac-synthetic-e2e'"""
+            )
 
         routes = [
             {
@@ -409,7 +511,9 @@ def main():
             {
                 "status": "pass",
                 "brains": 2,
-                "routes": 2,
+                "routes": 4,
+                "device_token_rotations": 1,
+                "paused_device_authority_denials": 1,
                 "cross_brain_admin_writes": 0,
                 "mid_flow_authority_revocations": 1,
                 "csrf_denials": 1,

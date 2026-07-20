@@ -52,7 +52,9 @@ class FrozenRegistryTest(unittest.TestCase):
             "recall.capture", "custom.webhook", "openai.export-inbox", "grep.ai",
             "google.gmail", "google.calendar", "google.contacts", "google.drive",
             "github.activity", "linear.activity", "slack.messages",
-            "notion.workspace", "x.activity", "apple.imessage",
+            "notion.workspace", "x.activity", "local.claude-code",
+            "local.codex", "local.cowork", "local.chatgpt-export",
+            "apple.imessage",
             "whatsapp.export", "local.selected-text", "apple.safari",
             "google.chrome", "apple.notes", "hermes.sessions",
             "portable.mail", "portable.calendar", "portable.contacts",
@@ -173,7 +175,7 @@ class RegistryPreviewAndStatusTest(unittest.TestCase):
         self.assertEqual(value["source_reads"], 0)
         self.assertEqual(value["network_requests"], 0)
         self.assertEqual(value["writes"], 0)
-        self.assertEqual(len(value["connectors"]), 28)
+        self.assertEqual(len(value["connectors"]), 32)
 
     def test_status_health_is_bounded_read_only_and_content_free(self):
         with tempfile.TemporaryDirectory() as directory:

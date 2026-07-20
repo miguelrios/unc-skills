@@ -575,10 +575,19 @@ class BrainStore:
         digest = hashlib.sha256(plaintext.encode()).hexdigest()
         with self.connect() as conn:
             row = conn.execute(
-                """SELECT id,name,tenant_id,source_id,principal_id,capture_origin,
-                          webhook_privacy_mode,scopes
-                   FROM collector_credentials
-                   WHERE token_sha256=%s AND revoked_at IS NULL""",
+                """SELECT credential.id,credential.name,credential.tenant_id,
+                          credential.source_id,credential.principal_id,
+                          credential.capture_origin,
+                          credential.webhook_privacy_mode,credential.scopes
+                   FROM collector_credentials credential
+                   LEFT JOIN connector_installations installation
+                     ON installation.id=credential.installation_id
+                   WHERE credential.token_sha256=%s
+                     AND credential.revoked_at IS NULL
+                     AND (
+                         credential.installation_id IS NULL
+                         OR installation.state='enabled'
+                     )""",
                 (digest,),
             ).fetchone()
             if row:

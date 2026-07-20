@@ -13,8 +13,11 @@ from client.macos_utility import (
     SOURCE_SPECS,
     disable_source,
     mac_status,
+    pause_source,
     reset_local_source,
+    resume_source,
     revoke_source,
+    route_info,
     support_report,
 )
 
@@ -72,11 +75,13 @@ class MacUtilityLifecycleTest(unittest.TestCase):
             "enabled": True, "health": "ready", "lag_seconds": 10,
             "checkpointed": True, "state_present": True,
             "privacy_mode": "scrub", "surface": "claude-code-project-jsonl",
+            "connector_id": "local.claude-code",
         })
         self.assertEqual(result["sources"]["cowork"], {
             "enabled": True, "health": "degraded", "lag_seconds": 5,
             "checkpointed": True, "state_present": True,
             "privacy_mode": "scrub", "surface": "claude-cowork-project-jsonl",
+            "connector_id": "local.cowork",
         })
         self.assertEqual(result["sources"]["codex"]["health"], "disabled")
         self.assertEqual(
@@ -116,6 +121,13 @@ class MacUtilityLifecycleTest(unittest.TestCase):
         self.assertNotIn("CANARY", json.dumps(result))
         self.assertNotIn(str(target), json.dumps(result))
 
+        self._enable("cowork")
+        (self.prefix / "state" / "cowork.paused").symlink_to(target)
+        result = mac_status(prefix=self.prefix, launch_agents=self.agents, now=200)
+        self.assertEqual(
+            result["sources"]["cowork"]["health"], "invalid_local_state"
+        )
+
     def test_per_source_disable_removes_only_agent_and_preserves_all_state(self) -> None:
         for name in SOURCE_SPECS:
             self._enable(name)
@@ -139,6 +151,50 @@ class MacUtilityLifecycleTest(unittest.TestCase):
             disable_source("cowork", launch_agents=self.agents)
         self.assertEqual(run.call_args_list[0].args[0][0], "/bin/launchctl")
         self.assertEqual(run.call_args_list[1].args[0][0], "/bin/launchctl")
+
+    def test_pause_resume_and_route_rotation_retain_exact_configuration(self) -> None:
+        spec = SOURCE_SPECS["codex"]
+        path = self.agents / f"{spec.label}.plist"
+        with path.open("wb") as output:
+            plistlib.dump({"ProgramArguments": [
+                "runtime", "-m", "client.cli", "collect",
+                "--source-id", "codex:mac:synthetic",
+                "--keychain-service", "ai.parcha.recall",
+                "--keychain-account", "codex:mac:synthetic",
+                "--privacy-mode", "scrub",
+            ]}, output)
+        original = path.read_bytes()
+
+        paused = pause_source(
+            "codex", prefix=self.prefix, launch_agents=self.agents, no_load=True,
+        )
+        self.assertFalse(paused["enabled"])
+        self.assertEqual(path.read_bytes(), original)
+        marker = self.prefix / "state" / "codex.paused"
+        self.assertEqual(marker.stat().st_mode & 0o777, 0o600)
+        status = mac_status(
+            prefix=self.prefix, launch_agents=self.agents, now=200,
+        )
+        self.assertEqual(status["sources"]["codex"]["health"], "paused")
+        self.assertFalse(status["sources"]["codex"]["enabled"])
+
+        route = route_info("codex", launch_agents=self.agents)
+        self.assertEqual(route, {
+            "schema_version": 1,
+            "mode": "mac-route-info",
+            "source": "codex",
+            "connector_id": "local.codex",
+            "source_id": "codex:mac:synthetic",
+            "keychain_service": "ai.parcha.recall",
+            "keychain_account": "codex:mac:synthetic",
+            "privacy_mode": "scrub",
+        })
+        resumed = resume_source(
+            "codex", prefix=self.prefix, launch_agents=self.agents, no_load=True,
+        )
+        self.assertTrue(resumed["enabled"])
+        self.assertFalse(marker.exists())
+        self.assertEqual(path.read_bytes(), original)
 
     def test_revoke_disables_source_deletes_only_its_keychain_reference(self) -> None:
         self._enable("cowork")

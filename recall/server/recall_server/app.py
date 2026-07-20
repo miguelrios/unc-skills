@@ -591,6 +591,40 @@ class Handler(BaseHTTPRequestHandler):
             except ControlError as error:
                 self.send_json(error.status, {"error": error.code})
             return
+        if (
+            self.admin_web_enabled()
+            and path == "/admin/api/v1/device/installations"
+        ):
+            principal = self.admin_principal(csrf=True)
+            if principal is None:
+                return
+            body = self.read_admin_json()
+            if body is None:
+                return
+            if set(body) != {
+                "connector_id",
+                "tenant_id",
+                "device_id",
+                "source_id",
+                "privacy_mode",
+                "selectors",
+            }:
+                self.send_json(400, {"error": "admin_request_invalid"})
+                return
+            try:
+                result = self.control_plane.create_device_installation(
+                    principal_id=principal["principal_id"],
+                    connector_id=body["connector_id"],
+                    tenant_id=body["tenant_id"],
+                    device_id=body["device_id"],
+                    source_id=body["source_id"],
+                    privacy_mode=body["privacy_mode"],
+                    selectors=body["selectors"],
+                )
+                self.send_json(201, result)
+            except ControlError as error:
+                self.send_json(error.status, {"error": error.code})
+            return
         installation_action = (
             ADMIN_INSTALLATION_ACTION.fullmatch(path)
             if self.admin_web_enabled()
@@ -1025,13 +1059,17 @@ def validate_http_profile() -> None:
     if os.environ.get("RECALL_ADMIN_WEB_ENABLED") == "1" and (
         os.environ.get("RECALL_AUTH_REQUIRED", "0") != "1"
         or not os.environ.get("RECALL_CONTROL_ENCRYPTION_KEY")
-        or not os.environ.get("RECALL_GOOGLE_CLIENT_ID")
-        or not os.environ.get("RECALL_GOOGLE_CLIENT_SECRET")
-        or not os.environ.get("RECALL_GOOGLE_REDIRECT_URI")
     ):
         raise RuntimeError(
-            "admin web requires auth, encryption, and Google OAuth configuration"
+            "admin web requires auth and encryption configuration"
         )
+    google_values = (
+        os.environ.get("RECALL_GOOGLE_CLIENT_ID", ""),
+        os.environ.get("RECALL_GOOGLE_CLIENT_SECRET", ""),
+        os.environ.get("RECALL_GOOGLE_REDIRECT_URI", ""),
+    )
+    if any(google_values) and not all(google_values):
+        raise RuntimeError("Google OAuth configuration must be complete")
     if profile in {"public-edge", "public-mcp"}:
         if os.environ.get("RECALL_AUTH_REQUIRED", "0") != "1":
             raise RuntimeError("public HTTP profile requires authentication")

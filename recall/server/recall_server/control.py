@@ -30,6 +30,7 @@ ADMIN_TOKEN_RE = re.compile(r"rca_[A-Za-z0-9_-]{32,128}\Z")
 SESSION_TOKEN_RE = re.compile(r"rcs_[A-Za-z0-9_-]{32,128}\Z")
 STATE_RE = re.compile(r"[A-Za-z0-9_-]{32,256}\Z")
 AUTHORITY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._/@+-]{1,255}\Z")
+DEVICE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{2,63}\Z")
 GOOGLE_CONNECTORS = frozenset(
     {"google.gmail", "google.calendar", "google.contacts", "google.drive"}
 )
@@ -402,11 +403,17 @@ class ControlPlane:
 
     @classmethod
     def from_env(cls, store: Any) -> "ControlPlane":
-        return cls(
-            store,
-            SecretBox.from_env(),
-            {"google": GoogleOAuthProvider.from_env()},
+        google_values = (
+            os.environ.get("RECALL_GOOGLE_CLIENT_ID", ""),
+            os.environ.get("RECALL_GOOGLE_CLIENT_SECRET", ""),
+            os.environ.get("RECALL_GOOGLE_REDIRECT_URI", ""),
         )
+        if any(google_values) and not all(google_values):
+            raise ControlError("google_oauth_configuration_invalid", 500)
+        providers: dict[str, OAuthProvider] = {}
+        if all(google_values):
+            providers["google"] = GoogleOAuthProvider.from_env()
+        return cls(store, SecretBox.from_env(), providers)
 
     def create_admin_token(
         self,
@@ -557,7 +564,8 @@ class ControlPlane:
             installations = connection.execute(
                 """SELECT installation.id,installation.tenant_id,
                           installation.connector_id,installation.source_id,
-                          installation.execution,installation.state,
+                          installation.execution,installation.device_id,
+                          installation.state,
                           installation.privacy_mode,installation.selectors,
                           installation.revision,installation.last_error_code,
                           installation.last_success_at,
@@ -600,9 +608,144 @@ class ControlPlane:
             "mode": "connector-control-state",
             "principal": {"id": principal_id},
             "brains": brains,
+            "providers": [
+                {"id": provider_id, "status": "available"}
+                for provider_id in sorted(self.providers)
+            ],
             "catalog": sorted(catalog, key=lambda value: value["connector_id"]),
             "connections": connections,
             "installations": installations,
+        }
+
+    def create_device_installation(
+        self,
+        *,
+        principal_id: str,
+        connector_id: str,
+        tenant_id: str,
+        device_id: str,
+        source_id: str,
+        privacy_mode: str,
+        selectors: dict[str, Any],
+    ) -> dict[str, Any]:
+        if (
+            not isinstance(connector_id, str)
+            or not isinstance(tenant_id, str)
+            or not AUTHORITY_RE.fullmatch(tenant_id)
+            or not isinstance(device_id, str)
+            or not DEVICE_RE.fullmatch(device_id)
+            or not isinstance(source_id, str)
+            or not AUTHORITY_RE.fullmatch(source_id)
+        ):
+            raise ControlError("device_route_invalid")
+        try:
+            item = definition(connector_id)
+        except ConnectorRegistryError:
+            raise ControlError("device_connector_invalid") from None
+        if (
+            not isinstance(item, ConnectorDefinitionV3)
+            or item.placement.execution not in {"source_local", "either"}
+            or privacy_mode not in item.privacy_modes
+            or not isinstance(selectors, dict)
+            or set(selectors) - set(item.selection_fields)
+        ):
+            raise ControlError("device_connector_invalid")
+        normalized_selectors = {
+            key: _selector(value) for key, value in sorted(selectors.items())
+        }
+        encoded = json.dumps(
+            normalized_selectors,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        if len(encoded.encode()) > 16 * 1024:
+            raise ControlError("device_selectors_invalid")
+        installation_id = uuid.uuid4()
+        credential_id = uuid.uuid4()
+        credential_name = f"device-{credential_id}"
+        token = "rcl_" + secrets.token_urlsafe(32)
+        with self.store.connect() as connection:
+            with connection.transaction():
+                brain = connection.execute(
+                    """SELECT 1 FROM brain_access_grants
+                       WHERE tenant_id=%s AND principal_id=%s
+                         AND permission IN ('owner','admin')
+                       FOR UPDATE""",
+                    (tenant_id, principal_id),
+                ).fetchone()
+                if not brain:
+                    raise ControlError("device_brain_forbidden", 403)
+                replaced = connection.execute(
+                    """UPDATE connector_installations
+                       SET state='revoked',revision=revision+1,updated_at=now()
+                       WHERE principal_id=%s AND connector_id=%s AND device_id=%s
+                         AND state NOT IN ('revoked','uninstalled')
+                       RETURNING id""",
+                    (principal_id, connector_id, device_id),
+                ).fetchall()
+                replaced_ids = [row["id"] for row in replaced]
+                if replaced_ids:
+                    connection.execute(
+                        """UPDATE collector_credentials SET revoked_at=now()
+                           WHERE installation_id=ANY(%s) AND revoked_at IS NULL""",
+                        (replaced_ids,),
+                    )
+                connection.execute(
+                    """INSERT INTO connector_installations(
+                           id,tenant_id,principal_id,connector_id,source_id,
+                           connection_id,execution,device_id,state,privacy_mode,
+                           selectors
+                       ) VALUES (%s,%s,%s,%s,%s,NULL,'source_local',%s,
+                                 'enabled',%s,%s::jsonb)""",
+                    (
+                        installation_id,
+                        tenant_id,
+                        principal_id,
+                        connector_id,
+                        source_id,
+                        device_id,
+                        privacy_mode,
+                        encoded,
+                    ),
+                )
+                connection.execute(
+                    """INSERT INTO collector_credentials(
+                           id,name,token_sha256,tenant_id,source_id,scopes,
+                           principal_id,installation_id
+                       ) VALUES (%s,%s,%s,%s,%s,ARRAY['write'],%s,%s)""",
+                    (
+                        credential_id,
+                        credential_name,
+                        _digest(token),
+                        tenant_id,
+                        source_id,
+                        principal_id,
+                        installation_id,
+                    ),
+                )
+                connection.execute(
+                    """INSERT INTO control_audit_events(
+                           id,principal_id,operation,status,target_sha256
+                       ) VALUES (%s,%s,'device.route','success',%s)""",
+                    (
+                        uuid.uuid4(),
+                        principal_id,
+                        hashlib.sha256(str(installation_id).encode()).hexdigest(),
+                    ),
+                )
+        return {
+            "schema_version": 1,
+            "mode": "device-route",
+            "installation_id": str(installation_id),
+            "connector_id": connector_id,
+            "tenant_id": tenant_id,
+            "device_id": device_id,
+            "source_id": source_id,
+            "privacy_mode": privacy_mode,
+            "state": "enabled",
+            "token": token,
+            "replaced": len(replaced_ids),
         }
 
     def start_oauth(
@@ -849,6 +992,7 @@ class ControlPlane:
                                connection_id,execution,state,privacy_mode,selectors
                            ) VALUES (%s,%s,%s,%s,%s,%s,'remote_worker','enabled',%s,%s)
                            ON CONFLICT(tenant_id,principal_id,connector_id)
+                           WHERE device_id IS NULL
                            DO UPDATE SET
                              connection_id=excluded.connection_id,
                              state='enabled',
@@ -931,6 +1075,12 @@ class ControlPlane:
                        WHERE id=%s""",
                     (target, revision, target_id),
                 )
+                if target in {"revoked", "uninstalled"}:
+                    connection.execute(
+                        """UPDATE collector_credentials SET revoked_at=now()
+                           WHERE installation_id=%s AND revoked_at IS NULL""",
+                        (target_id,),
+                    )
         return {
             "installation_id": installation_id,
             "state": target,

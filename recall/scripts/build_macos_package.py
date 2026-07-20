@@ -185,13 +185,22 @@ def application_payloads(source_root: Path, runtime_lock_data: bytes) -> dict[st
         source_root / "client" / "macos" / "recall-brain": "bin/recall-brain",
         source_root / "client" / "macos" / "install.sh": "install.sh",
         source_root / "client" / "macos" / "uninstall.sh": "uninstall.sh",
+        source_root / "client" / "macos_admin" / "RecallBrainAdmin.swift":
+            "macos_admin/RecallBrainAdmin.swift",
+        source_root / "client" / "macos_admin" / "Info.plist":
+            "macos_admin/Info.plist",
+        source_root / "client" / "macos_admin" / "build.sh":
+            "macos_admin/build.sh",
     }
     for source, destination in mappings.items():
         selected[destination] = Payload(
             data=source.read_bytes(),
-            executable=destination in {"bin/recall-brain", "install.sh", "uninstall.sh"},
+            executable=destination in {
+                "bin/recall-brain", "install.sh", "uninstall.sh",
+                "macos_admin/build.sh",
+            },
         )
-    for module in ("client", "collector", "connectors", "privacy"):
+    for module in ("client", "collector", "connectors", "contracts", "privacy"):
         for source in sorted((source_root / module).glob("*.py")):
             selected[f"lib/{module}/{source.name}"] = Payload(data=source.read_bytes())
     for source in sorted((source_root / "contracts").glob("*.json")):

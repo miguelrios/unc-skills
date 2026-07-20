@@ -61,7 +61,13 @@ def run(*arguments: str) -> dict:
 
 def main() -> None:
     catalog = run("integration-activation-catalog")
-    assert len(catalog["connectors"]) == 28
+    assert len(catalog["connectors"]) == 32
+    assert {
+        "local.claude-code",
+        "local.codex",
+        "local.cowork",
+        "local.chatgpt-export",
+    }.issubset({item["connector_id"] for item in catalog["connectors"]})
     assert catalog["credential_reads"] == 0
     transitions = (
         ("enable", "enabled"),

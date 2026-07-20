@@ -62,20 +62,27 @@ function brainOptions() {
 function renderGoogle() {
   const target = $("#google-routes");
   target.replaceChildren();
+  const available = state.data.providers.some((item) => item.id === "google");
   Object.entries(googleLabels).forEach(([connectorId, label]) => {
     const row = document.createElement("div");
     row.className = "route-row";
     row.dataset.connector = connectorId;
     row.innerHTML = `
       <strong>${label}</strong>
-      <label><span class="sr-only">Destination for ${label}</span><select>${brainOptions()}</select></label>
-      <label class="switch"><input type="checkbox" aria-label="Enable ${label}"><span></span></label>`;
+      <label><span class="sr-only">Destination for ${label}</span><select ${available ? "" : "disabled"}>${brainOptions()}</select></label>
+      <label class="switch"><input type="checkbox" aria-label="Enable ${label}" ${available ? "" : "disabled"}><span></span></label>`;
     target.append(row);
   });
   const connected = state.data.connections.find((item) => item.provider === "google");
   const connection = $("#google-connection");
   connection.replaceChildren();
-  connection.append(connected ? "Connected · encrypted server-side" : "Not connected");
+  connection.append(
+    connected
+      ? "Connected · encrypted server-side"
+      : available
+        ? "Not connected"
+        : "OAuth client not configured"
+  );
   if (connected) {
     const disconnect = document.createElement("button");
     disconnect.type = "button";
@@ -84,6 +91,7 @@ function renderGoogle() {
     connection.append(disconnect);
   }
   connection.classList.toggle("connected", Boolean(connected));
+  $("#google-form button[type=submit]").disabled = !available;
 }
 
 function renderCatalog() {
