@@ -1,0 +1,397 @@
+From 6db675c2e884f1cb9db97409f5c1bfc36f76a2b2 Mon Sep 17 00:00:00 2001
+From: "claudio-michel[bot]"
+ <1592301+claudio-michel[bot]@users.noreply.github.com>
+Date: Mon, 20 Jul 2026 04:13:26 +0000
+Subject: [PATCH 1/2] test: reproduce Claude top-level effort loss
+
+---
+ .../codex/claude/codex_claude_request_test.go       | 13 +++++++++++++
+ test/thinking_conversion_test.go                    | 10 ++++++++++
+ 2 files changed, 23 insertions(+)
+
+diff --git a/internal/translator/codex/claude/codex_claude_request_test.go b/internal/translator/codex/claude/codex_claude_request_test.go
+index 6f704da..68729ce 100644
+--- a/internal/translator/codex/claude/codex_claude_request_test.go
++++ b/internal/translator/codex/claude/codex_claude_request_test.go
+@@ -262,6 +262,19 @@ func TestConvertClaudeRequestToCodex_ServiceTier(t *testing.T) {
+ 	}
+ }
+ 
++func TestConvertClaudeRequestToCodex_TopLevelEffortWithoutThinking(t *testing.T) {
++	inputJSON := []byte(`{
++		"model": "gpt-5.6-sol",
++		"messages": [{"role": "user", "content": "hello"}],
++		"output_config": {"effort": "low"}
++	}`)
++
++	result := ConvertClaudeRequestToCodex("gpt-5.6-sol", inputJSON, false)
++	if got := gjson.GetBytes(result, "reasoning.effort").String(); got != "low" {
++		t.Fatalf("reasoning.effort = %q, want low", got)
++	}
++}
++
+ func TestConvertClaudeRequestToCodex_ShortenLongToolUseIDs(t *testing.T) {
+ 	longID := "toolu_" + strings.Repeat("a", 62)
+ 	if len(longID) <= 64 {
+diff --git a/test/thinking_conversion_test.go b/test/thinking_conversion_test.go
+index 2a95d10..f434fde 100644
+--- a/test/thinking_conversion_test.go
++++ b/test/thinking_conversion_test.go
+@@ -2858,6 +2858,16 @@ func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
+ 			expectValue: "minimal",
+ 			expectErr:   false,
+ 		},
++		{
++			name:        "C14-top-level-effort-without-thinking",
++			from:        "claude",
++			to:          "codex",
++			model:       "level-model",
++			inputJSON:   `{"model":"level-model","messages":[{"role":"user","content":"hi"}],"output_config":{"effort":"low"}}`,
++			expectField: "reasoning.effort",
++			expectValue: "low",
++			expectErr:   false,
++		},
+ 		{
+ 			name:        "C15",
+ 			from:        "claude",
+-- 
+2.43.0
+
+
+From ad20a87efbbd41a9d4f24c83ca8bdd934bf34ab7 Mon Sep 17 00:00:00 2001
+From: "claudio-michel[bot]"
+ <1592301+claudio-michel[bot]@users.noreply.github.com>
+Date: Mon, 20 Jul 2026 04:21:30 +0000
+Subject: [PATCH 2/2] fix(thinking): preserve Claude effort without thinking
+ object
+
+---
+ internal/thinking/apply.go                    | 57 +++++++++---
+ internal/thinking/apply_test.go               | 93 +++++++++++++++++++
+ .../codex/claude/codex_claude_request.go      | 13 +--
+ .../codex/claude/codex_claude_request_test.go | 87 +++++++++++++++--
+ 4 files changed, 221 insertions(+), 29 deletions(-)
+ create mode 100644 internal/thinking/apply_test.go
+
+diff --git a/internal/thinking/apply.go b/internal/thinking/apply.go
+index 8a6f873..877475a 100644
+--- a/internal/thinking/apply.go
++++ b/internal/thinking/apply.go
+@@ -498,16 +498,50 @@ func reasoningEffortFromConfig(config ThinkingConfig) string {
+ 	}
+ }
+ 
++// ExtractClaudeOutputConfigEffort returns a normalized Claude output_config.effort.
++//
++// Claude Code can send this field without a thinking object when the selected
++// model uses a third-party identifier. Callers should apply their existing
++// explicit thinking-mode precedence before using this value as a fallback.
++func ExtractClaudeOutputConfigEffort(body []byte) (string, bool) {
++	effort := gjson.GetBytes(body, "output_config.effort")
++	if !effort.Exists() || effort.Type != gjson.String {
++		return "", false
++	}
++	value := strings.ToLower(strings.TrimSpace(effort.String()))
++	if value == "" {
++		return "", false
++	}
++	return value, true
++}
++
++func extractClaudeOutputConfig(body []byte) (ThinkingConfig, bool) {
++	value, ok := ExtractClaudeOutputConfigEffort(body)
++	if !ok {
++		return ThinkingConfig{}, false
++	}
++	switch value {
++	case "none":
++		return ThinkingConfig{Mode: ModeNone, Budget: 0}, true
++	case "auto":
++		return ThinkingConfig{Mode: ModeAuto, Budget: -1}, true
++	default:
++		return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}, true
++	}
++}
++
+ // extractClaudeConfig extracts thinking configuration from Claude format request body.
+ //
+ // Claude API format:
+ //   - thinking.type: "enabled" or "disabled"
+ //   - thinking.budget_tokens: integer (-1=auto, 0=disabled, >0=budget)
++//   - output_config.effort: string effort level
+ //
+ // Priority: thinking.type="disabled" takes precedence over budget_tokens.
+ // When type="enabled" without budget_tokens, returns ModeAuto to indicate
+ // the user wants thinking enabled but didn't specify a budget.
+ func extractClaudeConfig(body []byte) ThinkingConfig {
++	thinking := gjson.GetBytes(body, "thinking")
+ 	thinkingType := gjson.GetBytes(body, "thinking.type").String()
+ 	if thinkingType == "disabled" {
+ 		return ThinkingConfig{Mode: ModeNone, Budget: 0}
+@@ -516,19 +550,8 @@ func extractClaudeConfig(body []byte) ThinkingConfig {
+ 		// Claude adaptive thinking uses output_config.effort (low/medium/high/max).
+ 		// We only treat it as a thinking config when effort is explicitly present;
+ 		// otherwise we passthrough and let upstream defaults apply.
+-		if effort := gjson.GetBytes(body, "output_config.effort"); effort.Exists() && effort.Type == gjson.String {
+-			value := strings.ToLower(strings.TrimSpace(effort.String()))
+-			if value == "" {
+-				return ThinkingConfig{}
+-			}
+-			switch value {
+-			case "none":
+-				return ThinkingConfig{Mode: ModeNone, Budget: 0}
+-			case "auto":
+-				return ThinkingConfig{Mode: ModeAuto, Budget: -1}
+-			default:
+-				return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
+-			}
++		if config, ok := extractClaudeOutputConfig(body); ok {
++			return config
+ 		}
+ 		return ThinkingConfig{}
+ 	}
+@@ -551,6 +574,14 @@ func extractClaudeConfig(body []byte) ThinkingConfig {
+ 		return ThinkingConfig{Mode: ModeAuto, Budget: -1}
+ 	}
+ 
++	// Claude Code omits thinking for exact third-party model identifiers but
++	// still sends the user's explicit top-level effort.
++	if !thinking.Exists() {
++		if config, ok := extractClaudeOutputConfig(body); ok {
++			return config
++		}
++	}
++
+ 	return ThinkingConfig{}
+ }
+ 
+diff --git a/internal/thinking/apply_test.go b/internal/thinking/apply_test.go
+new file mode 100644
+index 0000000..a04832a
+--- /dev/null
++++ b/internal/thinking/apply_test.go
+@@ -0,0 +1,93 @@
++package thinking
++
++import "testing"
++
++func TestExtractClaudeConfig_OutputEffortPrecedence(t *testing.T) {
++	tests := []struct {
++		name       string
++		body       string
++		wantMode   ThinkingMode
++		wantBudget int
++		wantLevel  ThinkingLevel
++	}{
++		{
++			name:      "top-level effort without thinking",
++			body:      `{"output_config":{"effort":"low"}}`,
++			wantMode:  ModeLevel,
++			wantLevel: LevelLow,
++		},
++		{
++			name:      "top-level effort is normalized",
++			body:      `{"output_config":{"effort":" XHIGH "}}`,
++			wantMode:  ModeLevel,
++			wantLevel: LevelXHigh,
++		},
++		{
++			name:      "top-level max effort without thinking",
++			body:      `{"output_config":{"effort":"max"}}`,
++			wantMode:  ModeLevel,
++			wantLevel: LevelMax,
++		},
++		{
++			name: "blank top-level effort remains empty",
++			body: `{"output_config":{"effort":"  "}}`,
++		},
++		{
++			name: "non-string top-level effort remains empty",
++			body: `{"output_config":{"effort":42}}`,
++		},
++		{
++			name:      "adaptive effort remains supported",
++			body:      `{"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}}`,
++			wantMode:  ModeLevel,
++			wantLevel: LevelHigh,
++		},
++		{
++			name: "adaptive without effort remains passthrough",
++			body: `{"thinking":{"type":"adaptive"}}`,
++		},
++		{
++			name:       "explicit disabled overrides effort",
++			body:       `{"thinking":{"type":"disabled"},"output_config":{"effort":"high"}}`,
++			wantMode:   ModeNone,
++			wantBudget: 0,
++		},
++		{
++			name:       "explicit budget overrides effort",
++			body:       `{"thinking":{"type":"enabled","budget_tokens":1024},"output_config":{"effort":"high"}}`,
++			wantMode:   ModeBudget,
++			wantBudget: 1024,
++		},
++		{
++			name:       "enabled without budget remains auto",
++			body:       `{"thinking":{"type":"enabled"},"output_config":{"effort":"high"}}`,
++			wantMode:   ModeAuto,
++			wantBudget: -1,
++		},
++		{
++			name: "unknown thinking object does not use effort fallback",
++			body: `{"thinking":{},"output_config":{"effort":"high"}}`,
++		},
++		{
++			name: "missing configuration remains empty",
++			body: `{}`,
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			got := extractClaudeConfig([]byte(tt.body))
++			if got.Mode != tt.wantMode || got.Budget != tt.wantBudget || got.Level != tt.wantLevel {
++				t.Fatalf(
++					"extractClaudeConfig() = {Mode:%v Budget:%d Level:%q}, want {Mode:%v Budget:%d Level:%q}",
++					got.Mode,
++					got.Budget,
++					got.Level,
++					tt.wantMode,
++					tt.wantBudget,
++					tt.wantLevel,
++				)
++			}
++		})
++	}
++}
+diff --git a/internal/translator/codex/claude/codex_claude_request.go b/internal/translator/codex/claude/codex_claude_request.go
+index 6728c2e..e776656 100644
+--- a/internal/translator/codex/claude/codex_claude_request.go
++++ b/internal/translator/codex/claude/codex_claude_request.go
+@@ -311,7 +311,12 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool)
+ 
+ 	// Convert thinking.budget_tokens to reasoning.effort.
+ 	reasoningEffort := "medium"
+-	if thinkingConfig := rootResult.Get("thinking"); thinkingConfig.Exists() && thinkingConfig.IsObject() {
++	thinkingConfig := rootResult.Get("thinking")
++	if !thinkingConfig.Exists() {
++		if effort, ok := thinking.ExtractClaudeOutputConfigEffort(rawJSON); ok {
++			reasoningEffort = effort
++		}
++	} else if thinkingConfig.IsObject() {
+ 		switch thinkingConfig.Get("type").String() {
+ 		case "enabled":
+ 			if budgetTokens := thinkingConfig.Get("budget_tokens"); budgetTokens.Exists() {
+@@ -323,11 +328,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool)
+ 		case "adaptive", "auto":
+ 			// Adaptive thinking can carry an explicit effort in output_config.effort (Claude 4.6).
+ 			// Pass through directly; ApplyThinking handles clamping to target model's levels.
+-			effort := ""
+-			if v := rootResult.Get("output_config.effort"); v.Exists() && v.Type == gjson.String {
+-				effort = strings.ToLower(strings.TrimSpace(v.String()))
+-			}
+-			if effort != "" {
++			if effort, ok := thinking.ExtractClaudeOutputConfigEffort(rawJSON); ok {
+ 				reasoningEffort = effort
+ 			} else {
+ 				reasoningEffort = string(thinking.LevelXHigh)
+diff --git a/internal/translator/codex/claude/codex_claude_request_test.go b/internal/translator/codex/claude/codex_claude_request_test.go
+index 68729ce..729770b 100644
+--- a/internal/translator/codex/claude/codex_claude_request_test.go
++++ b/internal/translator/codex/claude/codex_claude_request_test.go
+@@ -262,16 +262,83 @@ func TestConvertClaudeRequestToCodex_ServiceTier(t *testing.T) {
+ 	}
+ }
+ 
+-func TestConvertClaudeRequestToCodex_TopLevelEffortWithoutThinking(t *testing.T) {
+-	inputJSON := []byte(`{
+-		"model": "gpt-5.6-sol",
+-		"messages": [{"role": "user", "content": "hello"}],
+-		"output_config": {"effort": "low"}
+-	}`)
+-
+-	result := ConvertClaudeRequestToCodex("gpt-5.6-sol", inputJSON, false)
+-	if got := gjson.GetBytes(result, "reasoning.effort").String(); got != "low" {
+-		t.Fatalf("reasoning.effort = %q, want low", got)
++func TestConvertClaudeRequestToCodex_ReasoningEffort(t *testing.T) {
++	tests := []struct {
++		name       string
++		configJSON string
++		want       string
++	}{
++		{
++			name:       "top-level effort without thinking",
++			configJSON: `"output_config":{"effort":"low"}`,
++			want:       "low",
++		},
++		{
++			name:       "top-level effort is normalized",
++			configJSON: `"output_config":{"effort":" HIGH "}`,
++			want:       "high",
++		},
++		{
++			name:       "top-level medium without thinking",
++			configJSON: `"output_config":{"effort":"medium"}`,
++			want:       "medium",
++		},
++		{
++			name:       "top-level xhigh without thinking",
++			configJSON: `"output_config":{"effort":"xhigh"}`,
++			want:       "xhigh",
++		},
++		{
++			name:       "top-level max without thinking",
++			configJSON: `"output_config":{"effort":"max"}`,
++			want:       "max",
++		},
++		{
++			name: "missing effort keeps default",
++			want: "medium",
++		},
++		{
++			name:       "adaptive effort",
++			configJSON: `"thinking":{"type":"adaptive"},"output_config":{"effort":"low"}`,
++			want:       "low",
++		},
++		{
++			name:       "adaptive without effort keeps xhigh",
++			configJSON: `"thinking":{"type":"adaptive"}`,
++			want:       "xhigh",
++		},
++		{
++			name:       "enabled budget overrides effort",
++			configJSON: `"thinking":{"type":"enabled","budget_tokens":1024},"output_config":{"effort":"high"}`,
++			want:       "low",
++		},
++		{
++			name:       "enabled without budget keeps default",
++			configJSON: `"thinking":{"type":"enabled"},"output_config":{"effort":"high"}`,
++			want:       "medium",
++		},
++		{
++			name:       "disabled overrides effort",
++			configJSON: `"thinking":{"type":"disabled"},"output_config":{"effort":"high"}`,
++			want:       "none",
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			inputJSON := `{
++				"model": "gpt-5.6-sol",
++				"messages": [{"role": "user", "content": "hello"}]`
++			if tt.configJSON != "" {
++				inputJSON += "," + tt.configJSON
++			}
++			inputJSON += "}"
++
++			result := ConvertClaudeRequestToCodex("gpt-5.6-sol", []byte(inputJSON), false)
++			if got := gjson.GetBytes(result, "reasoning.effort").String(); got != tt.want {
++				t.Fatalf("reasoning.effort = %q, want %q", got, tt.want)
++			}
++		})
+ 	}
+ }
+ 
+-- 
+2.43.0
