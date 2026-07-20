@@ -29,6 +29,12 @@ class BackupPublicationTest(unittest.TestCase):
             "receipt_redirects",
             "forget_tombstones",
             "canonical_audit_events",
+            "admin_credentials",
+            "admin_sessions",
+            "provider_connections",
+            "connector_installations",
+            "oauth_sessions",
+            "control_audit_events",
         ):
             self.assertIn(f"('{table}',", rendered)
         self.assertIn('"database_fingerprint"', rendered)

@@ -5,6 +5,7 @@ import binascii
 import json
 import logging
 import os
+import re
 import socket
 import socketserver
 import stat
@@ -15,12 +16,20 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 from .archive_runtime import build_archive_store
+from .admin_web import (
+    CSRF_COOKIE,
+    SESSION_COOKIE,
+    asset as admin_asset,
+    cookies as admin_cookies,
+    session_headers as admin_session_headers,
+)
 from .canonical import (
     CanonicalArchiveGateway,
     CanonicalLifecycleError,
     CanonicalPlane,
 )
 from .canonical_retrieval import CanonicalRetrieval
+from .control import ControlError, ControlPlane
 from .db import BrainStore, IdempotencyConflict
 from .mcp import (
     SUPPORTED_PROTOCOL_VERSIONS,
@@ -34,6 +43,13 @@ from .webhooks import WEBHOOK_PATH, WebhookError, build_webhook_event
 
 LOG = logging.getLogger("recall.brainstore")
 MAX_BODY_BYTES = 12 * 1024 * 1024
+MAX_ADMIN_BODY_BYTES = 64 * 1024
+ADMIN_INSTALLATION_ACTION = re.compile(
+    r"/admin/api/v1/installations/([0-9a-f-]{36})/actions\Z"
+)
+ADMIN_CONNECTION_REVOKE = re.compile(
+    r"/admin/api/v1/connections/([0-9a-f-]{36})/revoke\Z"
+)
 COUNTERS = {
     "http_requests": 0,
     "http_errors": 0,
@@ -51,6 +67,7 @@ class Handler(BaseHTTPRequestHandler):
     archive_store = None
     canonical_plane: CanonicalPlane | None = None
     canonical_retrieval: CanonicalRetrieval | None = None
+    control_plane: ControlPlane | None = None
 
     def log_message(self, fmt: str, *args) -> None:
         LOG.info(
@@ -60,13 +77,21 @@ class Handler(BaseHTTPRequestHandler):
             args[1] if len(args) > 1 else "unknown",
         )
 
-    def send_json(self, status: int, body: object) -> None:
+    def send_json(
+        self,
+        status: int,
+        body: object,
+        headers: list[tuple[str, str]] | None = None,
+    ) -> None:
         if status >= 400:
             with COUNTER_LOCK:
                 COUNTERS["http_errors"] += 1
         data = json.dumps(body, default=str, sort_keys=True).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        for name, value in headers or []:
+            self.send_header(name, value)
         self.send_header("Content-Length", str(len(data)))
         try:
             self.end_headers()
@@ -75,6 +100,31 @@ class Handler(BaseHTTPRequestHandler):
             # The database work may have completed after a bounded client left.
             # Never turn that ordinary transport event into a content-bearing traceback.
             return
+
+    def send_asset(self, body: bytes, content_type: str) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'none'; script-src 'self'; style-src 'self'; "
+            "img-src 'self' data:; connect-src 'self'; form-action 'self'; "
+            "base-uri 'none'; frame-ancestors 'none'",
+        )
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_redirect(self, location: str) -> None:
+        self.send_response(303)
+        self.send_header("Location", location)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def send_empty(self, status: int, headers: dict[str, str] | None = None) -> None:
         if status >= 400:
@@ -332,6 +382,10 @@ class Handler(BaseHTTPRequestHandler):
     def public_edge_profile() -> bool:
         return os.environ.get("RECALL_HTTP_PROFILE") == "public-edge"
 
+    @staticmethod
+    def admin_web_enabled() -> bool:
+        return os.environ.get("RECALL_ADMIN_WEB_ENABLED") == "1"
+
     def hide_non_public_route(self, method: str, path: str) -> bool:
         if not (self.public_mcp_profile() or self.public_edge_profile()):
             return False
@@ -342,6 +396,8 @@ class Handler(BaseHTTPRequestHandler):
         )
         if self.public_edge_profile():
             allowed = allowed or (method == "POST" and path == WEBHOOK_PATH)
+        if self.admin_web_enabled():
+            allowed = allowed or path == "/admin" or path.startswith("/admin/")
         if os.environ.get("RECALL_CANONICAL_INGEST_PUBLIC") == "1":
             allowed = allowed or (
                 method == "POST"
@@ -352,10 +408,89 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(404, {"error": "not found"})
         return True
 
+    def admin_principal(self, *, csrf: bool = False) -> dict[str, object] | None:
+        if self.control_plane is None:
+            self.send_json(503, {"error": "control_plane_unavailable"})
+            return None
+        browser = admin_cookies(self.headers.get("Cookie"))
+        session = browser.get(SESSION_COOKIE, "")
+        csrf_value = self.headers.get("X-Recall-CSRF") if csrf else None
+        if csrf and (
+            not csrf_value
+            or csrf_value != browser.get(CSRF_COOKIE)
+        ):
+            self.send_json(403, {"error": "admin_csrf_invalid"})
+            return None
+        try:
+            return self.control_plane.authenticate_session(
+                session,
+                csrf=csrf_value,
+            )
+        except ControlError as error:
+            self.send_json(error.status, {"error": error.code})
+            return None
+
+    def read_admin_json(self) -> dict | None:
+        length = self.body_length(MAX_ADMIN_BODY_BYTES)
+        if length is None:
+            return None
+        try:
+            body = json.loads(self.rfile.read(length))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self.send_json(400, {"error": "admin_request_invalid"})
+            return None
+        if not isinstance(body, dict):
+            self.send_json(400, {"error": "admin_request_invalid"})
+            return None
+        return body
+
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
         if self.hide_non_public_route("GET", parsed.path):
             return
+        if self.admin_web_enabled():
+            configured_asset = admin_asset(parsed.path)
+            if configured_asset is not None:
+                self.send_asset(*configured_asset)
+                return
+            if parsed.path == "/admin/api/v1/state":
+                principal = self.admin_principal()
+                if principal is None:
+                    return
+                try:
+                    self.send_json(
+                        200,
+                        self.control_plane.state(principal["principal_id"]),
+                    )
+                except ControlError as error:
+                    self.send_json(error.status, {"error": error.code})
+                return
+            if parsed.path == "/admin/oauth/callback/google":
+                if self.control_plane is None:
+                    self.send_json(503, {"error": "control_plane_unavailable"})
+                    return
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                if (
+                    query.get("error")
+                    or set(query) - {"state", "code", "scope"}
+                    or len(query.get("state", [])) != 1
+                    or len(query.get("code", [])) != 1
+                    or len(query.get("scope", [])) > 1
+                ):
+                    self.send_json(400, {"error": "oauth_callback_invalid"})
+                    return
+                state = query.get("state", [""])[0]
+                code = query.get("code", [""])[0]
+                try:
+                    self.control_plane.complete_oauth(
+                        provider_id="google",
+                        state=state,
+                        code=code,
+                    )
+                    self.send_redirect("/admin?oauth=connected")
+                except ControlError as error:
+                    self.send_json(error.status, {"error": error.code})
+                return
         if parsed.path == "/mcp":
             if not self.valid_mcp_origin():
                 return
@@ -409,6 +544,101 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urlsplit(self.path).path
         if self.hide_non_public_route("POST", path):
+            return
+        if self.admin_web_enabled() and path == "/admin/api/v1/session":
+            if self.control_plane is None:
+                self.send_json(503, {"error": "control_plane_unavailable"})
+                return
+            body = self.read_admin_json()
+            if body is None:
+                return
+            if set(body) != {"token"}:
+                self.send_json(400, {"error": "admin_request_invalid"})
+                return
+            try:
+                browser = self.control_plane.exchange_admin_token(body["token"])
+                headers = [
+                    ("Set-Cookie", value)
+                    for value in admin_session_headers(
+                        browser["session"], browser["csrf"]
+                    )
+                ]
+                self.send_json(
+                    201,
+                    {"status": "authenticated", "expires_at": browser["expires_at"]},
+                    headers,
+                )
+            except ControlError as error:
+                self.send_json(error.status, {"error": error.code})
+            return
+        if self.admin_web_enabled() and path == "/admin/api/v1/oauth/start":
+            principal = self.admin_principal(csrf=True)
+            if principal is None:
+                return
+            body = self.read_admin_json()
+            if body is None:
+                return
+            if set(body) != {"provider", "routes"}:
+                self.send_json(400, {"error": "admin_request_invalid"})
+                return
+            try:
+                result = self.control_plane.start_oauth(
+                    principal_id=principal["principal_id"],
+                    provider_id=body["provider"],
+                    routes=body["routes"],
+                )
+                self.send_json(201, result)
+            except ControlError as error:
+                self.send_json(error.status, {"error": error.code})
+            return
+        installation_action = (
+            ADMIN_INSTALLATION_ACTION.fullmatch(path)
+            if self.admin_web_enabled()
+            else None
+        )
+        if installation_action:
+            principal = self.admin_principal(csrf=True)
+            if principal is None:
+                return
+            body = self.read_admin_json()
+            if body is None:
+                return
+            if set(body) != {"action"}:
+                self.send_json(400, {"error": "admin_request_invalid"})
+                return
+            try:
+                result = self.control_plane.transition_installation(
+                    principal_id=principal["principal_id"],
+                    installation_id=installation_action.group(1),
+                    action=body["action"],
+                )
+                self.send_json(200, result)
+            except ControlError as error:
+                self.send_json(error.status, {"error": error.code})
+            return
+        connection_revoke = (
+            ADMIN_CONNECTION_REVOKE.fullmatch(path)
+            if self.admin_web_enabled()
+            else None
+        )
+        if connection_revoke:
+            principal = self.admin_principal(csrf=True)
+            if principal is None:
+                return
+            body = self.read_admin_json()
+            if body is None:
+                return
+            if body:
+                self.send_json(400, {"error": "admin_request_invalid"})
+                return
+            try:
+                result = self.control_plane.revoke_connection(
+                    principal_id=principal["principal_id"],
+                    connection_id=connection_revoke.group(1),
+                )
+                self.send_json(200, result)
+            except ControlError as error:
+                self.send_json(error.status, {"error": error.code})
             return
         if path == "/v2/archive/objects":
             principal = self.require("write")
@@ -792,6 +1022,16 @@ def validate_http_profile() -> None:
         raise RuntimeError(
             "canonical MCP requires authentication and canonical v2"
         )
+    if os.environ.get("RECALL_ADMIN_WEB_ENABLED") == "1" and (
+        os.environ.get("RECALL_AUTH_REQUIRED", "0") != "1"
+        or not os.environ.get("RECALL_CONTROL_ENCRYPTION_KEY")
+        or not os.environ.get("RECALL_GOOGLE_CLIENT_ID")
+        or not os.environ.get("RECALL_GOOGLE_CLIENT_SECRET")
+        or not os.environ.get("RECALL_GOOGLE_REDIRECT_URI")
+    ):
+        raise RuntimeError(
+            "admin web requires auth, encryption, and Google OAuth configuration"
+        )
     if profile in {"public-edge", "public-mcp"}:
         if os.environ.get("RECALL_AUTH_REQUIRED", "0") != "1":
             raise RuntimeError("public HTTP profile requires authentication")
@@ -816,6 +1056,11 @@ def configure_runtime(dsn: str) -> None:
         Handler.archive_store = None
         Handler.canonical_plane = None
         Handler.canonical_retrieval = None
+    Handler.control_plane = (
+        ControlPlane.from_env(Handler.store)
+        if os.environ.get("RECALL_ADMIN_WEB_ENABLED") == "1"
+        else None
+    )
 
 
 def serve(dsn: str, host: str = "127.0.0.1", port: int = 8788) -> None:

@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Recall Switchboard</title>
+  <link rel="stylesheet" href="/admin/assets/admin.css">
+  <script src="/admin/assets/admin.js" defer></script>
+</head>
+<body>
+  <div class="grain" aria-hidden="true"></div>
+  <header class="masthead">
+    <a class="mark" href="/admin" aria-label="Recall admin home">
+      <span class="mark-orbit"><i></i></span>
+      <span>RECALL</span>
+    </a>
+    <div class="system-state">
+      <span class="pulse" aria-hidden="true"></span>
+      <span id="system-label">CONTROL PLANE / CONNECTING</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <p class="eyebrow">Memory routing, under your control</p>
+      <h1>Choose what your<br><em>brains remember.</em></h1>
+      <p class="hero-copy">Connect a source once. Route each stream to your personal or company brain. Pause, move, or revoke it without losing the checkpoint.</p>
+      <div class="hero-index" aria-label="Control plane principles">
+        <span>01 / Least scope</span><span>02 / Private by default</span><span>03 / Explicit destination</span>
+      </div>
+    </section>
+
+    <section class="brain-strip" aria-labelledby="brains-title">
+      <div class="section-heading">
+        <p>DESTINATIONS</p>
+        <h2 id="brains-title">Your brains</h2>
+      </div>
+      <div id="brain-list" class="brain-list" aria-live="polite"></div>
+    </section>
+
+    <section class="switchboard" aria-labelledby="switchboard-title">
+      <div class="section-heading switchboard-heading">
+        <div><p>INPUTS</p><h2 id="switchboard-title">Switchboard</h2></div>
+        <div class="legend"><span><i class="dot live"></i>Live</span><span><i class="dot paused"></i>Paused</span></div>
+      </div>
+
+      <article class="integration flagship" data-provider="google">
+        <div class="integration-number">G / 01</div>
+        <div class="integration-copy">
+          <div class="provider-kicker">REMOTE · OAUTH 2.0 · READ ONLY</div>
+          <h3>Google Workspace</h3>
+          <p>Mail, meetings, people, and working documents. Ask only for the services you switch on.</p>
+          <div id="google-connection" class="connection-state">Not connected</div>
+        </div>
+        <form id="google-form" class="route-matrix">
+          <div class="matrix-head"><span>Source</span><span>Destination</span><span>On</span></div>
+          <div id="google-routes"></div>
+          <button class="connect-button" type="submit">
+            <span>Authorize selected routes</span><span aria-hidden="true">↗</span>
+          </button>
+        </form>
+      </article>
+
+      <div class="integration-grid" id="integration-grid" aria-live="polite"></div>
+    </section>
+
+    <section class="live-routes" aria-labelledby="live-routes-title">
+      <div class="section-heading">
+        <p>ACTIVE MAP</p>
+        <h2 id="live-routes-title">Live routes</h2>
+      </div>
+      <div id="installation-list" class="installation-list"></div>
+    </section>
+  </main>
+
+  <dialog id="auth-dialog" class="auth-dialog">
+    <form id="auth-form" method="dialog">
+      <span class="dialog-index">OWNER ACCESS / 01</span>
+      <h2>Open the switchboard.</h2>
+      <p>Paste the one-time admin key created by Recall. It is exchanged for a short browser session and never placed in a URL.</p>
+      <label for="admin-token">Admin access key</label>
+      <input id="admin-token" name="token" type="password" autocomplete="off" spellcheck="false" required>
+      <p id="auth-error" class="error" role="alert"></p>
+      <button type="submit">Enter control plane <span aria-hidden="true">→</span></button>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <footer><span>RECALL / OPEN MEMORY INFRASTRUCTURE</span><span>YOU OWN THE ROUTES</span></footer>
+</body>
+</html>

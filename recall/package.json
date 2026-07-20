@@ -19,6 +19,8 @@
     "!connectors/**/__pycache__/**",
     "!connectors/**/*.pyc",
     "contracts/",
+    "!contracts/**/__pycache__/**",
+    "!contracts/**/*.pyc",
     "Dockerfile.remote-worker",
     "Dockerfile.remote-worker.dockerignore",
     "privacy/",

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Recall BrainStore API
-  version: 0.6.0-webhook-edge
+  version: 0.7.0-unified-control
   license:
     name: MIT
     identifier: MIT
@@ -177,6 +177,122 @@ paths:
       responses:
         '200': {description: Content-free source, projection, and freshness health}
         '401': {description: Unauthorized}
+  /admin/api/v1/session:
+    post:
+      summary: Exchange an audience-bound admin key for a browser session
+      operationId: exchangeAdminSession
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [token]
+              properties:
+                token: {type: string, writeOnly: true, minLength: 36, maxLength: 132}
+      responses:
+        '201': {description: Secure session and CSRF cookies set}
+        '400': {description: Invalid closed request}
+        '401': {description: Invalid, expired, or revoked admin key}
+  /admin/api/v1/state:
+    get:
+      summary: Read the caller's brain, connector, connection, and route state
+      operationId: getConnectorControlState
+      security:
+        - adminSession: []
+      responses:
+        '200': {description: Content-free connector control state}
+        '401': {description: Invalid, expired, or revoked session}
+  /admin/api/v1/oauth/start:
+    post:
+      summary: Start a one-time provider authorization for explicit brain routes
+      operationId: startConnectorOAuth
+      security:
+        - adminSession: []
+      parameters:
+        - $ref: '#/components/parameters/AdminCsrf'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [provider, routes]
+              properties:
+                provider: {const: google}
+                routes:
+                  type: array
+                  minItems: 1
+                  maxItems: 8
+                  items: {$ref: '#/components/schemas/ConnectorRouteV1'}
+      responses:
+        '201': {description: HTTPS authorization URL with server-owned state and PKCE}
+        '400': {description: Invalid provider, route, selector, or privacy policy}
+        '403': {description: CSRF failure or destination brain is not administrable}
+  /admin/oauth/callback/google:
+    get:
+      summary: Complete one Google authorization-code flow
+      operationId: completeGoogleOAuth
+      security: []
+      parameters:
+        - {in: query, name: state, required: true, schema: {type: string}}
+        - {in: query, name: code, required: true, schema: {type: string}}
+      responses:
+        '303': {description: Connected; redirect to the switchboard}
+        '400': {description: Invalid callback}
+        '403': {description: Expired, consumed, or insufficient-scope grant}
+        '502': {description: Provider exchange failed closed}
+  /admin/api/v1/installations/{installation_id}/actions:
+    post:
+      summary: Enable, pause, resume, revoke, or uninstall one routed source
+      operationId: transitionConnectorInstallation
+      security:
+        - adminSession: []
+      parameters:
+        - $ref: '#/components/parameters/AdminCsrf'
+        - in: path
+          name: installation_id
+          required: true
+          schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [action]
+              properties:
+                action: {enum: [enable, pause, resume, revoke, uninstall]}
+      responses:
+        '200': {description: Idempotent lifecycle result}
+        '403': {description: CSRF failure}
+        '404': {description: Installation absent or belongs to another principal}
+        '409': {description: Invalid lifecycle transition}
+  /admin/api/v1/connections/{connection_id}/revoke:
+    post:
+      summary: Revoke one provider grant and every dependent installation
+      operationId: revokeProviderConnection
+      security:
+        - adminSession: []
+      parameters:
+        - $ref: '#/components/parameters/AdminCsrf'
+        - in: path
+          name: connection_id
+          required: true
+          schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: false}
+      responses:
+        '200': {description: Provider authority revoked and encrypted secret wiped}
+        '403': {description: CSRF failure}
+        '404': {description: Connection absent or belongs to another principal}
 components:
   securitySchemes:
     bearerAuth:
@@ -187,7 +303,30 @@ components:
       type: http
       scheme: bearer
       description: Revocable webhook-only token bound to one source, principal, and privacy mode.
+    adminSession:
+      type: apiKey
+      in: cookie
+      name: recall_admin_session
+      description: Short-lived Secure, HttpOnly, SameSite browser session.
+  parameters:
+    AdminCsrf:
+      in: header
+      name: X-Recall-CSRF
+      required: true
+      schema: {type: string, minLength: 32, maxLength: 256}
+      description: Must equal the Strict CSRF cookie and the server-side session digest.
   schemas:
+    ConnectorRouteV1:
+      type: object
+      additionalProperties: false
+      required: [connector_id, tenant_id, privacy_mode, selectors]
+      properties:
+        connector_id: {type: string, minLength: 3, maxLength: 128}
+        tenant_id: {type: string, minLength: 2, maxLength: 256}
+        privacy_mode: {enum: [scrub, drop]}
+        selectors:
+          type: object
+          description: Closed against the selected connector's registry fields.
     WebhookEventV1:
       type: object
       additionalProperties: false
