@@ -70,8 +70,9 @@ fallback, second router, broker, or token-copy artifact was added.
 - Complete Parable suite: PASS, 98/98.
 - npm pack dry-run: PASS, 33 files.
 - Local Claudio-Michel review: 5/5.
-- Focused PR: pending.
-- Verified merged `main`: pending.
+- Focused PR: [#197](https://github.com/miguelrios/unc-skills/pull/197),
+  merged 2026-07-20T23:01:01Z.
+- Verified merged `main`: `6504f6e347f6190f60a8037e7c14c8f782d3758c`.
 
 ## exit → O4
 
