@@ -53,7 +53,7 @@ Parable gains no OAuth implementation, broker, shared credential, or API key.
 - Parable tests: 81/81 PASS in an isolated HOME.
 - Local Claudio-Michel review: 5/5.
 - Focused PR: [#150](https://github.com/miguelrios/unc-skills/pull/150).
-- Verified merged `main`: pending.
+- Verified merged `main`: `c01449bd8c80e1bc95ee49356e003b122ce4047a`.
 
 ## exit → X1
 
