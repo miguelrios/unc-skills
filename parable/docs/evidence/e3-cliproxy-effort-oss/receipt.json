@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "loop": "E3",
+  "captured_at_utc": "2026-07-20T04:44:17Z",
+  "parable_baseline_head": "d7754a73039d0305ffb8305255c72e9961d6b761",
+  "delivery": {
+    "guide": "docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md",
+    "patch": "patches/cliproxyapi-v7.2.88-claude-effort.patch",
+    "npm_package_includes_guide_and_patch": true,
+    "patch_sha256": "d35b422da321265150fe393da80a686862ef642ee45c65a3e2fb908d689d5d1f",
+    "format_patch_stream_sha256": "2d6c5371b79ffabc027f93cdedd817d83f9554c81c6df294f064395134163582",
+    "upstream_base_release": "v7.2.88",
+    "upstream_base_commit": "93d74a890a44802f656d7f39a573916b2611896e",
+    "upstream_base_archive_sha256": "47c91832a4f09501ed0638191b18d74ffc8eef2ec9de53fd53423ad09d695129",
+    "patch_commits": 2
+  },
+  "clean_archive_verification": {
+    "archive_download_url": "https://github.com/router-for-me/CLIProxyAPI/archive/93d74a890a44802f656d7f39a573916b2611896e.tar.gz",
+    "patch_apply_exit_code": 0,
+    "changed_files": [
+      "internal/thinking/apply.go",
+      "internal/thinking/apply_test.go",
+      "internal/translator/codex/claude/codex_claude_request.go",
+      "internal/translator/codex/claude/codex_claude_request_test.go",
+      "test/thinking_conversion_test.go"
+    ],
+    "go_version": "go1.26.5 linux/amd64",
+    "focused_thinking_test_exit_code": 0,
+    "focused_translator_test_exit_code": 0,
+    "cross_protocol_test_exit_code": 0,
+    "focused_go_vet_exit_code": 0,
+    "go_test_all_exit_code": 0,
+    "server_build_exit_code": 0,
+    "server_binary_sha256": "6d71b352c2203646b4706680c0c11711e4b69429cc96a0b1f9c0aa6849d36515",
+    "source_working_tree_clean": true
+  },
+  "live_support": {
+    "receipt": "docs/evidence/e2-cliproxy-effort-live/receipt.json",
+    "claude_code_version": "2.1.215",
+    "models": [
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna"
+    ],
+    "efforts": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ],
+    "exact_text_cells": 15,
+    "text_cells": 15,
+    "successful_tool_canaries": 3,
+    "tool_canaries": 3,
+    "route": "ChatGPT subscription OAuth"
+  },
+  "support_state": {
+    "released_v7_2_88_contains_fix": false,
+    "patched_source_supported_by_receipts": true,
+    "named_gpt_subagent_live_proof_claimed": false,
+    "kimi": "PAUSED"
+  },
+  "parable_verification": {
+    "tests_passed": 81,
+    "tests_total": 81,
+    "isolated_home": true
+  },
+  "upstream_status": {
+    "repository_url": "https://github.com/router-for-me/CLIProxyAPI",
+    "checked_at_utc": "2026-07-20T04:44:17Z",
+    "required_app_permissions": {
+      "admin": false,
+      "maintain": false,
+      "push": false,
+      "triage": false
+    },
+    "issue_url": null,
+    "pull_request_url": null,
+    "authorization_blocker": "The required Claudio Michel GitHub App has no permission on router-for-me/CLIProxyAPI, so this environment cannot open an authorized upstream issue or pull request.",
+    "external_merge_or_release_claimed": false
+  },
+  "safety": {
+    "credential_material_committed": false,
+    "oauth_state_committed": false,
+    "raw_prompt_or_response_committed": false,
+    "raw_proxy_log_committed": false,
+    "private_path_committed": false,
+    "guide_binds_proxy_to_loopback": true
+  }
+}

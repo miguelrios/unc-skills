@@ -200,8 +200,9 @@ Claude-to-Codex translation boundary. Its independently built binary preserved
 
 The patch is not an upstream release. Until CLIProxyAPI merges and releases
 the change, released `v7.2.88` users must treat non-medium effort as
-accepted-but-not-effective. The reproducible patched-source build route is
-published separately by loop E3.
+accepted-but-not-effective. Follow the
+[pinned five-minute patched-source path](../../../docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md)
+for the exact build, OAuth, proxy, and Parable commands.
 
 ## Reading subscription headroom (parable-usage.sh)
 

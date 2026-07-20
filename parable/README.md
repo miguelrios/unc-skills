@@ -138,6 +138,8 @@ ids become project-local named subagents. Parable handles only declarative routi
 per-process environment wiring; the local proxy handles each user's OAuth. No provider token is
 stored in TOML or written by Parable. See
 [`examples/parable.claude-subscriptions.toml`](examples/parable.claude-subscriptions.toml).
+For the source-pinned GPT effort fix, OAuth connection, and first Sol launch,
+follow the [five-minute CLIProxyAPI guide](docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md).
 
 Minimal Cursor configuration:
 

@@ -19,6 +19,8 @@
     "!skills/parable/scripts/*.pyc",
     "skills/parable/references/*",
     "examples/*.toml",
+    "docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md",
+    "patches/cliproxyapi-v7.2.88-claude-effort.patch",
     "install.sh",
     "README.md",
     "LICENSE"
