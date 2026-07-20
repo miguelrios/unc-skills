@@ -200,7 +200,7 @@ def application_payloads(source_root: Path, runtime_lock_data: bytes) -> dict[st
                 "macos_admin/build.sh",
             },
         )
-    for module in ("client", "collector", "connectors", "privacy"):
+    for module in ("client", "collector", "connectors", "contracts", "privacy"):
         for source in sorted((source_root / module).glob("*.py")):
             selected[f"lib/{module}/{source.name}"] = Payload(data=source.read_bytes())
     for source in sorted((source_root / "contracts").glob("*.json")):
