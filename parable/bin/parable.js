@@ -8,7 +8,10 @@ const path = require("path");
 const { execSync, spawnSync } = require("child_process");
 const {
   OnboardingError,
+  runAuthAdd,
+  runAuthStatus,
   runProxyBuild,
+  runProxyStart,
   runSetup,
 } = require("../lib/onboarding");
 
@@ -138,17 +141,32 @@ async function main() {
     await runProxyBuild(raw.slice(2), log);
     return;
   }
+  if (raw[0] === "proxy" && raw[1] === "start") {
+    process.exitCode = await runProxyStart(raw.slice(2), log);
+    return;
+  }
+  if (raw[0] === "auth" && raw[1] === "add") {
+    await runAuthAdd(raw.slice(2), log);
+    return;
+  }
+  if (raw[0] === "auth" && raw[1] === "status") {
+    await runAuthStatus(raw.slice(2), log);
+    return;
+  }
 
   const args = parseArgs(raw);
   const cmd = args._[0];
   if (cmd === "install") cmdInstall(args);
   else if (cmd === "doctor") cmdDoctor();
   else {
-    log("usage: npx @parcha/parable <install|setup|doctor|proxy build|claude|agents sync> [options]");
+    log("usage: npx @parcha/parable <install|setup|doctor|auth|proxy|claude|agents sync> [options]");
     log("  install            copy the skill to ~/.claude/skills (or ./.claude/skills with --project)");
     log("  setup              create a private loopback subscription configuration");
     log("  doctor             check python/codex/config health");
+    log("  auth add VENDOR    authorize chatgpt, claude, or xai through CLIProxyAPI");
+    log("  auth status        show credential-safe provider presence and record counts");
     log("  proxy build        build the pinned, patched CLIProxyAPI source");
+    log("  proxy start        run the configured CLIProxyAPI in the foreground");
     log("  claude [ARGS...]    launch Claude Code through the configured local proxy");
     log("  agents sync        synchronize project-local parable-* custom agents");
     process.exit(cmd ? 1 : 0);
