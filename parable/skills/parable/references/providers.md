@@ -160,6 +160,27 @@ provider is unavailable.
 When the session itself is launched with `parable claude`, this same provider can carry exact
 catalog model ids exposed by a localhost Claude-compatible proxy:
 
+For a new subscription-only setup, use the CLI rather than hand-writing the
+following reference config:
+
+```bash
+parable install
+parable setup --build-proxy
+# terminal 1
+parable proxy start
+# terminal 2, in the working repository
+parable setup finalize
+parable claude -- --effort high
+```
+
+ChatGPT is mandatory for the exact Sol parent; interactive setup asks whether
+to add Claude and xAI. Headless operators can pass `--no-auth`, then use
+`parable auth add chatgpt --device`, `parable auth add claude`, and
+`parable auth add xai` for the vendors they selected. See the
+[complete first-run guide](../../../docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md).
+
+The generated TOML has this shape:
+
 ```toml
 [claude]
 base_url = "http://127.0.0.1:8317"
@@ -182,8 +203,10 @@ model = "grok-4.5"
 use_for = "Third-family implementation or review through xAI subscription OAuth."
 ```
 
-`parable agents sync` materializes those executors as exact project agents; stock Claude
-Code sends child requests to each full model id through the same endpoint. The launcher strips
+`parable setup finalize` checks the authenticated loopback catalog and then
+materializes those executors as exact project agents; stock Claude Code sends child requests to
+each full model id through the same endpoint. Finalize and launch obtain the private generated
+localhost client token without requiring a shell export, and never print it. The launcher strips
 `CLAUDE_CODE_SUBAGENT_MODEL`, because Claude Code gives that environment variable priority over
 every agent's own `model:` field and would otherwise silently route all children to the parent.
 The proxy owns provider OAuth. Parable stores no provider credential and does not implement an
@@ -211,7 +234,7 @@ Claude-to-Codex translation boundary. Its independently built binary preserved
 The patch is not an upstream release. Until CLIProxyAPI merges and releases
 the change, released `v7.2.88` users must treat non-medium effort as
 accepted-but-not-effective. Follow the
-[pinned five-minute patched-source path](../../../docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md)
+[pinned managed setup path](../../../docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md)
 for the exact build, OAuth, proxy, and Parable commands.
 
 ### Verified Grok 4.5 subscription support

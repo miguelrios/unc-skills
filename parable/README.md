@@ -132,14 +132,14 @@ provider sends the same `plan.md` through [Cursor CLI](https://cursor.com/docs/c
 [reference](skills/parable/references/providers.md), the complete
 [Cursor example](examples/parable.cursor.toml), and the other configs in `examples/`.
 
-There is also a single-harness, subscription-only path for a localhost Claude-compatible proxy:
-`parable claude` can run stock Claude Code with Sol as the brain while exact third-party model
-ids become project-local named subagents. Parable handles only declarative routing and
-per-process environment wiring; the local proxy handles each user's OAuth. No provider token is
-stored in TOML or written by Parable. See
-[`examples/parable.claude-subscriptions.toml`](examples/parable.claude-subscriptions.toml).
-For the source-pinned GPT effort fix, OAuth connection, and first Sol launch,
-follow the [five-minute CLIProxyAPI guide](docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md).
+There is also a single-harness, subscription-only path. `parable setup` builds or discovers a
+loopback CLIProxyAPI, delegates each selected user's native ChatGPT/Claude/xAI OAuth, and writes
+an exact Sol/Terra/Luna/Sonnet/Opus/Haiku/Grok cast. `parable setup finalize` checks exact
+authenticated catalog ids before it creates project-local agents; `parable claude` repeats the
+same fail-closed gate before stock Claude Code starts. No broker, shared deployment, provider API
+key, or copied OAuth credential is involved. See the
+[end-to-end setup guide](docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md) and the generated-config
+[reference](examples/parable.claude-subscriptions.toml).
 
 Minimal Cursor configuration:
 
@@ -222,18 +222,32 @@ pi install git:github.com/miguelrios/unc-skills
 curl https://cursor.com/install -fsS | bash
 export CURSOR_API_KEY="..."
 
-# standalone Claude/manual installer (adds the skill + a starter config)
-npx @parcha/parable install
-npx @parcha/parable doctor
-# after configuring [claude] and starting/authenticating your localhost proxy:
-npx @parcha/parable agents sync
-npx @parcha/parable claude
+# standalone CLI from source (npm remains 0.1.7 until the 0.1.9 release gate)
+git clone https://github.com/miguelrios/unc-skills.git
+cd unc-skills/parable
+PARABLE="$PWD/bin/parable.js"
+"$PARABLE" install
+"$PARABLE" setup --build-proxy
+
+# terminal 1: foreground local proxy
+"$PARABLE" proxy start
+
+# terminal 2, from the project Claude should work on
+cd /path/to/your/project
+"$PARABLE" setup finalize
+"$PARABLE" claude -- --effort high
 
 # manual
 git clone https://github.com/miguelrios/unc-skills && cd unc-skills/parable && ./install.sh
 ```
 
-Requirements: Claude Code, Codex, or pi as the orchestrating harness; Python 3.11+; codex CLI
+For a headless ChatGPT device flow, pass `--no-auth` to setup, then run
+`"$PARABLE" auth add chatgpt --device` plus the selected Claude/xAI auth commands. The
+[subscription guide](docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md) covers every command, generated file,
+exact model, and failure rule.
+
+Requirements: Claude Code, Codex, or pi as the orchestrating harness; Python 3.11+; Git and Go
+for the managed CLIProxyAPI build; codex CLI
 for codex-backed executors; Cursor CLI plus `CURSOR_API_KEY` for Cursor-backed executors; pi CLI
 (node 22+) for pi-backed executors.
 
@@ -246,8 +260,12 @@ runtime difference.
 
 - `skills/parable/SKILL.md`: what the brain reads — the strategy, the house rules, and the
   environment facts it can't derive on its own. Deliberately small; the method is the model's.
+- `bin/parable.js` and `lib/onboarding.js`: the dependency-free installer, private subscription
+  setup, native auth delegation, aggregate auth status, pinned proxy builder, foreground proxy
+  lifecycle, exact catalog finalizer, and stock-Claude launcher.
 - `skills/parable/scripts/parable.py`: the dispatcher, stdlib only, with `config`, `list`,
-  `claude`, `agents sync`, `run`, `resume`, `status`, `verify`, and `review` subcommands. It
+  `finalize`, `claude`, `agents sync`, `run`, `resume`, `status`, `verify`, and `review`
+  subcommands. It
   launches stock Claude Code through a configured localhost proxy, runs codex and pi headlessly
   with per-invocation provider injection, drives Cursor through `cursor-agent`, and reports
   compact run summaries the brain can read for pennies. Global Claude settings,

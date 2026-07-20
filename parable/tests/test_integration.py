@@ -383,6 +383,22 @@ class TestInstallerSmoke(unittest.TestCase):
             self.assertFalse((home / ".config" / "parable").exists())
             self.assertIn("parable setup", proc.stdout)
 
+    def test_legacy_global_install_script_does_not_create_partial_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            proc = subprocess.run(
+                ["bash", str(REPO / "install.sh")],
+                cwd=home,
+                env=os.environ | {"HOME": str(home)},
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertTrue((home / ".claude" / "skills" / "parable" / "SKILL.md").is_file())
+            self.assertFalse((home / ".config" / "parable").exists())
+            self.assertIn("bin/parable.js setup", proc.stdout)
+
 
 class TestFirstRunSetup(unittest.TestCase):
     def make_proxy(self, root: Path, name: str = "proxy") -> Path:
