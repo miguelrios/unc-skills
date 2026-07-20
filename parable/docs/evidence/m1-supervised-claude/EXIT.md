@@ -65,8 +65,9 @@ Exact model judgment remains in the existing Python reconcile path.
 - Complete Parable suite: PASS, 106/106.
 - npm pack dry-run: PASS, 33 files.
 - Privacy and diff checks: PASS.
-- Focused PR: pending.
-- Verified merged `main`: pending.
+- Focused PR: [#204](https://github.com/miguelrios/unc-skills/pull/204),
+  merged 2026-07-20T23:58:36Z.
+- Verified merged `main`: `47f7d4fb665302c39068f47afbf08c84b72ff7d8`.
 
 ## exit → M2
 
