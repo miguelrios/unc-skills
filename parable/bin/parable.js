@@ -8,9 +8,9 @@ const path = require("path");
 const { execSync, spawnSync } = require("child_process");
 const {
   OnboardingError,
-  claudeClientEnvironment,
   runAuthAdd,
   runAuthStatus,
+  runClaude,
   runProxyBuild,
   runProxyStart,
   runSetup,
@@ -22,7 +22,10 @@ const SKILL_SRC = path.join(PKG_ROOT, "skills", "parable");
 const PARABLE_PY = path.join(SKILL_SRC, "scripts", "parable.py");
 
 function log(msg) { process.stdout.write(msg + "\n"); }
-function fail(msg) { process.stderr.write("error: " + msg + "\n"); process.exit(1); }
+function fail(msg, exitCode = 1) {
+  process.stderr.write("error: " + msg + "\n");
+  process.exit(exitCode);
+}
 
 function parseArgs(argv) {
   const args = { _: [] };
@@ -132,7 +135,8 @@ function runPython(args, env = process.env) {
 async function main() {
   const raw = process.argv.slice(2);
   if (raw[0] === "claude") {
-    runPython(["claude", "--", ...raw.slice(1)], claudeClientEnvironment());
+    process.exitCode = await runClaude(raw.slice(1), log);
+    return;
   }
   if (raw[0] === "agents" && raw[1] === "sync") {
     runPython(["agents", "sync", ...raw.slice(2)]);
@@ -182,6 +186,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  if (error instanceof OnboardingError) fail(error.message);
+  if (error instanceof OnboardingError) fail(error.message, error.exitCode);
   fail(error && error.message ? error.message : String(error));
 });
