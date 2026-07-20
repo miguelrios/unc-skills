@@ -20,6 +20,9 @@ DEFAULT_MAXIMUM_BYTES = 64 * 1024 * 1024
 IDENTITY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._/@+-]{1,255}")
 MEDIA_TYPE_RE = re.compile(r"[a-z0-9][a-z0-9.+-]{0,63}/[a-z0-9][a-z0-9.+-]{0,127}")
 BUCKET_RE = re.compile(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]")
+R2_HOST_RE = re.compile(
+    r"[0-9a-f]{32}\.(?:(?:eu|fedramp)\.)?r2\.cloudflarestorage\.com"
+)
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 OBJECT_KEY_RE = re.compile(r"objects/[0-9a-f]{2}/[0-9a-f]{64}")
 ARTIFACT_ID_RE = re.compile(r"art_[0-9a-f]{32}")
@@ -483,6 +486,7 @@ class S3ArchiveStore(_ArchiveStore):
         client: S3Client,
         maximum_bytes: int = DEFAULT_MAXIMUM_BYTES,
         kms_key_id: str | None = None,
+        compatibility_profile: str = "aws",
     ) -> None:
         super().__init__(namespace_key=namespace_key, maximum_bytes=maximum_bytes)
         parsed = urlsplit(endpoint_url)
@@ -490,15 +494,63 @@ class S3ArchiveStore(_ArchiveStore):
             raise ValueError("S3 endpoint must use credential-free HTTPS")
         if parsed.query or parsed.fragment:
             raise ValueError("S3 endpoint must use credential-free HTTPS")
+        if compatibility_profile not in {"aws", "r2"}:
+            raise ValueError("S3 compatibility profile is invalid")
+        if compatibility_profile == "r2" and (
+            not R2_HOST_RE.fullmatch(parsed.hostname)
+            or parsed.port is not None
+            or parsed.path not in {"", "/"}
+        ):
+            raise ValueError("R2 endpoint is invalid")
         if not BUCKET_RE.fullmatch(bucket):
             raise ValueError("S3 bucket is invalid")
         if kms_key_id is not None and (not isinstance(kms_key_id, str) or not kms_key_id):
             raise ValueError("S3 KMS key is invalid")
+        if compatibility_profile == "r2" and kms_key_id is not None:
+            raise ValueError("R2 does not support an S3 KMS key")
         self.bucket = bucket
         self.endpoint_url = endpoint_url
         self.client = client
         self.kms_key_id = kms_key_id
+        self.compatibility_profile = compatibility_profile
         self.encryption = "sse-kms" if kms_key_id else "sse-s3"
+
+    def _version_id(self, content_sha256: str, response: dict[str, Any]) -> str:
+        if self.compatibility_profile == "r2":
+            return "r2-sha256-" + content_sha256
+        version_id = response.get("VersionId")
+        if not isinstance(version_id, str) or not version_id:
+            raise ArchiveError("archive bucket versioning is required")
+        return version_id
+
+    def _version_kwargs(self, reference: ArtifactReference) -> dict[str, str]:
+        if self.compatibility_profile != "r2":
+            return {"VersionId": reference.version_id}
+        expected = "r2-sha256-" + reference.content_sha256
+        if not hmac.compare_digest(reference.version_id, expected):
+            raise ArchiveNotFound("archive object not found")
+        return {}
+
+    def _existing_reference(
+        self,
+        request: ArchiveRequest,
+        *,
+        content_sha256: str,
+        size_bytes: int,
+        response: dict[str, Any],
+    ) -> ArtifactReference:
+        reference = self._reference(
+            request,
+            content_sha256=content_sha256,
+            size_bytes=size_bytes,
+            version_id=self._version_id(content_sha256, response),
+        )
+        if (
+            response.get("ContentLength") != size_bytes
+            or response.get("Metadata") != _metadata(reference)
+        ):
+            raise ArchiveCorruption("archive object conflicts with existing version")
+        return reference
 
     def put_stream(
         self,
@@ -528,40 +580,71 @@ class S3ArchiveStore(_ArchiveStore):
         except Exception as error:
             raise ArchiveError("archive provider request failed") from error
         else:
-            version_id = existing.get("VersionId")
-            reference = self._reference(
+            return self._existing_reference(
                 request,
                 content_sha256=content_sha256,
                 size_bytes=size_bytes,
-                version_id=version_id,
+                response=existing,
             )
-            if isinstance(version_id, str) and version_id and existing.get("Metadata") == _metadata(reference):
-                return reference
-            raise ArchiveCorruption("archive object conflicts with existing version")
         kwargs: dict[str, Any] = {
             "Bucket": self.bucket,
             "Key": pending.object_key,
             "Body": payload,
             "ContentLength": size_bytes,
             "ContentType": request.media_type,
-            "ServerSideEncryption": "aws:kms" if self.kms_key_id else "AES256",
             "Metadata": _metadata(pending),
-            "ChecksumSHA256": b64encode(hashlib.sha256(payload).digest()).decode(),
         }
-        if self.kms_key_id:
-            kwargs["SSEKMSKeyId"] = self.kms_key_id
+        if self.compatibility_profile == "r2":
+            # R2 encrypts every object at rest but rejects S3 SSE and VersionId
+            # headers. The opaque key is immutable and the conditional write
+            # prevents a concurrent overwrite.
+            kwargs["IfNoneMatch"] = "*"
+        else:
+            kwargs["ServerSideEncryption"] = (
+                "aws:kms" if self.kms_key_id else "AES256"
+            )
+            kwargs["ChecksumSHA256"] = b64encode(
+                hashlib.sha256(payload).digest()
+            ).decode()
+            if self.kms_key_id:
+                kwargs["SSEKMSKeyId"] = self.kms_key_id
         try:
             response = self.client.put_object(**kwargs)
         except Exception as error:
+            if self.compatibility_profile == "r2":
+                try:
+                    existing = self.client.head_object(
+                        Bucket=self.bucket, Key=pending.object_key,
+                    )
+                    return self._existing_reference(
+                        request,
+                        content_sha256=content_sha256,
+                        size_bytes=size_bytes,
+                        response=existing,
+                    )
+                except ArchiveCorruption:
+                    raise
+                except Exception:
+                    pass
             raise ArchiveError("archive provider request failed") from error
-        version_id = response.get("VersionId")
-        if not isinstance(version_id, str) or not version_id:
-            raise ArchiveError("archive bucket versioning is required")
-        return self._reference(
+        if self.compatibility_profile != "r2":
+            return self._reference(
+                request,
+                content_sha256=content_sha256,
+                size_bytes=size_bytes,
+                version_id=self._version_id(content_sha256, response),
+            )
+        try:
+            stored = self.client.head_object(
+                Bucket=self.bucket, Key=pending.object_key,
+            )
+        except Exception as error:
+            raise ArchiveError("archive provider request failed") from error
+        return self._existing_reference(
             request,
             content_sha256=content_sha256,
             size_bytes=size_bytes,
-            version_id=version_id,
+            response=stored,
         )
 
     def read(
@@ -573,11 +656,12 @@ class S3ArchiveStore(_ArchiveStore):
     ) -> bytes:
         self._validate_reference(reference)
         self._authorize(reference, tenant_id=tenant_id, source_id=source_id)
+        version_kwargs = self._version_kwargs(reference)
         try:
             response = self.client.get_object(
                 Bucket=self.bucket,
                 Key=reference.object_key,
-                VersionId=reference.version_id,
+                **version_kwargs,
             )
         except ArchiveNotFound:
             raise
@@ -604,21 +688,25 @@ class S3ArchiveStore(_ArchiveStore):
     ) -> bool:
         self._validate_reference(reference)
         self._authorize(reference, tenant_id=tenant_id, source_id=source_id)
+        version_kwargs = self._version_kwargs(reference)
         try:
-            self.client.head_object(
+            existing = self.client.head_object(
                 Bucket=self.bucket,
                 Key=reference.object_key,
-                VersionId=reference.version_id,
+                **version_kwargs,
             )
         except ArchiveNotFound:
             return False
         except Exception as error:
             raise ArchiveError("archive provider request failed") from error
+        _verify_metadata(reference, existing.get("Metadata"))
+        if existing.get("ContentLength") != reference.size_bytes:
+            raise ArchiveCorruption("archive metadata mismatch")
         try:
             self.client.delete_object(
                 Bucket=self.bucket,
                 Key=reference.object_key,
-                VersionId=reference.version_id,
+                **version_kwargs,
             )
         except Exception as error:
             raise ArchiveError("archive provider request failed") from error

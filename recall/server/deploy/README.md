@@ -139,9 +139,31 @@ PLANETSCALE_SERVICE_TOKEN
 RENDER_API_KEY
 RECALL_DATABASE_URL
 RECALL_EMBEDDING_API_KEY
+RECALL_ARCHIVE_ACCESS_KEY_ID
+RECALL_ARCHIVE_SECRET_ACCESS_KEY
+RECALL_ARCHIVE_NAMESPACE_KEY
 TAILSCALE_OAUTH_CLIENT_ID
 TAILSCALE_OAUTH_CLIENT_SECRET
 ```
+
+For a managed Cloudflare R2 raw archive, also set the non-secret configuration:
+
+```text
+RECALL_ARCHIVE_BACKEND=r2
+RECALL_ARCHIVE_BUCKET=recall-raw-owner
+RECALL_ARCHIVE_ENDPOINT_URL=https://ACCOUNT_ID.r2.cloudflarestorage.com
+RECALL_ARCHIVE_REGION=auto
+```
+
+The R2 credential must have Object Read & Write permission for that bucket only.
+`RECALL_ARCHIVE_NAMESPACE_KEY` is a separate base64-encoded 32-byte random key;
+do not derive it from either R2 credential. Recall uses immutable opaque object
+keys and conditional writes because R2 does not expose S3 object version IDs.
+R2 rejects S3 SSE headers and applies provider-managed encryption automatically.
+Recall does not read a Cloudflare management API token. Validate the configured
+archive with `python -m recall_server.cli archive-check`; the probe writes,
+replays, reads, deletes, and verifies absence using synthetic bytes, then emits
+only a content-free status.
 
 `RECALL_DATABASE_URL` must be a PlanetScale application role URL with
 `sslmode=verify-full` and an explicit trust root. Prefer

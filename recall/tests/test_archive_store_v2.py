@@ -100,6 +100,51 @@ class FakeS3:
         return {}
 
 
+class FakeR2:
+    def __init__(self):
+        self.objects: dict[tuple[str, str], dict] = {}
+        self.put_calls: list[dict] = []
+        self.get_calls: list[dict] = []
+        self.delete_calls: list[dict] = []
+
+    def put_object(self, **kwargs):
+        self.put_calls.append(kwargs)
+        identity = (kwargs["Bucket"], kwargs["Key"])
+        if kwargs.get("IfNoneMatch") == "*" and identity in self.objects:
+            raise RuntimeError("precondition failed")
+        self.objects[identity] = dict(kwargs)
+        return {"ETag": '"synthetic-etag"'}
+
+    def get_object(self, **kwargs):
+        self.get_calls.append(kwargs)
+        try:
+            value = self.objects[(kwargs["Bucket"], kwargs["Key"])]
+        except KeyError as error:
+            raise ArchiveNotFound("archive object not found") from error
+        return {
+            "Body": FakeBody(value["Body"]),
+            "ContentLength": value["ContentLength"],
+            "Metadata": value["Metadata"],
+            "ETag": '"synthetic-etag"',
+        }
+
+    def head_object(self, **kwargs):
+        try:
+            value = self.objects[(kwargs["Bucket"], kwargs["Key"])]
+        except KeyError as error:
+            raise ArchiveNotFound("archive object not found") from error
+        return {
+            "ContentLength": value["ContentLength"],
+            "Metadata": value["Metadata"],
+            "ETag": '"synthetic-etag"',
+        }
+
+    def delete_object(self, **kwargs):
+        self.delete_calls.append(kwargs)
+        self.objects.pop((kwargs["Bucket"], kwargs["Key"]), None)
+        return {}
+
+
 class ArchiveStoreParityTest(unittest.TestCase):
     def setUp(self) -> None:
         self.key = b"k" * 32
@@ -250,6 +295,48 @@ class ArchiveStoreParityTest(unittest.TestCase):
                 client=self.s3_client,
             )
         self.assertEqual(len(self.s3_client.put_calls), 1)
+
+    def test_r2_uses_immutable_keys_without_unsupported_s3_features(self):
+        client = FakeR2()
+        store = S3ArchiveStore(
+            bucket="recall-synthetic",
+            endpoint_url=(
+                "https://0123456789abcdef0123456789abcdef."
+                "r2.cloudflarestorage.com"
+            ),
+            namespace_key=self.key,
+            client=client,
+            compatibility_profile="r2",
+        )
+
+        first = store.put(request())
+        replay = store.put(request())
+        self.assertEqual(first, replay)
+        self.assertEqual(
+            first.version_id,
+            "r2-sha256-" + hashlib.sha256(PAYLOAD).hexdigest(),
+        )
+        call = client.put_calls[-1]
+        self.assertEqual(call["IfNoneMatch"], "*")
+        self.assertNotIn("ServerSideEncryption", call)
+        self.assertNotIn("ChecksumSHA256", call)
+        self.assertNotIn("ACL", call)
+        self.assertEqual(
+            store.read(first, tenant_id=TENANT, source_id=SOURCE),
+            PAYLOAD,
+        )
+        self.assertNotIn("VersionId", client.get_calls[-1])
+        self.assertTrue(store.delete(first, tenant_id=TENANT, source_id=SOURCE))
+        self.assertNotIn("VersionId", client.delete_calls[-1])
+
+        with self.assertRaisesRegex(ValueError, "R2 endpoint"):
+            S3ArchiveStore(
+                bucket="recall-synthetic",
+                endpoint_url="https://objects.example.test",
+                namespace_key=self.key,
+                client=client,
+                compatibility_profile="r2",
+            )
 
     def test_bounds_are_enforced_before_storage_io(self):
         oversized = b"x" * 1025
