@@ -14,7 +14,7 @@ RUN python -m pip install --no-cache-dir --disable-pip-version-check --no-compil
 COPY --chown=10001:10001 server/recall_server /opt/recall/recall_server
 COPY --chown=10001:10001 server/schema /opt/recall/schema
 COPY --chown=10001:10001 contracts /opt/contracts
-COPY --chown=10001:10001 connectors /opt/recall/connectors
+COPY --chown=10001:10001 connectors /opt/connectors
 COPY --chown=10001:10001 privacy /opt/recall/privacy
 COPY --chown=10001:10001 skills/recall/scripts/recall.py /opt/skills/recall/scripts/recall.py
 

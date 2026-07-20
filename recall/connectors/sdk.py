@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 from client.mac import canonical_envelope
 from contracts.v2 import ContractError, validate_contract
 from privacy.policy import PrivacyPolicy, summarize_receipts
+from connectors.record_contract import TYPED_RECORD_FIELDS
 
 
 CONNECTOR_SCHEMA_VERSION = 1
@@ -261,42 +262,6 @@ def _timestamp(value: str) -> str:
     if parsed.tzinfo is None:
         raise ConnectorContractError("occurred_at must include a timezone")
     return value
-
-
-def _load_typed_record_fields() -> dict[str, dict[str, Any]]:
-    path = Path(__file__).resolve().parents[1] / "contracts" / "connector_v2.json"
-    try:
-        value = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError) as error:
-        raise RuntimeError("connector v2 contract is unavailable") from error
-    if not isinstance(value, dict) or value.get("schema_version") != 2:
-        raise RuntimeError("connector v2 contract is invalid")
-    kinds = value.get("record_kinds")
-    if not isinstance(kinds, dict) or not kinds:
-        raise RuntimeError("connector v2 contract is invalid")
-    result = {}
-    for kind, schema in kinds.items():
-        if (
-            not isinstance(kind, str) or not isinstance(schema, dict)
-            or set(schema) != {"required", "optional", "properties"}
-            or not isinstance(schema["required"], list)
-            or not isinstance(schema["optional"], list)
-            or not isinstance(schema["properties"], dict)
-        ):
-            raise RuntimeError("connector v2 contract is invalid")
-        required = set(schema["required"])
-        optional = set(schema["optional"])
-        if (
-            "kind" not in required or required & optional
-            or required | optional != set(schema["properties"])
-        ):
-            raise RuntimeError("connector v2 contract is invalid")
-        properties = _json_copy(schema["properties"], "connector v2 properties")
-        result[kind] = {"required": required, "optional": optional, "properties": properties}
-    return result
-
-
-TYPED_RECORD_FIELDS = _load_typed_record_fields()
 
 
 def _validate_typed_value(value: Any, specification: dict[str, Any]) -> bool:

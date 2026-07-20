@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from privacy.policy import PrivacyPolicy
-from connectors.sdk import TYPED_RECORD_FIELDS
+from connectors.record_contract import TYPED_RECORD_FIELDS
 
 
 IDENTITY = re.compile(r"[a-z][a-z0-9_.-]{2,63}\Z")
