@@ -60,8 +60,8 @@ coverage moved from zero to 3/3 and real tool coverage from zero to 3/3.
 - JSON invariants: PASS.
 - Complete Parable suite: PASS, 81/81.
 - Local Claudio-Michel review: 5/5.
-- Focused PR: pending.
-- Verified merged `main`: pending.
+- Focused PR: [#155](https://github.com/miguelrios/unc-skills/pull/155).
+- Verified merged `main`: `f29851b75d60c0e7dc11a95dd6c16766e8ad4d09`.
 
 ## exit → X3
 
