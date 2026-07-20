@@ -505,6 +505,19 @@ class CollectorTest(unittest.TestCase):
                     "created_at": kwargs["created_at"],
                 }
 
+        class Writer:
+            def ingest(self, events):
+                return {
+                    "status": "committed",
+                    "inserted": len(events),
+                    "duplicate_events": 0,
+                    "receipts": [
+                        f"recall://{event['source_id']}/{event['native_id']}?rev=1"
+                        for event in events
+                    ],
+                    "replay": False,
+                }
+
         collector = Collector(
             root=self.root,
             harness="claude",
@@ -514,7 +527,7 @@ class CollectorTest(unittest.TestCase):
             token="test-token-not-a-secret",
             principal_id="owner",
             privacy=PrivacyPolicy(mode="scrub"),
-            brain_writer=object(),
+            brain_writer=Writer(),
             archive=Archive(),
             tenant_id="tenant:personal",
             archive_workers=1,
@@ -662,6 +675,79 @@ class CollectorTest(unittest.TestCase):
         self.assertEqual(collector.doctor()["pending"], 1)
         self.assertEqual(collector.flush()["acked"], 1)
         collector.close()
+
+    def test_canonical_scan_flushes_durable_backlog_before_new_source_work(self) -> None:
+        transcript = self.root / "session.jsonl"
+        transcript.write_text(claude_line("durable backlog"))
+        legacy = self.collector()
+        self.assertEqual(legacy.scan()["records_queued"], 1)
+        legacy.close()
+        transcript.write_text(
+            claude_line("durable backlog") + claude_line("new source work")
+        )
+        archived = 0
+        ingested: list[dict] = []
+
+        class Archive:
+            def put_raw(inner, **kwargs):
+                nonlocal archived
+                archived += 1
+                if archived == 2:
+                    self.assertEqual(
+                        len(ingested),
+                        1,
+                        "durable backlog must be indexed before new source work",
+                    )
+                digest = hashlib.sha256(kwargs["payload"]).hexdigest()
+                return {
+                    "contract": "recall.artifact-ref.v1",
+                    "schema_version": 1,
+                    "tenant_id": kwargs["tenant_id"],
+                    "source_id": kwargs["source_id"],
+                    "artifact_id": "art_" + digest[:32],
+                    "storage_backend": "s3",
+                    "object_key": "objects/aa/" + digest,
+                    "content_sha256": digest,
+                    "size_bytes": len(kwargs["payload"]),
+                    "media_type": kwargs["media_type"],
+                    "encryption": "sse-s3",
+                    "version_id": "synthetic-version",
+                    "created_at": kwargs["created_at"],
+                }
+
+        class Writer:
+            def ingest(self, events):
+                ingested.extend(events)
+                return {
+                    "status": "committed",
+                    "inserted": len(events),
+                    "duplicate_events": 0,
+                    "receipts": [
+                        f"recall://{event['source_id']}/{event['native_id']}?rev=1"
+                        for event in events
+                    ],
+                    "replay": False,
+                }
+
+        canonical = Collector(
+            root=self.root,
+            harness="claude",
+            source_id="claude:linux:test",
+            spool_path=self.spool,
+            endpoint=self.endpoint,
+            token="test-token-not-a-secret",
+            principal_id="owner",
+            privacy=PrivacyPolicy(mode="scrub"),
+            brain_writer=Writer(),
+            archive=Archive(),
+            tenant_id="tenant:personal",
+            archive_workers=1,
+        )
+
+        self.assertEqual(canonical.scan()["records_queued"], 1)
+        self.assertEqual(canonical.doctor()["acked"], 1)
+        self.assertEqual(canonical.doctor()["pending"], 1)
+        canonical.close()
 
     def test_enabling_drop_compacts_sensitive_pending_bytes_from_legacy_spool(self) -> None:
         canary = "synthetic-legacy-spool-canary-95"

@@ -291,6 +291,8 @@ class Collector:
         summary = {"files_seen": 0, "records_queued": 0, "tombstones_queued": 0,
                    "parse_errors": 0, "partial_files": 0}
         privacy_receipts = []
+        if self.brain_writer is not None:
+            self.flush()
         executor = (
             ThreadPoolExecutor(max_workers=self.archive_workers)
             if self.archive is not None and self.archive_workers > 1
