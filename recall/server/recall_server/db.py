@@ -9,7 +9,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ProcessPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -267,6 +267,215 @@ class BrainStore:
             )
             return bool(row)
 
+    def provision_brain(
+        self,
+        *,
+        organization_id: str,
+        organization_kind: str,
+        display_name: str,
+        tenant_id: str,
+        brain_kind: str,
+        slug: str,
+        owner_principal_id: str,
+    ) -> dict[str, str]:
+        values = (organization_id, tenant_id, owner_principal_id)
+        if (
+            any(not isinstance(value, str) or not V2_AUTHORITY_RE.fullmatch(value)
+                for value in values)
+            or organization_kind not in {"personal", "company"}
+            or brain_kind != organization_kind
+            or not isinstance(display_name, str)
+            or not 1 <= len(display_name) <= 200
+            or not isinstance(slug, str)
+            or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", slug)
+        ):
+            raise ValueError("invalid brain provisioning request")
+        with self.connect() as conn:
+            with conn.transaction():
+                conn.execute(
+                    """INSERT INTO brain_organizations(
+                           organization_id,organization_kind,display_name
+                       ) VALUES (%s,%s,%s)
+                       ON CONFLICT(organization_id) DO UPDATE SET
+                         display_name=excluded.display_name
+                       WHERE brain_organizations.organization_kind=
+                             excluded.organization_kind""",
+                    (organization_id, organization_kind, display_name),
+                )
+                conn.execute(
+                    """INSERT INTO brain_tenants(tenant_id)
+                       VALUES (%s) ON CONFLICT DO NOTHING""",
+                    (tenant_id,),
+                )
+                conn.execute(
+                    """INSERT INTO brain_principals(tenant_id,principal_id)
+                       VALUES (%s,%s) ON CONFLICT DO NOTHING""",
+                    (tenant_id, owner_principal_id),
+                )
+                conn.execute(
+                    """INSERT INTO brain_spaces(
+                           tenant_id,organization_id,brain_kind,slug
+                       ) VALUES (%s,%s,%s,%s)
+                       ON CONFLICT(tenant_id) DO NOTHING""",
+                    (tenant_id, organization_id, brain_kind, slug),
+                )
+                conn.execute(
+                    """INSERT INTO brain_memberships(
+                           organization_id,principal_id,role
+                       ) VALUES (%s,%s,'owner')
+                       ON CONFLICT(organization_id,principal_id)
+                       DO UPDATE SET role='owner'""",
+                    (organization_id, owner_principal_id),
+                )
+                conn.execute(
+                    """INSERT INTO brain_access_grants(
+                           tenant_id,principal_id,permission
+                       ) VALUES (%s,%s,'owner')
+                       ON CONFLICT(tenant_id,principal_id)
+                       DO UPDATE SET permission='owner'""",
+                    (tenant_id, owner_principal_id),
+                )
+                configured = conn.execute(
+                    """SELECT organization.organization_kind,space.brain_kind,
+                              space.organization_id,space.slug
+                       FROM brain_spaces space
+                       JOIN brain_organizations organization
+                         USING(organization_id)
+                       WHERE space.tenant_id=%s""",
+                    (tenant_id,),
+                ).fetchone()
+                if (
+                    configured is None
+                    or configured["organization_id"] != organization_id
+                    or configured["organization_kind"] != organization_kind
+                    or configured["brain_kind"] != brain_kind
+                    or configured["slug"] != slug
+                ):
+                    raise ValueError("brain provisioning conflict")
+        return {
+            "organization_id": organization_id,
+            "organization_kind": organization_kind,
+            "tenant_id": tenant_id,
+            "brain_kind": brain_kind,
+            "slug": slug,
+            "owner_principal_id": owner_principal_id,
+        }
+
+    def grant_canonical_source(
+        self,
+        *,
+        tenant_id: str,
+        principal_id: str,
+        source_id: str,
+        permission: str = "read",
+    ) -> None:
+        if (
+            any(
+                not isinstance(value, str)
+                or not V2_AUTHORITY_RE.fullmatch(value)
+                for value in (tenant_id, principal_id, source_id)
+            )
+            or permission not in {"owner", "read"}
+        ):
+            raise ValueError("invalid canonical source grant")
+        with self.connect() as conn:
+            with conn.transaction():
+                brain_access = conn.execute(
+                    """SELECT 1 FROM brain_access_grants
+                       WHERE tenant_id=%s AND principal_id=%s
+                         AND permission IN ('owner','admin','read')""",
+                    (tenant_id, principal_id),
+                ).fetchone()
+                source = conn.execute(
+                    """SELECT 1 FROM canonical_sources
+                       WHERE tenant_id=%s AND source_id=%s""",
+                    (tenant_id, source_id),
+                ).fetchone()
+                if not brain_access or not source:
+                    raise ValueError("canonical source grant authority missing")
+                conn.execute(
+                    """INSERT INTO canonical_source_grants(
+                           tenant_id,principal_id,source_id,permission
+                       ) VALUES (%s,%s,%s,%s)
+                       ON CONFLICT(tenant_id,principal_id,source_id)
+                       DO UPDATE SET permission=excluded.permission""",
+                    (tenant_id, principal_id, source_id, permission),
+                )
+
+    def create_mcp_token(
+        self,
+        name: str,
+        *,
+        tenant_id: str,
+        principal_id: str,
+        scopes: list[str] | None = None,
+        expires_in_days: int = 30,
+    ) -> dict[str, Any]:
+        scopes = list(scopes or ["read"])
+        if (
+            not isinstance(name, str)
+            or not name
+            or not isinstance(tenant_id, str)
+            or not V2_AUTHORITY_RE.fullmatch(tenant_id)
+            or not isinstance(principal_id, str)
+            or not V2_AUTHORITY_RE.fullmatch(principal_id)
+            or not isinstance(expires_in_days, int)
+            or isinstance(expires_in_days, bool)
+            or not 1 <= expires_in_days <= 365
+            or not scopes
+            or len(scopes) != len(set(scopes))
+            or "read" not in scopes
+            or set(scopes) - {"read", "forget"}
+        ):
+            raise ValueError("invalid MCP credential")
+        plaintext = "rcl_" + secrets.token_urlsafe(32)
+        digest = hashlib.sha256(plaintext.encode()).hexdigest()
+        credential_id = uuid.uuid4()
+        expires_at = datetime.now(timezone.utc) + timedelta(days=expires_in_days)
+        with self.connect() as conn:
+            access = conn.execute(
+                """SELECT 1 FROM brain_access_grants
+                   WHERE tenant_id=%s AND principal_id=%s
+                     AND permission IN ('owner','admin','read')""",
+                (tenant_id, principal_id),
+            ).fetchone()
+            if not access:
+                raise ValueError("MCP brain access missing")
+            conn.execute(
+                """INSERT INTO mcp_credentials(
+                       id,name,token_sha256,tenant_id,principal_id,
+                       audience,scopes,expires_at
+                   ) VALUES (%s,%s,%s,%s,%s,'recall-mcp',%s,%s)""",
+                (
+                    credential_id,
+                    name,
+                    digest,
+                    tenant_id,
+                    principal_id,
+                    scopes,
+                    expires_at,
+                ),
+            )
+        return {
+            "id": str(credential_id),
+            "name": name,
+            "token": plaintext,
+            "tenant_id": tenant_id,
+            "principal_id": principal_id,
+            "audience": "recall-mcp",
+            "scopes": scopes,
+            "expires_at": expires_at.isoformat(),
+        }
+
+    def revoke_mcp_token(self, name: str) -> bool:
+        with self.connect() as conn:
+            row = conn.execute(
+                """UPDATE mcp_credentials SET revoked_at=now()
+                   WHERE name=%s AND revoked_at IS NULL RETURNING id""",
+                (name,),
+            ).fetchone()
+        return bool(row)
+
     def set_source_profile(self, value: SourceProfile | dict[str, Any]) -> dict[str, Any]:
         profile = value if isinstance(value, SourceProfile) else SourceProfile.from_mapping(value)
         with self.connect() as conn:
@@ -372,11 +581,24 @@ class BrainStore:
                    WHERE token_sha256=%s AND revoked_at IS NULL""",
                 (digest,),
             ).fetchone()
-            if not row or required_scope not in row["scopes"]:
+            if row:
+                if required_scope not in row["scopes"]:
+                    return None
+                if required_scope == "webhook" and set(row["scopes"]) != {"webhook"}:
+                    return None
+                return {**row, "credential_kind": "collector", "audience": None}
+            mcp = conn.execute(
+                """SELECT id,name,tenant_id,NULL::text AS source_id,
+                          principal_id,NULL::text AS capture_origin,
+                          NULL::text AS webhook_privacy_mode,scopes,audience
+                   FROM mcp_credentials
+                   WHERE token_sha256=%s AND revoked_at IS NULL
+                     AND expires_at>now() AND audience='recall-mcp'""",
+                (digest,),
+            ).fetchone()
+            if not mcp or required_scope not in mcp["scopes"]:
                 return None
-            if required_scope == "webhook" and set(row["scopes"]) != {"webhook"}:
-                return None
-            return row
+            return {**mcp, "credential_kind": "mcp"}
 
     def authorized_source_ids(self, principal_id: str) -> list[str]:
         if not isinstance(principal_id, str) or not principal_id:
@@ -388,6 +610,36 @@ class BrainStore:
                    WHERE principal_id=%s AND permission IN ('owner','read')
                    ORDER BY source_id""",
                 (principal_id,),
+            ).fetchall()
+        return [row["source_id"] for row in rows]
+
+    def authorized_canonical_source_ids(
+        self,
+        tenant_id: str,
+        principal_id: str,
+    ) -> list[str]:
+        if (
+            not isinstance(tenant_id, str)
+            or not V2_AUTHORITY_RE.fullmatch(tenant_id)
+            or not isinstance(principal_id, str)
+            or not V2_AUTHORITY_RE.fullmatch(principal_id)
+        ):
+            return []
+        with self.connect() as conn:
+            brain_access = conn.execute(
+                """SELECT 1 FROM brain_access_grants
+                   WHERE tenant_id=%s AND principal_id=%s
+                     AND permission IN ('owner','admin','read')""",
+                (tenant_id, principal_id),
+            ).fetchone()
+            if not brain_access:
+                return []
+            rows = conn.execute(
+                """SELECT source_id FROM canonical_source_grants
+                   WHERE tenant_id=%s AND principal_id=%s
+                     AND permission IN ('owner','read')
+                   ORDER BY source_id""",
+                (tenant_id, principal_id),
             ).fetchall()
         return [row["source_id"] for row in rows]
 

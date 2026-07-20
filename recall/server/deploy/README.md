@@ -61,7 +61,7 @@ infrastructure. The example is synthetic; a live manifest belongs in a private m
 location and contains references, never credential values.
 
 The production database gate requires a standard PostgreSQL URL with
-`sslmode=verify-full` and an explicit trust root, schema migrations 1 through 27,
+`sslmode=verify-full` and an explicit trust root, schema migrations 1 through 28,
 pgvector 0.8.0 or newer, and a runtime role without superuser, database/role creation,
 replication, or RLS-bypass privilege:
 
@@ -184,6 +184,28 @@ runner archives raw bytes through the fenced archive route, applies privacy,
 writes only the redacted envelope to its private spool, and advances its cursor
 only after the canonical ACK. Do not enable this flag on an MCP-only service
 that has no collector ingress.
+
+After canonical ingestion is live, provision each personal or company brain and
+mint a separate audience-bound MCP credential:
+
+```bash
+python -m recall_server.cli brain-provision \
+  --organization org:owner --kind personal --display-name "Personal" \
+  --tenant tenant:personal --slug personal --owner-principal principal:owner
+python -m recall_server.cli mcp-token-create owner-personal \
+  --tenant tenant:personal --principal principal:owner \
+  --scopes read,forget \
+  --output /approved/private/owner-personal-mcp.json
+```
+
+Set `RECALL_CANONICAL_MCP_ENABLED=1` only after migration 28 and canonical
+embedding backfill pass. In this mode, public MCP accepts only unexpired
+`recall-mcp` credentials bound to one tenant. Retrieval intersects brain access
+with explicit canonical source grants and never reads the legacy evidence
+projection. A single principal can hold separate personal and company
+credentials without gaining an implicit cross-brain view. Omit the optional
+`forget` scope for read-only agents; canonical forget also requires an owner
+grant on the exact source.
 
 `RECALL_DATABASE_URL` must be a PlanetScale application role URL with
 `sslmode=verify-full` and an explicit trust root. Prefer

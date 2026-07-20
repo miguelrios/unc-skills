@@ -107,7 +107,7 @@ READ_TOOLS = (
     {
         "name": "recall_search",
         "description": (
-            "Search the owner's authorized Recall evidence using a natural-language "
+            "Search the authorized Recall brain using a natural-language "
             "question. Results include stable recall:// receipts for follow-up."
         ),
         "inputSchema": {
@@ -242,8 +242,20 @@ def _write_enabled(principal: dict) -> bool:
     )
 
 
+def _canonical_forget_enabled(principal: dict) -> bool:
+    return (
+        principal.get("credential_kind") == "mcp"
+        and principal.get("audience") == "recall-mcp"
+        and "forget" in principal.get("scopes", ())
+    )
+
+
 def _tools_for(principal: dict) -> tuple[dict, ...]:
-    return READ_TOOLS + (WRITE_TOOLS if _write_enabled(principal) else ())
+    if _write_enabled(principal):
+        return READ_TOOLS + WRITE_TOOLS
+    if _canonical_forget_enabled(principal):
+        return READ_TOOLS + (WRITE_TOOLS[1],)
+    return READ_TOOLS
 
 
 def _reject_extra(arguments: dict, allowed: frozenset[str]) -> None:
@@ -336,11 +348,13 @@ def _call_tool(store, principal: dict, name: str, arguments: dict) -> dict:
         )
         return store.capture(principal, arguments)
     if name == "recall_forget":
-        if not _write_enabled(principal):
-            raise McpProtocolError(-32602, "unknown tool")
         _reject_extra(arguments, frozenset({"receipt"}))
         receipt = _string(arguments.get("receipt"), "receipt")
-        return store.forget_capture(principal, receipt)
+        if _canonical_forget_enabled(principal):
+            return store.forget(receipt)
+        if _write_enabled(principal):
+            return store.forget_capture(principal, receipt)
+        raise McpProtocolError(-32602, "unknown tool")
     raise McpProtocolError(-32602, "unknown tool")
 
 
@@ -393,7 +407,7 @@ def dispatch(store, principal: dict, message: Any) -> dict | None:
             "serverInfo": {
                 "name": "recall",
                 "version": "1",
-                "description": "Private, source-scoped personal evidence retrieval.",
+                "description": "Private, tenant- and source-scoped evidence retrieval.",
             },
         }
     elif method == "ping":

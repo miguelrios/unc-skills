@@ -20,6 +20,7 @@ from .canonical import (
     CanonicalLifecycleError,
     CanonicalPlane,
 )
+from .canonical_retrieval import CanonicalRetrieval
 from .db import BrainStore, IdempotencyConflict
 from .mcp import (
     SUPPORTED_PROTOCOL_VERSIONS,
@@ -49,6 +50,7 @@ class Handler(BaseHTTPRequestHandler):
     store: BrainStore
     archive_store = None
     canonical_plane: CanonicalPlane | None = None
+    canonical_retrieval: CanonicalRetrieval | None = None
 
     def log_message(self, fmt: str, *args) -> None:
         LOG.info(
@@ -153,20 +155,37 @@ class Handler(BaseHTTPRequestHandler):
             )
             if not credential:
                 return None
+            credential_kind = credential.get("credential_kind", "collector")
+            if (
+                scope == "read"
+                and os.environ.get("RECALL_CANONICAL_MCP_ENABLED") == "1"
+                and credential_kind != "mcp"
+            ):
+                return None
             principal = {
-                "kind": "collector",
+                "kind": credential_kind,
+                "credential_kind": credential_kind,
                 "name": credential["name"],
                 "tenant_id": credential.get("tenant_id"),
                 "source_id": credential["source_id"],
                 "principal_id": credential.get("principal_id"),
+                "audience": credential.get("audience"),
                 "capture_origin": credential.get("capture_origin"),
                 "webhook_privacy_mode": credential.get("webhook_privacy_mode"),
                 "scopes": list(credential.get("scopes", [])),
             }
             if credential.get("principal_id") and scope == "read":
-                principal["authorized_sources"] = self.store.authorized_source_ids(
-                    credential["principal_id"]
-                )
+                if credential_kind == "mcp":
+                    principal["authorized_sources"] = (
+                        self.store.authorized_canonical_source_ids(
+                            credential.get("tenant_id"),
+                            credential["principal_id"],
+                        )
+                    )
+                else:
+                    principal["authorized_sources"] = self.store.authorized_source_ids(
+                        credential["principal_id"]
+                    )
             return principal
         if (
             os.environ.get("RECALL_TRUST_TAILSCALE_HEADERS", "0") == "1"
@@ -473,6 +492,18 @@ class Handler(BaseHTTPRequestHandler):
                     principal_id=principal_id,
                     events=events,
                 )
+                if self.canonical_retrieval is not None:
+                    try:
+                        self.canonical_retrieval.embed_pending(
+                            tenant_id=tenant_id,
+                            batch_size=min(500, max(1, len(events))),
+                            max_batches=1,
+                        )
+                    except Exception as exc:
+                        LOG.warning(
+                            "canonical embedding deferred type=%s",
+                            type(exc).__name__,
+                        )
                 with COUNTER_LOCK:
                     COUNTERS[
                         "ingest_replays"
@@ -581,7 +612,12 @@ class Handler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(length))
                 if isinstance(body, dict):
                     request_id = body.get("id")
-                response = dispatch_mcp(self.store, principal, body)
+                mcp_store = self.store
+                if os.environ.get("RECALL_CANONICAL_MCP_ENABLED") == "1":
+                    if self.canonical_retrieval is None:
+                        raise RuntimeError("canonical retrieval unavailable")
+                    mcp_store = self.canonical_retrieval.bind(principal)
+                response = dispatch_mcp(mcp_store, principal, body)
             except json.JSONDecodeError:
                 self.send_json(
                     400,
@@ -749,6 +785,13 @@ def validate_http_profile() -> None:
         raise RuntimeError(
             "public canonical ingest requires authentication and canonical v2"
         )
+    if os.environ.get("RECALL_CANONICAL_MCP_ENABLED") == "1" and (
+        os.environ.get("RECALL_AUTH_REQUIRED", "0") != "1"
+        or os.environ.get("RECALL_CANONICAL_V2_ENABLED") != "1"
+    ):
+        raise RuntimeError(
+            "canonical MCP requires authentication and canonical v2"
+        )
     if profile in {"public-edge", "public-mcp"}:
         if os.environ.get("RECALL_AUTH_REQUIRED", "0") != "1":
             raise RuntimeError("public HTTP profile requires authentication")
@@ -764,9 +807,15 @@ def configure_runtime(dsn: str) -> None:
             Handler.store,
             Handler.archive_store,
         )
+        Handler.canonical_retrieval = (
+            CanonicalRetrieval(Handler.store, Handler.archive_store)
+            if os.environ.get("RECALL_CANONICAL_MCP_ENABLED") == "1"
+            else None
+        )
     else:
         Handler.archive_store = None
         Handler.canonical_plane = None
+        Handler.canonical_retrieval = None
 
 
 def serve(dsn: str, host: str = "127.0.0.1", port: int = 8788) -> None:
