@@ -3,9 +3,11 @@
 ## Public MCP deployment profile
 
 `RenderPublicMcpAdapter` creates one digest-pinned Render `web_service` with managed HTTPS,
-`/readyz` health checks, bearer authentication, and `RECALL_HTTP_PROFILE=public-mcp`. The
-application therefore exposes only `/mcp`, `/healthz`, and `/readyz`; no Tailscale gateway,
-OAuth credential, REST ingest route, metrics route, or doctor route is part of this profile.
+`/readyz` health checks, bearer authentication, and `RECALL_HTTP_PROFILE=public-mcp`. By
+default the application exposes only `/mcp`, `/healthz`, and `/readyz`; no Tailscale gateway,
+REST ingest route, metrics route, or doctor route is part of this profile. The separately
+gated `RECALL_ADMIN_WEB_ENABLED=1` setting adds only `/admin` assets, authenticated
+`/admin/api/v1` routes, and the one-time OAuth callback described below.
 
 PlanetScale IP restrictions require stable egress. `RenderDedicatedIpAdapter` models Render's
 separate dedicated-IP resource and refuses to create it unless `purchase_approved` is explicitly
@@ -61,7 +63,7 @@ infrastructure. The example is synthetic; a live manifest belongs in a private m
 location and contains references, never credential values.
 
 The production database gate requires a standard PostgreSQL URL with
-`sslmode=verify-full` and an explicit trust root, schema migrations 1 through 28,
+`sslmode=verify-full` and an explicit trust root, schema migrations 1 through 29,
 pgvector 0.8.0 or newer, and a runtime role without superuser, database/role creation,
 replication, or RLS-bypass privilege:
 
@@ -206,6 +208,58 @@ projection. A single principal can hold separate personal and company
 credentials without gaining an implicit cross-brain view. Omit the optional
 `forget` scope for read-only agents; canonical forget also requires an owner
 grant on the exact source.
+
+## Unified connector administration
+
+Schema 029 adds one tenant-aware connector control plane for the web switchboard
+and native utilities. A connector installation is always bound to one principal,
+one destination brain, and one opaque source ID. Connecting the same provider to
+personal and company memory creates separate installations; it never implies a
+cross-brain grant.
+
+Enable the browser surface only after injecting all of these through the runtime
+secret manager:
+
+```text
+RECALL_ADMIN_WEB_ENABLED=1
+RECALL_CONTROL_ENCRYPTION_KEY=<base64url-encoded random 32 bytes>
+RECALL_GOOGLE_CLIENT_ID=<Google web application client ID>
+RECALL_GOOGLE_CLIENT_SECRET=<Google web application client secret>
+RECALL_GOOGLE_REDIRECT_URI=https://<public-host>/admin/oauth/callback/google
+```
+
+The encryption key is independent of database, archive, Google, and MCP
+credentials. Keep it stable for the lifetime of encrypted provider connections;
+rotate it with an explicit decrypt/re-encrypt migration, never by silently
+replacing the variable. Google must register the redirect URI exactly. Recall
+requests offline access, incremental authorization, PKCE, one-time server-side
+state, `openid`, and only the read-only scopes for the source toggles selected by
+the owner. Workspace administrators may still need to trust the OAuth client,
+and public distributions must complete Google's applicable sensitive-scope
+verification.
+
+Mint an audience-specific bootstrap key into a new owner-private file:
+
+```bash
+python -m recall_server.cli admin-token-create owner-web \
+  --principal principal:owner --expires-in-days 30 \
+  --output /approved/private/recall-admin.json
+```
+
+Open `/admin`, paste the one-time key into the access dialog, then choose a brain
+for each Google service before authorization. The browser exchanges the key for
+a twelve-hour Secure, HttpOnly, SameSite session and a CSRF-bound companion
+cookie. OAuth refresh and access tokens are encrypted with AES-256-GCM in the
+database, never returned by the state API, and cryptographically wiped after
+provider disconnection. Pause preserves the installation checkpoint; revoking
+one installation disables only that routed source, while disconnecting Google
+revokes provider authority for every dependent route. Uninstall removes the
+route from the active map.
+
+Native clients use the same versioned `/admin/api/v1` session, state, OAuth, and
+lifecycle contract. They must store the bootstrap or browser-session authority
+in the operating-system credential store and must not copy provider tokens out
+of Recall.
 
 `RECALL_DATABASE_URL` must be a PlanetScale application role URL with
 `sslmode=verify-full` and an explicit trust root. Prefer

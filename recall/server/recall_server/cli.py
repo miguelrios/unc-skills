@@ -13,6 +13,7 @@ from .archive import ArchiveError
 from .archive_runtime import build_archive_store, probe_archive
 from .capabilities import CapabilityError, probe_database
 from .canonical_retrieval import CanonicalRetrieval
+from .control import ControlPlane, SecretBox
 from .db import BrainStore
 from .deployment import DeploymentManifestError, load_manifest, preview
 from .federation import QUALITY_SCORES, SOURCE_FAMILIES
@@ -135,6 +136,13 @@ def main() -> None:
     create_mcp_token.add_argument("--output", required=True)
     revoke_mcp_token = sub.add_parser("mcp-token-revoke")
     revoke_mcp_token.add_argument("name")
+    create_admin_token = sub.add_parser("admin-token-create")
+    create_admin_token.add_argument("name")
+    create_admin_token.add_argument("--principal", required=True)
+    create_admin_token.add_argument("--expires-in-days", type=int, default=30)
+    create_admin_token.add_argument("--output", required=True)
+    revoke_admin_token = sub.add_parser("admin-token-revoke")
+    revoke_admin_token.add_argument("name")
     source_profile = sub.add_parser("source-profile-set")
     source_profile.add_argument("source_id")
     source_profile.add_argument(
@@ -406,6 +414,38 @@ def main() -> None:
         )
     elif args.command == "mcp-token-revoke":
         print(json.dumps({"revoked": store.revoke_mcp_token(args.name)}))
+    elif args.command == "admin-token-create":
+        credential = ControlPlane(
+            store, SecretBox.from_env(), {}
+        ).create_admin_token(
+            args.name,
+            principal_id=args.principal,
+            expires_in_days=args.expires_in_days,
+        )
+        payload = (json.dumps(credential, sort_keys=True) + "\n").encode()
+        descriptor = os.open(
+            args.output,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(payload)
+        print(
+            json.dumps(
+                {key: value for key, value in credential.items() if key != "token"},
+                sort_keys=True,
+            )
+        )
+    elif args.command == "admin-token-revoke":
+        print(
+            json.dumps(
+                {
+                    "revoked": ControlPlane(
+                        store, SecretBox.from_env(), {}
+                    ).revoke_admin_token(args.name)
+                }
+            )
+        )
     elif args.command == "source-profile-set":
         print(
             json.dumps(
