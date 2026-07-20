@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "loop": "Y0",
+  "captured_at_utc": "2026-07-20T06:49:00Z",
+  "parable_baseline_head": "f78903e73abe183a970d80c0fc4a0e7f162031a2",
+  "matrix": {
+    "parent_model": "gpt-5.6-sol",
+    "parent_efforts": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ],
+    "child_lanes": [
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
+      "grok-4.5",
+      "sonnet_exact_id_pending_catalog",
+      "opus_exact_id_pending_catalog",
+      "haiku_exact_id_pending_catalog"
+    ],
+    "total_cells": 30,
+    "merged_grok_cells": 5,
+    "pending_chatgpt_cells": 10,
+    "pending_claude_cells": 15
+  },
+  "auth_inventory": {
+    "cliproxyapi_codex_oauth_records": 1,
+    "cliproxyapi_xai_oauth_records": 1,
+    "cliproxyapi_claude_oauth_records": 0,
+    "native_claude_logged_in": true,
+    "native_claude_auth_method": "claude.ai",
+    "next_autonomous_rows": [
+      "gpt-5.6-terra",
+      "gpt-5.6-luna"
+    ],
+    "later_human_gate": "cliproxyapi_standard_claude_oauth"
+  },
+  "routing": {
+    "broker_used": false,
+    "shared_deployment_used": false,
+    "credential_copy_used": false,
+    "direct_provider_api_key_used": false,
+    "kimi_state": "PAUSED",
+    "model_turns_spent": 0
+  },
+  "safety": {
+    "credential_material_committed": false,
+    "oauth_state_committed": false,
+    "account_identifier_committed": false,
+    "callback_url_committed": false,
+    "private_path_committed": false
+  }
+}
