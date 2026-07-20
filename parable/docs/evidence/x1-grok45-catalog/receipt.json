@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "loop": "X1",
+  "captured_at_utc": "2026-07-20T06:09:25Z",
+  "parable_baseline_head": "1b6603eda96268772601a68e4ad23cd929b7fa4b",
+  "runtime": {
+    "cliproxyapi_upstream_release": "v7.2.88",
+    "cliproxyapi_upstream_commit": "93d74a890a44802f656d7f39a573916b2611896e",
+    "cliproxyapi_local_fix_commit": "ad20a87efbbd41a9d4f24c83ca8bdd934bf34ab7",
+    "cliproxyapi_binary_sha256": "139e1305a878e08026dd0fb6d85a3817801f32e40a40c1954ea1973c5bb9d697",
+    "loopback_address": "127.0.0.1",
+    "dedicated_port": 18317,
+    "local_model_catalog": true
+  },
+  "probe": {
+    "endpoint": "/v1/models",
+    "http_status": 200,
+    "authenticated": true,
+    "total_models": 23,
+    "model_turns_spent": 0,
+    "targets": [
+      {
+        "id": "grok-4.5",
+        "owned_by": "xai",
+        "count": 1
+      },
+      {
+        "id": "gpt-5.6-sol",
+        "owned_by": "openai",
+        "count": 1
+      },
+      {
+        "id": "gpt-5.6-terra",
+        "owned_by": "openai",
+        "count": 1
+      },
+      {
+        "id": "gpt-5.6-luna",
+        "owned_by": "openai",
+        "count": 1
+      }
+    ]
+  },
+  "routing": {
+    "grok_provider": "xai",
+    "grok_auth_kind": "oauth",
+    "gpt_provider": "openai",
+    "gpt_auth_kind": "oauth",
+    "xai_api_key_set": false,
+    "openai_api_key_set": false,
+    "anthropic_api_key_set": false
+  },
+  "safety": {
+    "local_proxy_key_committed": false,
+    "credential_material_committed": false,
+    "oauth_state_committed": false,
+    "account_identifier_committed": false,
+    "raw_catalog_committed": false,
+    "private_path_committed": false
+  }
+}
