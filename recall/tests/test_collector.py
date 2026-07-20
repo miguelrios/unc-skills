@@ -398,6 +398,56 @@ class CollectorTest(unittest.TestCase):
         self.assertEqual(starts, sorted(starts))
         collector.close()
 
+    def test_canonical_scan_stops_at_observed_size_when_source_is_appended(self) -> None:
+        source = self.root / "session.jsonl"
+        source.write_text(claude_line("first"))
+        archived = []
+
+        class Archive:
+            def put_raw(inner, **kwargs):
+                archived.append(kwargs["payload"])
+                if len(archived) == 1:
+                    with source.open("a") as output:
+                        output.write(claude_line("appended-during-scan"))
+                digest = hashlib.sha256(kwargs["payload"]).hexdigest()
+                return {
+                    "contract": "recall.artifact-ref.v1",
+                    "schema_version": 1,
+                    "tenant_id": kwargs["tenant_id"],
+                    "source_id": kwargs["source_id"],
+                    "artifact_id": "art_" + digest[:32],
+                    "storage_backend": "s3",
+                    "object_key": "objects/aa/" + digest,
+                    "content_sha256": digest,
+                    "size_bytes": len(kwargs["payload"]),
+                    "media_type": kwargs["media_type"],
+                    "encryption": "sse-s3",
+                    "version_id": "synthetic-version",
+                    "created_at": kwargs["created_at"],
+                }
+
+        collector = Collector(
+            root=self.root,
+            harness="claude",
+            source_id="claude:linux:test",
+            spool_path=self.spool,
+            endpoint=self.endpoint,
+            token="test-token-not-a-secret",
+            principal_id="owner",
+            privacy=PrivacyPolicy(mode="scrub"),
+            brain_writer=object(),
+            archive=Archive(),
+            tenant_id="tenant:personal",
+            archive_workers=1,
+        )
+        first = collector.scan()
+        self.assertEqual(first["records_queued"], 1)
+        self.assertEqual(len(archived), 1)
+        second = collector.scan()
+        self.assertEqual(second["records_queued"], 1)
+        self.assertEqual(len(archived), 2)
+        collector.close()
+
     def test_enabling_drop_compacts_sensitive_pending_bytes_from_legacy_spool(self) -> None:
         canary = "synthetic-legacy-spool-canary-95"
         (self.root / "session.jsonl").write_text(claude_line("legacy pending row"))
