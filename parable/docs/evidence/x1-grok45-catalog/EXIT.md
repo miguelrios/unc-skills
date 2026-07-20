@@ -52,7 +52,7 @@ from unproved to one; model turns remain zero.
 - JSON invariants: PASS.
 - Local Claudio-Michel review: 5/5.
 - Focused PR: [#152](https://github.com/miguelrios/unc-skills/pull/152).
-- Verified merged `main`: pending.
+- Verified merged `main`: `77bca7a078a2b41c5764e0837f4af84d98cca6d2`.
 
 ## exit → X2
 
