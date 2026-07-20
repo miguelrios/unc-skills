@@ -57,8 +57,8 @@ locally.
 - Content boundary: PASS.
 - Complete Parable suite: PASS, 81/81.
 - Local Claudio-Michel review: 5/5.
-- Focused PR: pending.
-- Verified merged `main`: pending.
+- Focused PR: [#178](https://github.com/miguelrios/unc-skills/pull/178).
+- Verified merged `main`: `014b835dd30d5d210ac4e4b5c3318a1c49d3c2e5`.
 
 ## exit → Y3
 
