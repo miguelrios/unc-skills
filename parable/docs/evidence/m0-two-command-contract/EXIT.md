@@ -50,8 +50,9 @@ broker, background installer, or second routing engine.
 - JSON parse and privacy boundary: PASS.
 - Complete Parable baseline: PASS, 99/99.
 - npm pack dry-run: PASS, 33 files.
-- Focused PR: pending.
-- Verified merged `main`: pending.
+- Focused PR: [#202](https://github.com/miguelrios/unc-skills/pull/202),
+  merged 2026-07-20T23:46:16Z.
+- Verified merged `main`: `15023494ef55cea41865d6b41ba4cf628a0dc4ca`.
 
 ## exit → M1
 
