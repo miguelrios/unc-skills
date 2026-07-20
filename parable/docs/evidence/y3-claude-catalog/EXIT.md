@@ -52,8 +52,8 @@ guess is used.
 - JSON invariants: PASS.
 - Complete Parable suite: PASS, 81/81.
 - Local Claudio-Michel review: 5/5.
-- Focused PR: pending.
-- Verified merged `main`: pending.
+- Focused PR: [#180](https://github.com/miguelrios/unc-skills/pull/180).
+- Verified merged `main`: `86baadd141d82f812123a1f31e5d381c8c6274b3`.
 
 ## exit → Y4
 
