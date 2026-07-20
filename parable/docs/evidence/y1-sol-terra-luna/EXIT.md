@@ -65,8 +65,8 @@ MEASURE is cumulative matrix coverage: 15/30 cells are now live-proved.
 - JSON invariants: PASS.
 - Complete Parable suite: PASS, 81/81.
 - Local Claudio-Michel review: 5/5.
-- Focused PR: pending.
-- Verified merged `main`: pending.
+- Focused PR: [#165](https://github.com/miguelrios/unc-skills/pull/165).
+- Verified merged `main`: `a73fc5e34545439102b0c41ad08a733ca13427b3`.
 
 ## exit → Y2
 
