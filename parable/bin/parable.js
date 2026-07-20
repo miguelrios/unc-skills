@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/* parable installer/doctor/launcher. Node 18+, no dependencies. */
+/* Parable installer, subscription onboarding, doctor, and launcher. Node 18+, no dependencies. */
 "use strict";
 
 const fs = require("fs");

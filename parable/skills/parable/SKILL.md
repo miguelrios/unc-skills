@@ -29,8 +29,11 @@ fake runtime parity. With no configured checks, `parable-verify.sh` passes vacuo
 user declares some.
 
 When the config contains `[claude]`, the session should have been entered through
-`parable claude`. Arbitrary-model Claude executors are synchronized as project-local native
-agents named `parable-<normalized-executor-id>`; `parable-config.sh` prints the exact
+`parable claude`. A first-run subscription setup uses `parable setup`, native
+`parable auth add` commands, foreground `parable proxy start`, and then
+`parable setup finalize` in the working repository. Arbitrary-model Claude executors are
+synchronized as project-local native agents named `parable-<normalized-executor-id>`;
+`parable-config.sh` prints the exact
 `agent=` name beside each one. Invoke that named agent through the Agent tool. Claude Code's
 built-in model aliases remain normal model-selected subagents.
 
@@ -76,8 +79,9 @@ this tool exists to prevent. The per-pool selection detail lives in `references/
   `parable-config.sh`; for a bare Claude alias, use a general-purpose agent with the executor's
   model. If there is no native agent-spawn tool, that executor is unavailable; choose a
   CLI-backed executor.
-- `parable agents sync` — idempotently synchronize Parable-owned project agents from TOML.
-  `parable claude [ARGS...]` does this automatically after checking the local model catalog,
+- `parable setup finalize` — authenticate to the loopback catalog with the private generated
+  client token, require every exact configured id, and idempotently synchronize Parable-owned
+  project agents from TOML. `parable claude [ARGS...]` repeats that exact catalog gate and sync,
   then launches the configured brain model. These are package CLI commands, not skill scripts.
 - `scripts/parable-resume.sh <run-dir> "<message>"` — continue an executor's existing session
   (caching economics: facts below). Sessions do not transfer between executors.

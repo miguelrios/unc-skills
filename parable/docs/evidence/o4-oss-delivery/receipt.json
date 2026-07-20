@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "loop": "O4",
+  "captured_at": "2026-07-20T23:10:07Z",
+  "status": "complete",
+  "live_read_only_smoke": {
+    "endpoint": "/v1/models",
+    "http_status": 200,
+    "catalog_model_count": 37,
+    "exact_expected_counts": {
+      "gpt-5.6-sol": 1,
+      "gpt-5.6-terra": 1,
+      "gpt-5.6-luna": 1,
+      "claude-sonnet-5": 1,
+      "claude-opus-4-8": 1,
+      "claude-haiku-4-5-20251001": 1,
+      "grok-4.5": 1
+    },
+    "all_expected_exactly_once": true,
+    "http_requests": 1,
+    "model_turns": 0,
+    "oauth_flows": 0,
+    "provider_record_mutations": 0,
+    "temporary_proxy_starts": 1,
+    "temporary_proxy_stops": 1,
+    "listener_closed_after_smoke": true
+  },
+  "hermetic_live_agreement": {
+    "parent_model": "gpt-5.6-sol",
+    "named_agent_count": 6,
+    "exact_required_model_count": 7,
+    "agree": true
+  },
+  "delivery": {
+    "canonical_path": [
+      "source install",
+      "setup and optional managed build",
+      "native selected-vendor auth",
+      "foreground proxy start",
+      "exact catalog finalize in project",
+      "stock Claude launch on Sol"
+    ],
+    "readme_updated": true,
+    "setup_guide_updated": true,
+    "provider_reference_updated": true,
+    "skill_reference_updated": true,
+    "help_output_updated": true,
+    "legacy_installer_aligned": true,
+    "companion_html": "parable-oss-subscription-onboarding-2026-07-20.html",
+    "companion_html_desktop_render": "pass",
+    "companion_html_mobile_render": "pass"
+  },
+  "package": {
+    "source_version": "0.1.9",
+    "npm_registry_version": "0.1.7",
+    "complete_tests": "99/99",
+    "npm_pack_dry_run": "pass",
+    "packed_files": 33,
+    "publish_authorized": false,
+    "publish_executed": false,
+    "human_gate_command": "npm publish --access public"
+  },
+  "bounds": {
+    "evidence_failures": 0,
+    "instrument_failures": 1,
+    "instrument_failure": "The initial broad process-name probe matched its own shell command; the listener check correctly showed no running proxy and the controlled smoke used an exact process match for shutdown.",
+    "review_rounds": 2,
+    "review_round_limit": 3
+  },
+  "privacy": {
+    "contains_raw_local_client_token": false,
+    "contains_provider_token_or_record": false,
+    "contains_oauth_url_or_callback": false,
+    "contains_account_identifier": false,
+    "contains_catalog_payload": false,
+    "contains_private_path": false,
+    "contains_transcript": false
+  }
+}
