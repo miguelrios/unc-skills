@@ -441,14 +441,17 @@ def remote_execute(args) -> tuple[str, dict]:
             raise RemoteRecallError("search response has no results list")
         lines = []
         for rank, result in enumerate(results[:args.limit], 1):
+            target = result.get("path") or result.get("receipt")
+            if not isinstance(target, str) or not target:
+                raise RemoteRecallError("search result has no resolvable target")
             if args.paths:
-                lines.append(str(result["path"]))
+                lines.append(target)
                 continue
             terms = ",".join(str(value) for value in result.get("matched_terms", []))
             legs = ",".join(sorted(str(value) for value in result.get("legs", [])))
             snippet = re.sub(r"\s+", " ", str(result.get("text", "")))[:200]
             lines.append(
-                f"{rank}. {result['path']}\n"
+                f"{rank}. {target}\n"
                 f"   {result.get('occurred_at') or '-'} cwd={result.get('cwd') or '-'} "
                 f"slot={result.get('slot') or '-'} branch={result.get('branch') or '-'}\n"
                 f"   [{result.get('surface') or '-'}] {snippet}\n"
