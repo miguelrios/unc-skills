@@ -333,6 +333,80 @@ class CollectorTest(unittest.TestCase):
         self.assertNotIn(canary.encode(), self.spool.read_bytes())
         collector.close()
 
+    def test_canonical_flush_repairs_and_bounds_legacy_pending_rows(self) -> None:
+        (self.root / "session.jsonl").write_text(
+            "".join(claude_line(f"legacy pending row {index}") for index in range(51))
+        )
+        legacy = self.collector()
+        self.assertEqual(legacy.scan()["records_queued"], 51)
+        self.assertTrue(all(
+            "artifact_ref" not in envelope["provenance"]
+            for envelope in legacy.pending_envelopes()
+        ))
+        legacy.close()
+        archived = []
+        ingested = []
+        batch_sizes = []
+
+        class Archive:
+            def put_raw(self, **kwargs):
+                archived.append(kwargs)
+                digest = hashlib.sha256(kwargs["payload"]).hexdigest()
+                return {
+                    "contract": "recall.artifact-ref.v1",
+                    "schema_version": 1,
+                    "tenant_id": kwargs["tenant_id"],
+                    "source_id": kwargs["source_id"],
+                    "artifact_id": "art_" + digest[:32],
+                    "storage_backend": "s3",
+                    "object_key": "objects/aa/" + digest,
+                    "content_sha256": digest,
+                    "size_bytes": len(kwargs["payload"]),
+                    "media_type": kwargs["media_type"],
+                    "encryption": "sse-s3",
+                    "version_id": "synthetic-version",
+                    "created_at": kwargs["created_at"],
+                }
+
+        class Writer:
+            def ingest(self, events):
+                batch_sizes.append(len(events))
+                ingested.extend(events)
+                return {
+                    "status": "committed",
+                    "inserted": len(events),
+                    "duplicate_events": 0,
+                    "receipts": [
+                        f"recall://{event['source_id']}/{event['native_id']}?rev=1"
+                        for event in events
+                    ],
+                    "replay": False,
+                }
+
+        canonical = Collector(
+            root=self.root,
+            harness="claude",
+            source_id="claude:linux:test",
+            spool_path=self.spool,
+            endpoint=self.endpoint,
+            token="test-token-not-a-secret",
+            principal_id="owner",
+            privacy=PrivacyPolicy(mode="scrub"),
+            brain_writer=Writer(),
+            archive=Archive(),
+            tenant_id="tenant:personal",
+        )
+
+        self.assertEqual(canonical.flush()["acked"], 51)
+        self.assertEqual(len(archived), 51)
+        self.assertEqual(len(ingested), 51)
+        self.assertEqual(batch_sizes, [50, 1])
+        self.assertTrue(all(
+            "artifact_ref" in event["provenance"]
+            for event in ingested
+        ))
+        canonical.close()
+
     def test_canonical_scan_archives_concurrently_but_spools_in_source_order(self) -> None:
         (self.root / "session.jsonl").write_text(
             "".join(claude_line(f"record-{index}") for index in range(12))
