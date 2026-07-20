@@ -75,8 +75,9 @@ credential adapter.
 - npm pack dry-run: PASS, 33 files.
 - Desktop/mobile companion renders: PASS.
 - Local Claudio-Michel review: 5/5.
-- Focused PR: pending.
-- Verified merged `main`: pending.
+- Focused PR: [#199](https://github.com/miguelrios/unc-skills/pull/199),
+  merged 2026-07-20T23:13:41Z.
+- Verified merged `main`: `2596278bcde21141ddcb9e74cff8adb114c49ae6`.
 
 ## exit → human release verdict
 
