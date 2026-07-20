@@ -204,6 +204,35 @@ accepted-but-not-effective. Follow the
 [pinned five-minute patched-source path](../../../docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md)
 for the exact build, OAuth, proxy, and Parable commands.
 
+### Verified Grok 4.5 subscription support
+
+The same patched localhost build exposes exact `grok-4.5` through per-user
+xAI OAuth; no `XAI_API_KEY`, broker, or shared deployment is involved. With
+stock Claude Code `2.1.215`, Grok completed 5/5 main-model text cells and 3/3
+real Bash canaries. `low|medium|high` are exact. Claude's `xhigh|max` reach
+CLIProxyAPI intact and clamp to Grok's supported `high`.
+
+A generated custom executor routes exact named agent `parable-grok`:
+
+```toml
+[executors.grok]
+provider = "claude"
+model = "grok-4.5"
+use_for = "Third-family implementation or adversarial review."
+```
+
+Sol invoked that agent successfully at all five parent effort values. Claude
+Code inherited the parent effort into every child request; Grok preserved the
+three supported values and clamped `xhigh|max` to `high`. The
+[main-model receipt](../../../docs/evidence/x2-grok45-main-permutations/receipt.json)
+and [named-child receipt](../../../docs/evidence/x3-sol-grok-named-subagent/receipt.json)
+record exact model attribution, real tool use, deterministic artifacts, and
+separate ChatGPT/xAI OAuth routes.
+
+This xAI OAuth route is distinct from Parable's Cursor executor. Cursor uses a
+Cursor plan and `cursor-agent`; it is not the Grok child route inside Claude
+Code.
+
 ## Reading subscription headroom (parable-usage.sh)
 
 Each subscription pool publishes its own remaining headroom over an authenticated endpoint the
