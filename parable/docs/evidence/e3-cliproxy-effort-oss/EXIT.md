@@ -86,7 +86,7 @@ vendor, or magic installer is added. The guide exposes every pin and boundary.
 
 - Parable tests: 81/81 PASS in an isolated HOME.
 - Local Claudio-Michel review: 5/5.
-- Focused delivery PR: pending.
+- Focused delivery PR: [#148](https://github.com/miguelrios/unc-skills/pull/148).
 - Verified merged `main`: pending.
 
 ## exit → E4
