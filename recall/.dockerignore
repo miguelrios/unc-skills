@@ -5,7 +5,6 @@ tests/
 tests_node/
 client/
 collector/
-connectors/
 evals/
 legacy/
 scripts/
