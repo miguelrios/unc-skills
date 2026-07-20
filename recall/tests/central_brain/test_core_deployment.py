@@ -344,6 +344,22 @@ class ContainerContractTest(unittest.TestCase):
         )
         self.assertNotIn("context: .", workflow)
 
+    def test_image_publication_tracks_every_runtime_copy_input(self) -> None:
+        workflow = (
+            RECALL.parent / ".github" / "workflows" / "recall-image.yml"
+        ).read_text()
+        for runtime_input in (
+            "recall/server/**",
+            "recall/contracts/**",
+            "recall/connectors/**",
+            "recall/client/**",
+            "recall/collector/**",
+            "recall/privacy/**",
+            "recall/scripts/install_gws.py",
+            "recall/skills/recall/scripts/recall.py",
+        ):
+            self.assertIn(f'"{runtime_input}"', workflow)
+
     def test_image_has_pinned_base_nonroot_runtime_and_content_free_healthcheck(
         self,
     ) -> None:

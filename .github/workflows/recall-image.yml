@@ -13,7 +13,10 @@ on:
       - "recall/server/**"
       - "recall/contracts/**"
       - "recall/connectors/**"
+      - "recall/client/**"
+      - "recall/collector/**"
       - "recall/privacy/**"
+      - "recall/scripts/install_gws.py"
       - "recall/skills/recall/scripts/recall.py"
       - ".github/workflows/recall-image.yml"
   workflow_dispatch:
