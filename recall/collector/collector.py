@@ -291,6 +291,8 @@ class Collector:
         )
         try:
             for path in self.discover():
+                if summary["files_seen"] and self.brain_writer is not None:
+                    self.flush()
                 summary["files_seen"] += 1
                 stat = path.stat()
                 path_text = str(path)
