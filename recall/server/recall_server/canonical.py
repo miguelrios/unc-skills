@@ -11,6 +11,9 @@ from contracts.v2 import ContractError, IDENTITY_RE, validate_contract
 from .db import BrainStore
 from .projectors import validate_envelope
 
+MAX_CANONICAL_TEXT_BYTES = 8_000_000
+MAX_CANONICAL_CHUNK_BYTES = 24_000
+
 
 class CanonicalLifecycleError(RuntimeError):
     """Stable, content-free failure at a v2 lifecycle boundary."""
@@ -44,6 +47,36 @@ def _identity_sha256(tenant_id: str, source_id: str, native_id: str) -> str:
 def _opaque(prefix: str, *values: str) -> str:
     digest = hashlib.sha256("\x1f".join(values).encode()).hexdigest()
     return f"{prefix}_{digest[:32]}"
+
+
+def canonical_text_chunks(text: str) -> list[str]:
+    """Split retrieval text into lossless, embedding-safe UTF-8 chunks."""
+    if not isinstance(text, str):
+        raise TypeError("canonical text must be a string")
+    encoded = text.encode()
+    if not encoded:
+        return [""]
+    chunks: list[str] = []
+    offset = 0
+    while offset < len(encoded):
+        end = min(offset + MAX_CANONICAL_CHUNK_BYTES, len(encoded))
+        while end < len(encoded) and end > offset and encoded[end] & 0xC0 == 0x80:
+            end -= 1
+        if end == offset:
+            raise ValueError("canonical chunk boundary is invalid")
+        candidate = encoded[offset:end].decode()
+        if end < len(encoded):
+            window_start = max(0, len(candidate) - 2_048)
+            split = max(
+                candidate.rfind("\n", window_start),
+                candidate.rfind(" ", window_start),
+            )
+            if split >= window_start:
+                candidate = candidate[: split + 1]
+                end = offset + len(candidate.encode())
+        chunks.append(candidate)
+        offset = end
+    return chunks
 
 
 def _timestamp(value: Any) -> str:
@@ -202,7 +235,10 @@ class CanonicalPlane:
         self._validate_host_identity(tenant_id, principal_id, envelope.get("source_id"))
         if not isinstance(connector_id, str) or not IDENTITY_RE.fullmatch(connector_id):
             raise CanonicalLifecycleError("canonical_connector_invalid")
-        if not isinstance(text_redacted, str) or len(text_redacted.encode()) > 1_000_000:
+        if (
+            not isinstance(text_redacted, str)
+            or len(text_redacted.encode()) > MAX_CANONICAL_TEXT_BYTES
+        ):
             raise CanonicalLifecycleError("canonical_text_invalid")
         try:
             artifact = validate_contract(
@@ -226,8 +262,12 @@ class CanonicalPlane:
         event_id = _opaque("evt", tenant_id, source_id, native_id, raw_sha256)
         job_id = _opaque("job", tenant_id, source_id, connector_id, event_id)
         document_id = _opaque("doc", tenant_id, source_id, event_id)
-        chunk_id = _opaque("chk", tenant_id, source_id, document_id, "0")
         text_sha256 = hashlib.sha256(text_redacted.encode()).hexdigest()
+        chunk_texts = (
+            []
+            if is_tombstone
+            else canonical_text_chunks(text_redacted)
+        )
 
         with self.store.connect() as conn:
             with conn.transaction():
@@ -366,16 +406,35 @@ class CanonicalPlane:
                             text_redacted, text_sha256,
                         ),
                     )
-                    conn.execute(
-                        """INSERT INTO canonical_chunks(
-                               tenant_id,source_id,chunk_id,document_id,ordinal,receipt,
-                               text_redacted,text_sha256
-                           ) VALUES (%s,%s,%s,%s,0,%s,%s,%s)""",
-                        (
-                            tenant_id, source_id, chunk_id, document_id, receipt,
-                            text_redacted, text_sha256,
-                        ),
-                    )
+                    with conn.cursor() as cursor:
+                        cursor.executemany(
+                            """INSERT INTO canonical_chunks(
+                                   tenant_id,source_id,chunk_id,document_id,ordinal,
+                                   receipt,text_redacted,text_sha256
+                               ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+                            [
+                                (
+                                    tenant_id,
+                                    source_id,
+                                    _opaque(
+                                        "chk",
+                                        tenant_id,
+                                        source_id,
+                                        document_id,
+                                        str(ordinal),
+                                    ),
+                                    document_id,
+                                    ordinal,
+                                    (
+                                        f"recall://{source_id}/{native_id}"
+                                        f"?rev={revision}#item={ordinal}"
+                                    ),
+                                    chunk_text,
+                                    hashlib.sha256(chunk_text.encode()).hexdigest(),
+                                )
+                                for ordinal, chunk_text in enumerate(chunk_texts)
+                            ],
+                        )
                 conn.execute(
                     """INSERT INTO canonical_audit_events(
                            tenant_id,source_id,audit_id,operation,status,
