@@ -24,6 +24,7 @@ from client.mcp import McpServer, serve as serve_mcp
 from client.macos_utility import (
     SOURCE_SPECS,
     MacUtilityError,
+    apply_route,
     disable_source,
     mac_status,
     pause_source,
@@ -463,6 +464,15 @@ def parser() -> argparse.ArgumentParser:
     mac_route.add_argument(
         "--launch-agents", default=str(Path.home() / "Library" / "LaunchAgents")
     )
+    mac_route_apply = commands.add_parser("mac-route-apply")
+    mac_route_apply.add_argument(
+        "--source", choices=tuple(SOURCE_SPECS), required=True
+    )
+    mac_route_apply.add_argument("--tenant-id", required=True)
+    mac_route_apply.add_argument("--principal-id", required=True)
+    mac_route_apply.add_argument(
+        "--launch-agents", default=str(Path.home() / "Library" / "LaunchAgents")
+    )
 
     mac_revoke = commands.add_parser("mac-revoke")
     mac_revoke.add_argument("--source", choices=tuple(SOURCE_SPECS), required=True)
@@ -608,6 +618,18 @@ def main() -> None:
         try:
             result = route_info(
                 args.source, launch_agents=Path(args.launch_agents)
+            )
+        except MacUtilityError as error:
+            raise SystemExit(str(error)) from None
+        print(json.dumps(result, sort_keys=True))
+        return
+    if args.command == "mac-route-apply":
+        try:
+            result = apply_route(
+                args.source,
+                launch_agents=Path(args.launch_agents),
+                tenant_id=args.tenant_id,
+                principal_id=args.principal_id,
             )
         except MacUtilityError as error:
             raise SystemExit(str(error)) from None

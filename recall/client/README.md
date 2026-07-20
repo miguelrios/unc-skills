@@ -78,6 +78,9 @@ content, or exception:
 ```bash
 recall-brain mac-status
 recall-brain mac-pause --source cowork
+recall-brain mac-route-info --source cowork
+recall-brain mac-route-apply --source cowork \
+  --tenant-id tenant:personal --principal-id principal:owner
 recall-brain mac-resume --source cowork
 recall-brain mac-disable --source cowork
 recall-brain mac-support
@@ -93,6 +96,10 @@ not claim to delete—evidence already committed to the central Brain; central
 deletion requires an authenticated server-side receipt/source operation.
 `mac-support` reports only closed health and package-integrity aggregates: no
 paths, credentials, content, cursors, or exception text.
+`mac-route-apply` is normally driven by the native switchboard after the server
+creates a source-scoped route. It atomically retains the LaunchAgent while
+binding that collector to the canonical tenant writer; the next resume writes
+raw objects through the configured archive and ACKs only after canonical ingest.
 
 The bundle also carries a SwiftUI owner utility. Build it on an Apple Silicon
 Mac with Xcode 16 or newer:
@@ -105,8 +112,9 @@ open "macos_admin/dist/Recall Brain.app"
 The Mac switchboard uses the same `/admin/api/v1` contract as the web UI. It
 stores the owner key and source credentials only in Keychain. Pausing retains
 the exact LaunchAgent and checkpoint. Changing a destination atomically revokes
-the prior device route, installs a new write-only source credential, and sends
-subsequent ingestion to the chosen personal or company brain.
+the prior device route, installs a new write-only source credential, binds the
+retained LaunchAgent to that canonical tenant/principal, and sends subsequent
+ingestion to the chosen personal or company brain.
 
 Only already configured collectors are actionable. Selecting source paths,
 granting Full Disk Access, and importing archives remain explicit install-time

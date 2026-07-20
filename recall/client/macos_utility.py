@@ -7,9 +7,11 @@ import json
 import os
 import math
 import plistlib
+import re
 import sqlite3
 import stat
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -75,6 +77,9 @@ SOURCE_SPECS = {
 
 class MacUtilityError(ValueError):
     """A closed error that never includes a local path or private database value."""
+
+
+ROUTE_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._/@+-]{1,255}\Z")
 
 
 def _regular(path: Path) -> bool:
@@ -347,6 +352,90 @@ def route_info(name: str, *, launch_agents: Path) -> dict[str, Any]:
         "keychain_service": _option(arguments, "--keychain-service"),
         "keychain_account": _option(arguments, "--keychain-account"),
         "privacy_mode": _option(arguments, "--privacy-mode"),
+    }
+
+
+def apply_route(
+    name: str,
+    *,
+    launch_agents: Path,
+    tenant_id: str,
+    principal_id: str,
+) -> dict[str, Any]:
+    """Atomically bind one retained LaunchAgent to the canonical tenant writer."""
+
+    if (
+        name not in SOURCE_SPECS
+        or not isinstance(tenant_id, str)
+        or not ROUTE_IDENTITY.fullmatch(tenant_id)
+        or not isinstance(principal_id, str)
+        or not ROUTE_IDENTITY.fullmatch(principal_id)
+    ):
+        raise MacUtilityError("canonical_route_invalid")
+    path = Path(launch_agents) / f"{SOURCE_SPECS[name].label}.plist"
+    arguments = _plist_arguments(path)
+    _option(arguments, "--source-id")
+    try:
+        principal_index = arguments.index("--principal-id") + 1
+        if principal_index >= len(arguments):
+            raise ValueError
+    except ValueError:
+        raise MacUtilityError("canonical_route_apply_failed") from None
+    try:
+        parent = path.parent
+        parent_details = parent.lstat()
+        if stat.S_ISLNK(parent_details.st_mode) or not stat.S_ISDIR(
+            parent_details.st_mode
+        ):
+            raise OSError
+        with path.open("rb") as source:
+            value = plistlib.load(source)
+        environment = value.get("EnvironmentVariables")
+        if (
+            not isinstance(value, dict)
+            or not isinstance(environment, dict)
+            or len(environment) > 64
+            or not all(
+                isinstance(key, str) and isinstance(item, str)
+                for key, item in environment.items()
+            )
+        ):
+            raise ValueError
+        environment = dict(environment)
+        environment.update(
+            {
+                "RECALL_CANONICAL_V2_ENABLED": "1",
+                "RECALL_TENANT_ID": tenant_id,
+                "RECALL_PRINCIPAL_ID": principal_id,
+            }
+        )
+        arguments = list(arguments)
+        arguments[principal_index] = principal_id
+        value["ProgramArguments"] = arguments
+        value["EnvironmentVariables"] = environment
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".recall-route-", suffix=".plist", dir=parent
+        )
+        temporary = Path(temporary_name)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "wb") as output:
+                plistlib.dump(value, output, sort_keys=True)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+    except MacUtilityError:
+        raise
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        raise MacUtilityError("canonical_route_apply_failed") from None
+    return {
+        "schema_version": 1,
+        "mode": "mac-route-apply",
+        "source": name,
+        "canonical_v2": True,
+        "configuration_retained": True,
     }
 
 

@@ -11,6 +11,8 @@ from unittest import mock
 from client.cli import parser
 from client.macos_utility import (
     SOURCE_SPECS,
+    MacUtilityError,
+    apply_route,
     disable_source,
     mac_status,
     pause_source,
@@ -156,13 +158,17 @@ class MacUtilityLifecycleTest(unittest.TestCase):
         spec = SOURCE_SPECS["codex"]
         path = self.agents / f"{spec.label}.plist"
         with path.open("wb") as output:
-            plistlib.dump({"ProgramArguments": [
-                "runtime", "-m", "client.cli", "collect",
-                "--source-id", "codex:mac:synthetic",
-                "--keychain-service", "ai.parcha.recall",
-                "--keychain-account", "codex:mac:synthetic",
-                "--privacy-mode", "scrub",
-            ]}, output)
+            plistlib.dump({
+                "ProgramArguments": [
+                    "runtime", "-m", "client.cli", "collect",
+                    "--source-id", "codex:mac:synthetic",
+                    "--principal-id", "owner",
+                    "--keychain-service", "ai.parcha.recall",
+                    "--keychain-account", "codex:mac:synthetic",
+                    "--privacy-mode", "scrub",
+                ],
+                "EnvironmentVariables": {},
+            }, output)
         original = path.read_bytes()
 
         paused = pause_source(
@@ -189,12 +195,55 @@ class MacUtilityLifecycleTest(unittest.TestCase):
             "keychain_account": "codex:mac:synthetic",
             "privacy_mode": "scrub",
         })
+        applied = apply_route(
+            "codex",
+            launch_agents=self.agents,
+            tenant_id="tenant:personal",
+            principal_id="principal:owner",
+        )
+        self.assertTrue(applied["canonical_v2"])
+        configured = plistlib.loads(path.read_bytes())
+        expected_arguments = plistlib.loads(original)["ProgramArguments"]
+        expected_arguments[
+            expected_arguments.index("--principal-id") + 1
+        ] = "principal:owner"
+        self.assertEqual(configured["ProgramArguments"], expected_arguments)
+        self.assertEqual(
+            configured["EnvironmentVariables"],
+            {
+                "RECALL_CANONICAL_V2_ENABLED": "1",
+                "RECALL_TENANT_ID": "tenant:personal",
+                "RECALL_PRINCIPAL_ID": "principal:owner",
+            },
+        )
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        routed = path.read_bytes()
         resumed = resume_source(
             "codex", prefix=self.prefix, launch_agents=self.agents, no_load=True,
         )
         self.assertTrue(resumed["enabled"])
         self.assertFalse(marker.exists())
-        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(path.read_bytes(), routed)
+
+    def test_route_apply_rejects_invalid_authority_and_symlink(self) -> None:
+        self._enable("codex")
+        with self.assertRaisesRegex(MacUtilityError, "canonical_route_invalid"):
+            apply_route(
+                "codex",
+                launch_agents=self.agents,
+                tenant_id="../personal",
+                principal_id="principal:owner",
+            )
+        path = self.agents / f"{SOURCE_SPECS['codex'].label}.plist"
+        path.unlink()
+        path.symlink_to(self.home / "outside.plist")
+        with self.assertRaisesRegex(MacUtilityError, "invalid_launch_agent"):
+            apply_route(
+                "codex",
+                launch_agents=self.agents,
+                tenant_id="tenant:personal",
+                principal_id="principal:owner",
+            )
 
     def test_revoke_disables_source_deletes_only_its_keychain_reference(self) -> None:
         self._enable("cowork")
