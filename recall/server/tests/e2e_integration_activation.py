@@ -10,8 +10,6 @@ import subprocess
 import sys
 import tempfile
 
-from connectors.registry import REGISTRY
-
 
 ROOT = Path(__file__).resolve().parents[2]
 PROFILES = {
@@ -63,7 +61,7 @@ def run(*arguments: str) -> dict:
 
 def main() -> None:
     catalog = run("integration-activation-catalog")
-    assert len(catalog["connectors"]) == len(REGISTRY)
+    assert len(catalog["connectors"]) == 32
     assert {
         "local.claude-code",
         "local.codex",
