@@ -43,6 +43,7 @@ from .webhooks import WEBHOOK_PATH, WebhookError, build_webhook_event
 
 LOG = logging.getLogger("recall.brainstore")
 MAX_BODY_BYTES = 12 * 1024 * 1024
+MAX_CANONICAL_EVENTS_BYTES = 8_000_000
 MAX_ADMIN_BODY_BYTES = 64 * 1024
 ADMIN_INSTALLATION_ACTION = re.compile(
     r"/admin/api/v1/installations/([0-9a-f-]{36})/actions\Z"
@@ -738,6 +739,22 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 tenant_id, principal_id, source_id = authority
                 events = body.get("events")
+                encoded_events = body.get("events_base64")
+                if encoded_events is not None:
+                    if events is not None or not isinstance(encoded_events, str):
+                        self.send_json(
+                            400,
+                            {"error": "canonical ingest request invalid"},
+                        )
+                        return
+                    decoded_events = base64.b64decode(
+                        encoded_events,
+                        validate=True,
+                    )
+                    if len(decoded_events) > MAX_CANONICAL_EVENTS_BYTES:
+                        self.send_json(413, {"error": "request body too large"})
+                        return
+                    events = json.loads(decoded_events)
                 if (
                     not isinstance(events, list)
                     or any(
@@ -778,7 +795,7 @@ class Handler(BaseHTTPRequestHandler):
                     200 if acknowledgement["replay"] else 201,
                     acknowledgement,
                 )
-            except (json.JSONDecodeError, TypeError, ValueError):
+            except (binascii.Error, json.JSONDecodeError, TypeError, ValueError):
                 self.send_json(400, {"error": "canonical ingest request invalid"})
             except CanonicalLifecycleError as exc:
                 status = (
