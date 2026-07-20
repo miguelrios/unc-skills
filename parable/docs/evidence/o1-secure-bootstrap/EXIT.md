@@ -76,8 +76,9 @@ parser, model regex, fallback router, or background service was added.
 - Complete Parable suite: PASS, 91/91.
 - npm pack dry-run: PASS, 33 files including `lib/onboarding.js`.
 - Local Claudio-Michel review: 5/5.
-- Focused PR: pending.
-- Verified merged `main`: pending.
+- Focused PR: [#193](https://github.com/miguelrios/unc-skills/pull/193),
+  merged 2026-07-20T22:42:31Z.
+- Verified merged `main`: `b57c8852c83820e4cc8cfb9fca338c3c6876418b`.
 
 ## exit → O2
 
