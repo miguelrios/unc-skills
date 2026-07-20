@@ -76,7 +76,7 @@ token-use, or long-session reliability.
 - Parable tests: 81/81 PASS in an isolated HOME.
 - Review verdict: 5/5.
 - Focused evidence PR: [#146](https://github.com/miguelrios/unc-skills/pull/146).
-- Verified merged `main`: pending.
+- Verified merged `main`: `7500f48ac286ee9e720fe984f35c0c2c9e8ff129`.
 
 ## exit → E3
 
