@@ -645,6 +645,23 @@ class HttpBoundaryContractTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "unsupported HTTP profile"):
                 validate_http_profile()
 
+    def test_public_canonical_routes_require_auth_and_enabled_v2_runtime(self) -> None:
+        base = {
+            "RECALL_HTTP_PROFILE": "public-mcp",
+            "RECALL_CANONICAL_INGEST_PUBLIC": "1",
+            "RECALL_TRUST_TAILSCALE_HEADERS": "0",
+        }
+        for values in (
+            {**base, "RECALL_AUTH_REQUIRED": "0", "RECALL_CANONICAL_V2_ENABLED": "1"},
+            {**base, "RECALL_AUTH_REQUIRED": "1", "RECALL_CANONICAL_V2_ENABLED": "0"},
+        ):
+            with self.subTest(values=values), mock.patch.dict(
+                os.environ,
+                values,
+                clear=True,
+            ), self.assertRaisesRegex(RuntimeError, "canonical ingest"):
+                validate_http_profile()
+
     def test_unix_server_refuses_to_replace_a_regular_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "recall.sock"
@@ -1032,6 +1049,26 @@ class AdminCliSafetyTest(unittest.TestCase):
                 ["read", "write"],
                 principal_id="synthetic-owner",
             )
+        store.connect.assert_not_called()
+
+    def test_canonical_credentials_bind_tenant_principal_source_and_write(self) -> None:
+        store = BrainStore("postgresql://synthetic.invalid/recall")
+        store.connect = mock.MagicMock()
+        invalid = (
+            ("tenant:one", None, "source:one", ["write"]),
+            ("tenant:one", "principal:owner", None, ["write"]),
+            ("tenant:one", "principal:owner", "source:one", ["read"]),
+            ("tenant with spaces", "principal:owner", "source:one", ["write"]),
+        )
+        for tenant_id, principal_id, source_id, scopes in invalid:
+            with self.subTest(tenant_id=tenant_id), self.assertRaises(ValueError):
+                store.create_collector_token(
+                    "synthetic-canonical",
+                    source_id,
+                    scopes,
+                    tenant_id=tenant_id,
+                    principal_id=principal_id,
+                )
         store.connect.assert_not_called()
 
     def test_webhook_credentials_require_source_principal_and_privacy(self) -> None:

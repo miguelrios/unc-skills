@@ -88,6 +88,10 @@ def main() -> None:
     create_token.add_argument("name")
     create_token.add_argument("--source")
     create_token.add_argument(
+        "--tenant",
+        help="bind a canonical v2 write credential to exactly one tenant",
+    )
+    create_token.add_argument(
         "--principal",
         help="read every source granted to this principal; writes stay source-bound",
     )
@@ -308,6 +312,7 @@ def main() -> None:
             args.name,
             args.source,
             [scope.strip() for scope in args.scopes.split(",") if scope.strip()],
+            tenant_id=args.tenant,
             principal_id=args.principal,
             capture_origin=args.capture_origin,
             webhook_privacy_mode=args.webhook_privacy_mode,

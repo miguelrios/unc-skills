@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import base64
 import hashlib
 import json
 import os
@@ -8,6 +9,7 @@ import platform
 import re
 import stat
 import urllib.parse
+import urllib.error
 import urllib.request
 import uuid
 import zipfile
@@ -33,14 +35,22 @@ FORBIDDEN_PRIVATE_PATHS = (
 PATTERNS = {"claude": "*.jsonl", "codex": "rollout-*.jsonl"}
 SAFE_EXPORT_SUFFIXES = {".json", ".jsonl"}
 SOURCE_ID = re.compile(r"^[A-Za-z0-9_.:@-]{3,160}$")
+V2_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._/@+-]{1,255}\Z")
 MAX_INGEST_BYTES = 8_000_000
 MAX_INGEST_EVENTS = 500
+MAX_CANONICAL_ARCHIVE_BYTES = 8_000_000
 MAX_EXPORT_BYTES = 256_000_000
 MAX_ARCHIVE_MEMBERS = 10_000
 
 
 class PrivacyError(ValueError):
     pass
+
+
+class CanonicalClientError(RuntimeError):
+    def __init__(self, error_code: str):
+        self.error_code = error_code
+        super().__init__(error_code)
 
 
 def iso_now() -> str:
@@ -433,6 +443,106 @@ class BrainClient:
 
     def doctor(self) -> dict:
         return self._request("/v1/doctor")
+
+
+class _CanonicalClient(BrainClient):
+    def __init__(
+        self,
+        *,
+        endpoint: str,
+        token: str,
+        source_id: str,
+        tenant_id: str,
+        principal_id: str,
+    ):
+        if not isinstance(tenant_id, str) or not V2_IDENTITY.fullmatch(tenant_id):
+            raise ValueError("invalid tenant id")
+        if not isinstance(principal_id, str) or not V2_IDENTITY.fullmatch(principal_id):
+            raise ValueError("invalid principal id")
+        super().__init__(
+            endpoint=endpoint,
+            token=token,
+            source_id=source_id,
+            principal_id=principal_id,
+            visibility="private",
+        )
+        self.tenant_id = tenant_id
+
+
+class CanonicalArchiveClient(_CanonicalClient):
+    """Source-scoped client for archive writes fenced by the canonical service."""
+
+    def put_raw(
+        self,
+        *,
+        tenant_id: str,
+        source_id: str,
+        native_id: str,
+        payload: bytes,
+        media_type: str,
+        created_at: str,
+    ) -> dict[str, Any]:
+        if tenant_id != self.tenant_id or source_id != self.source_id:
+            raise PermissionError("canonical archive scope mismatch")
+        if not isinstance(payload, bytes) or len(payload) > MAX_CANONICAL_ARCHIVE_BYTES:
+            raise ValueError("canonical archive payload is invalid")
+        if not isinstance(native_id, str) or not V2_IDENTITY.fullmatch(native_id):
+            raise ValueError("canonical archive identity is invalid")
+        try:
+            return self._request(
+                "/v2/archive/objects",
+                body={
+                    "tenant_id": self.tenant_id,
+                    "principal_id": self.principal_id,
+                    "source_id": self.source_id,
+                    "native_id": native_id,
+                    "payload_base64": base64.b64encode(payload).decode(),
+                    "media_type": media_type,
+                    "created_at": created_at,
+                },
+            )
+        except urllib.error.HTTPError as error:
+            error_code = "archive_unavailable"
+            try:
+                response = json.loads(error.read(4096))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                response = {}
+            if (
+                error.code == 409
+                and response.get("error") == "archive_identity_forgotten"
+            ):
+                error_code = "archive_identity_forgotten"
+            raise CanonicalClientError(error_code) from None
+
+
+class CanonicalBrainWriter(_CanonicalClient):
+    """Connector BrainWriter that commits only privacy-safe canonical envelopes."""
+
+    def ingest(self, events: list[dict[str, Any]]) -> dict[str, Any]:
+        if not events or len(events) > MAX_INGEST_EVENTS:
+            raise ValueError("canonical ingest batch is invalid")
+        for event in events:
+            if (
+                not isinstance(event, dict)
+                or event.get("source_id") != self.source_id
+                or event.get("principal_id") != self.principal_id
+                or not isinstance(event.get("provenance", {}).get("artifact_ref"), dict)
+            ):
+                raise PermissionError("canonical ingest scope mismatch")
+        body = {
+            "tenant_id": self.tenant_id,
+            "principal_id": self.principal_id,
+            "events": events,
+        }
+        encoded = canonical_json(body)
+        if len(encoded) > MAX_INGEST_BYTES:
+            raise ValueError("canonical ingest batch exceeds client size limit")
+        key = "canonical-v2-" + hashlib.sha256(encoded).hexdigest()
+        return self._request(
+            "/v2/ingest/canonical",
+            body=body,
+            idempotency_key=key,
+        )
 
 
 class MemoryClient(BrainClient):

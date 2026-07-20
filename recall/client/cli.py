@@ -9,6 +9,8 @@ from pathlib import Path
 
 from client.mac import (
     BrainClient,
+    CanonicalArchiveClient,
+    CanonicalBrainWriter,
     ExportImporter,
     MemoryClient,
     dry_run_manifest,
@@ -98,6 +100,62 @@ def _token(args) -> str:
     if args.token_file:
         return load_file_token(Path(args.token_file))
     return load_keychain_token(args.keychain_service, args.keychain_account)
+
+
+def _connector_runner(
+    *,
+    connector,
+    common: dict,
+    spool_path: Path,
+    privacy: PrivacyPolicy,
+) -> ConnectorRunner:
+    canonical = _canonical_clients(common)
+    if canonical is None:
+        return ConnectorRunner(
+            connector=connector,
+            brain=BrainClient(**common),
+            spool_path=spool_path,
+            privacy=privacy,
+        )
+    brain, archive, tenant_id, principal_id = canonical
+    return ConnectorRunner(
+        connector=connector,
+        brain=brain,
+        archive=archive,
+        tenant_id=tenant_id,
+        principal_id=principal_id,
+        spool_path=spool_path,
+        privacy=privacy,
+    )
+
+
+def _canonical_clients(
+    common: dict,
+) -> tuple[CanonicalBrainWriter, CanonicalArchiveClient, str, str] | None:
+    if os.environ.get("RECALL_CANONICAL_V2_ENABLED") != "1":
+        return None
+    tenant_id = os.environ.get("RECALL_TENANT_ID")
+    principal_id = os.environ.get("RECALL_PRINCIPAL_ID")
+    if (
+        not tenant_id
+        or not principal_id
+        or principal_id != common["principal_id"]
+        or common.get("visibility") != "private"
+    ):
+        raise ValueError("canonical connector identity is incomplete")
+    canonical = {
+        "endpoint": common["endpoint"],
+        "token": common["token"],
+        "source_id": common["source_id"],
+        "tenant_id": tenant_id,
+        "principal_id": principal_id,
+    }
+    return (
+        CanonicalBrainWriter(**canonical),
+        CanonicalArchiveClient(**canonical),
+        tenant_id,
+        principal_id,
+    )
 
 
 def _auth(parser: argparse.ArgumentParser) -> None:
@@ -891,11 +949,15 @@ def main() -> None:
         )
         return
     if args.command == "collect":
+        canonical = _canonical_clients(common)
         collector = Collector(
             root=Path(args.root), harness=args.harness, source_id=args.source_id,
             spool_path=Path(args.spool), endpoint=args.endpoint, token=token,
             principal_id=args.principal_id, visibility=args.visibility,
             privacy=privacy,
+            brain_writer=canonical[0] if canonical else None,
+            archive=canonical[1] if canonical else None,
+            tenant_id=canonical[2] if canonical else None,
         )
         try:
             result = {
@@ -909,8 +971,8 @@ def main() -> None:
         connector = CoworkLocalConnector(
             root=Path(args.root), source_id=args.source_id,
         )
-        runner = ConnectorRunner(
-            connector=connector, brain=BrainClient(**common),
+        runner = _connector_runner(
+            connector=connector, common=common,
             spool_path=Path(args.spool), privacy=privacy,
         )
         try:
@@ -926,8 +988,8 @@ def main() -> None:
             date_min=args.date_min,
             date_max=args.date_max,
         )
-        runner = ConnectorRunner(
-            connector=connector, brain=BrainClient(**common),
+        runner = _connector_runner(
+            connector=connector, common=common,
             spool_path=Path(args.spool), privacy=privacy,
         )
         try:
@@ -944,8 +1006,8 @@ def main() -> None:
             timezone_name=args.timezone,
             page_size=args.page_size,
         )
-        runner = ConnectorRunner(
-            connector=connector, brain=BrainClient(**common),
+        runner = _connector_runner(
+            connector=connector, common=common,
             spool_path=Path(args.spool), privacy=privacy,
         )
         try:
@@ -960,8 +1022,8 @@ def main() -> None:
             max_depth=args.max_depth,
             page_size=args.page_size,
         )
-        runner = ConnectorRunner(
-            connector=connector, brain=BrainClient(**common),
+        runner = _connector_runner(
+            connector=connector, common=common,
             spool_path=Path(args.spool), privacy=privacy,
         )
         try:
@@ -978,8 +1040,8 @@ def main() -> None:
             date_max=args.date_max,
             page_size=args.page_size,
         )
-        runner = ConnectorRunner(
-            connector=connector, brain=BrainClient(**common),
+        runner = _connector_runner(
+            connector=connector, common=common,
             spool_path=Path(args.spool), privacy=privacy,
         )
         try:
@@ -994,8 +1056,8 @@ def main() -> None:
             date_max=args.date_max,
             page_size=args.page_size,
         )
-        runner = ConnectorRunner(
-            connector=connector, brain=BrainClient(**common),
+        runner = _connector_runner(
+            connector=connector, common=common,
             spool_path=Path(args.spool), privacy=privacy,
         )
         try:
@@ -1012,8 +1074,8 @@ def main() -> None:
             date_max=args.date_max,
             page_size=args.page_size,
         )
-        runner = ConnectorRunner(
-            connector=connector, brain=BrainClient(**common),
+        runner = _connector_runner(
+            connector=connector, common=common,
             spool_path=Path(args.spool), privacy=privacy,
         )
         try:
@@ -1042,8 +1104,8 @@ def main() -> None:
             removed_native_ids=tuple(sorted(args.remove_native_id)),
             page_size=args.page_size,
         )
-        runner = ConnectorRunner(
-            connector=connector, brain=BrainClient(**common),
+        runner = _connector_runner(
+            connector=connector, common=common,
             spool_path=Path(args.spool), privacy=privacy,
         )
         try:
@@ -1051,11 +1113,11 @@ def main() -> None:
         finally:
             runner.close()
     elif args.command == "feed-sync":
-        runner = ConnectorRunner(
+        runner = _connector_runner(
             connector=FeedConnector(
                 url=args.url, feed_id=args.feed_id, source_id=args.source_id,
             ),
-            brain=BrainClient(**common),
+            common=common,
             spool_path=Path(args.spool),
             privacy=privacy,
         )
@@ -1064,7 +1126,7 @@ def main() -> None:
         finally:
             runner.close()
     elif args.command == "jsonl-import-sync":
-        runner = ConnectorRunner(
+        runner = _connector_runner(
             connector=SelectedJsonlConnector(
                 root=Path(args.root),
                 source_id=args.source_id,
@@ -1072,7 +1134,7 @@ def main() -> None:
                 max_depth=args.max_depth,
                 page_size=args.page_size,
             ),
-            brain=BrainClient(**common),
+            common=common,
             spool_path=Path(args.spool),
             privacy=privacy,
         )
@@ -1092,8 +1154,8 @@ def main() -> None:
             inbox=Path(args.inbox), catalog_path=Path(args.catalog),
             source_id=args.source_id, privacy_mode=args.privacy_mode,
         )
-        runner = ConnectorRunner(
-            connector=connector, brain=BrainClient(**common),
+        runner = _connector_runner(
+            connector=connector, common=common,
             spool_path=Path(args.spool), privacy=privacy,
         )
         try:
@@ -1113,8 +1175,8 @@ def main() -> None:
             api_key=grep_key,
             source_id=args.source_id, max_pages=args.max_pages, page_size=args.page_size,
         )
-        runner = ConnectorRunner(
-            connector=connector, brain=BrainClient(**common),
+        runner = _connector_runner(
+            connector=connector, common=common,
             spool_path=Path(args.spool), privacy=privacy,
         )
         try:

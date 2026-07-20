@@ -117,7 +117,10 @@ def _validate_acknowledgement(value: Any, events: list[dict[str, Any]]) -> None:
         if (
             not isinstance(receipt, str)
             or not receipt.startswith(prefix)
-            or not re.fullmatch(r"[1-9][0-9]*", receipt.removeprefix(prefix))
+            or not re.fullmatch(
+                r"[1-9][0-9]*(?:#item=0)?",
+                receipt.removeprefix(prefix),
+            )
         ):
             raise ConnectorRunError("brain_invalid_acknowledgement")
 
@@ -655,26 +658,30 @@ class ConnectorRunner:
         forgotten = 0
         for record in page.records:
             was_forgotten = False
+            was_deduplicated = False
             provenance_decision = PrivacyPolicy(mode="scrub").apply(record.provenance)
             safe_provenance = provenance_decision.value
             if record.deleted:
-                decision = PrivacyPolicy(mode="off").apply({"content": {}, "provenance": safe_provenance})
-                try:
-                    artifact_ref = self._archive_raw(record)
-                except ConnectorRunError as error:
-                    if error.error_code != "archive_identity_forgotten":
-                        raise
-                    artifact_ref = None
-                    event = None
-                    forgotten += 1
-                    was_forgotten = True
-                else:
-                    archived += int(artifact_ref is not None)
-                    event = self._event(record, {}, decision.value["provenance"], artifact_ref)
+                decision = PrivacyPolicy(mode="off").apply(
+                    {"content": {}, "provenance": safe_provenance}
+                )
             else:
-                decision = self.privacy.apply({"content": record.content, "provenance": safe_provenance})
-                if decision.action == "drop":
+                decision = self.privacy.apply(
+                    {"content": record.content, "provenance": safe_provenance}
+                )
+            if decision.action == "drop":
+                event = None
+            else:
+                content = {} if record.deleted else decision.value["content"]
+                preliminary = self._event(
+                    record,
+                    content,
+                    decision.value["provenance"],
+                )
+                if self._acknowledged(preliminary):
                     event = None
+                    deduplicated += 1
+                    was_deduplicated = True
                 else:
                     try:
                         artifact_ref = self._archive_raw(record)
@@ -689,15 +696,13 @@ class ConnectorRunner:
                         archived += int(artifact_ref is not None)
                         event = self._event(
                             record,
-                            decision.value["content"],
+                            content,
                             decision.value["provenance"],
                             artifact_ref,
                         )
             receipts.append(decision.receipt())
             if event is None:
-                dropped += int(not was_forgotten)
-            elif self._acknowledged(event):
-                deduplicated += 1
+                dropped += int(not was_forgotten and not was_deduplicated)
             else:
                 events.append(event)
         privacy = summarize_receipts(receipts, self.privacy.mode)

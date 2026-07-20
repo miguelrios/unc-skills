@@ -212,6 +212,12 @@ A provider failure changes only that job's backoff. Supervisor state and spools
 survive image restarts; an unchanged provider cycle advances a bounded private
 cycle generation without creating another acknowledged content version.
 
+For canonical v2, set `RECALL_CANONICAL_V2_ENABLED=1`,
+`RECALL_TENANT_ID`, and `RECALL_PRINCIPAL_ID` in the worker environment.
+The host then replaces the legacy Brain client with the tenant-scoped canonical
+archive client and writer. The existing per-job Brain credential must have been
+created with the matching tenant, principal, source, and `write` scope.
+
 ### Portable mail, calendar, and contacts
 
 The first portable-import pack reads one explicitly selected file: EML or
@@ -594,7 +600,8 @@ recall-brain connector-supervisor-run --config "$PRIVATE/host.json" \
 Without `--once`, the host runs bounded supervisor cycles. TERM/INT wake and
 stop it; HUP wakes the current cycle and reloads the private config between
 cycles. Only the closed factory may construct `ExportInboxConnector`,
-`GrepAIConnector`, `BrainClient`, `PrivacyPolicy`, and `ConnectorRunner`.
+`GrepAIConnector`, the selected legacy or canonical Brain writer,
+`PrivacyPolicy`, and `ConnectorRunner`.
 
 The macOS installer accepts `--connector-supervisor-config FILE` to install the
 fixed `ai.parcha.recall.connector-supervisor` LaunchAgent. The plist passes the

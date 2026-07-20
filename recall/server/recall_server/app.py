@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import logging
 import os
@@ -12,6 +14,12 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
+from .archive_runtime import build_archive_store
+from .canonical import (
+    CanonicalArchiveGateway,
+    CanonicalLifecycleError,
+    CanonicalPlane,
+)
 from .db import BrainStore, IdempotencyConflict
 from .mcp import (
     SUPPORTED_PROTOCOL_VERSIONS,
@@ -39,6 +47,8 @@ COUNTER_LOCK = threading.Lock()
 
 class Handler(BaseHTTPRequestHandler):
     store: BrainStore
+    archive_store = None
+    canonical_plane: CanonicalPlane | None = None
 
     def log_message(self, fmt: str, *args) -> None:
         LOG.info(
@@ -146,6 +156,7 @@ class Handler(BaseHTTPRequestHandler):
             principal = {
                 "kind": "collector",
                 "name": credential["name"],
+                "tenant_id": credential.get("tenant_id"),
                 "source_id": credential["source_id"],
                 "principal_id": credential.get("principal_id"),
                 "capture_origin": credential.get("capture_origin"),
@@ -212,6 +223,43 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(401, {"error": "unauthorized"})
         return None
 
+    def canonical_authority(
+        self,
+        principal: dict,
+        body: dict,
+    ) -> tuple[str, str, str] | None:
+        if not isinstance(body, dict):
+            self.send_json(400, {"error": "canonical request invalid"})
+            return None
+        tenant_id = body.get("tenant_id")
+        principal_id = body.get("principal_id")
+        source_id = body.get("source_id")
+        if source_id is None:
+            events = body.get("events")
+            if (
+                isinstance(events, list)
+                and events
+                and all(isinstance(event, dict) for event in events)
+            ):
+                sources = {event.get("source_id") for event in events}
+                if len(sources) == 1:
+                    source_id = sources.pop()
+        allowed = principal.get("kind") == "development" or (
+            principal.get("kind") == "collector"
+            and principal.get("tenant_id") == tenant_id
+            and principal.get("principal_id") == principal_id
+            and principal.get("source_id") == source_id
+        )
+        if allowed and all(
+            isinstance(value, str) and value
+            for value in (tenant_id, principal_id, source_id)
+        ):
+            return tenant_id, principal_id, source_id
+        with COUNTER_LOCK:
+            COUNTERS["auth_denied"] += 1
+        self.send_json(403, {"error": "canonical authority forbidden"})
+        return None
+
     def metrics(self) -> bytes:
         db = self.store.service_metrics()
         with COUNTER_LOCK:
@@ -275,6 +323,11 @@ class Handler(BaseHTTPRequestHandler):
         )
         if self.public_edge_profile():
             allowed = allowed or (method == "POST" and path == WEBHOOK_PATH)
+        if os.environ.get("RECALL_CANONICAL_INGEST_PUBLIC") == "1":
+            allowed = allowed or (
+                method == "POST"
+                and path in {"/v2/archive/objects", "/v2/ingest/canonical"}
+            )
         if allowed:
             return False
         self.send_json(404, {"error": "not found"})
@@ -337,6 +390,114 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urlsplit(self.path).path
         if self.hide_non_public_route("POST", path):
+            return
+        if path == "/v2/archive/objects":
+            principal = self.require("write")
+            if not principal:
+                return
+            length = self.body_length(MAX_BODY_BYTES)
+            if length is None:
+                return
+            try:
+                body = json.loads(self.rfile.read(length))
+                authority = self.canonical_authority(principal, body)
+                if authority is None:
+                    return
+                tenant_id, principal_id, source_id = authority
+                if self.archive_store is None:
+                    self.send_json(503, {"error": "canonical archive unavailable"})
+                    return
+                payload = base64.b64decode(
+                    body.get("payload_base64", ""),
+                    validate=True,
+                )
+                gateway = CanonicalArchiveGateway(
+                    self.store,
+                    self.archive_store,
+                    tenant_id=tenant_id,
+                    principal_id=principal_id,
+                )
+                reference = gateway.put_raw(
+                    tenant_id=tenant_id,
+                    source_id=source_id,
+                    native_id=body.get("native_id"),
+                    payload=payload,
+                    media_type=body.get("media_type"),
+                    created_at=body.get("created_at"),
+                )
+                self.send_json(201, reference)
+            except (binascii.Error, json.JSONDecodeError, TypeError, ValueError):
+                self.send_json(400, {"error": "canonical archive request invalid"})
+            except CanonicalLifecycleError as exc:
+                status = (
+                    409
+                    if exc.error_code == "archive_identity_forgotten"
+                    else 403
+                    if exc.error_code == "archive_authority_forbidden"
+                    else 400
+                )
+                self.send_json(status, {"error": exc.error_code})
+            except Exception as exc:
+                LOG.error("canonical archive failed type=%s", type(exc).__name__)
+                self.send_json(503, {"error": "canonical archive unavailable"})
+            return
+        if path == "/v2/ingest/canonical":
+            principal = self.require("write")
+            if not principal:
+                return
+            length = self.body_length(MAX_BODY_BYTES)
+            if length is None:
+                return
+            try:
+                body = json.loads(self.rfile.read(length))
+                authority = self.canonical_authority(principal, body)
+                if authority is None:
+                    return
+                tenant_id, principal_id, source_id = authority
+                events = body.get("events")
+                if (
+                    not isinstance(events, list)
+                    or any(
+                        not isinstance(event, dict)
+                        or event.get("source_id") != source_id
+                        for event in events
+                    )
+                ):
+                    self.send_json(403, {"error": "canonical authority forbidden"})
+                    return
+                if self.canonical_plane is None:
+                    self.send_json(503, {"error": "canonical plane unavailable"})
+                    return
+                acknowledgement = self.canonical_plane.ingest_batch(
+                    tenant_id=tenant_id,
+                    principal_id=principal_id,
+                    events=events,
+                )
+                with COUNTER_LOCK:
+                    COUNTERS[
+                        "ingest_replays"
+                        if acknowledgement["replay"]
+                        else "ingest_commits"
+                    ] += 1
+                self.send_json(
+                    200 if acknowledgement["replay"] else 201,
+                    acknowledgement,
+                )
+            except (json.JSONDecodeError, TypeError, ValueError):
+                self.send_json(400, {"error": "canonical ingest request invalid"})
+            except CanonicalLifecycleError as exc:
+                status = (
+                    409
+                    if exc.error_code == "canonical_identity_forgotten"
+                    else 403
+                    if exc.error_code
+                    in {"canonical_authority_forbidden", "canonical_lineage_invalid"}
+                    else 400
+                )
+                self.send_json(status, {"error": exc.error_code})
+            except Exception as exc:
+                LOG.error("canonical ingest failed type=%s", type(exc).__name__)
+                self.send_json(500, {"error": "canonical ingest failed"})
             return
         if path == WEBHOOK_PATH:
             principal = self.require("webhook")
@@ -581,11 +742,31 @@ def validate_http_profile() -> None:
     profile = os.environ.get("RECALL_HTTP_PROFILE", "")
     if profile not in {"", "public-edge", "public-mcp"}:
         raise RuntimeError("unsupported HTTP profile")
+    if os.environ.get("RECALL_CANONICAL_INGEST_PUBLIC") == "1" and (
+        os.environ.get("RECALL_AUTH_REQUIRED", "0") != "1"
+        or os.environ.get("RECALL_CANONICAL_V2_ENABLED") != "1"
+    ):
+        raise RuntimeError(
+            "public canonical ingest requires authentication and canonical v2"
+        )
     if profile in {"public-edge", "public-mcp"}:
         if os.environ.get("RECALL_AUTH_REQUIRED", "0") != "1":
             raise RuntimeError("public HTTP profile requires authentication")
         if os.environ.get("RECALL_TRUST_TAILSCALE_HEADERS", "0") == "1":
             raise RuntimeError("public HTTP profile forbids trusted identity headers")
+
+
+def configure_runtime(dsn: str) -> None:
+    Handler.store = BrainStore(dsn, semantic_runtime=SemanticRuntime.from_env())
+    if os.environ.get("RECALL_CANONICAL_V2_ENABLED") == "1":
+        Handler.archive_store = build_archive_store()
+        Handler.canonical_plane = CanonicalPlane(
+            Handler.store,
+            Handler.archive_store,
+        )
+    else:
+        Handler.archive_store = None
+        Handler.canonical_plane = None
 
 
 def serve(dsn: str, host: str = "127.0.0.1", port: int = 8788) -> None:
@@ -596,7 +777,7 @@ def serve(dsn: str, host: str = "127.0.0.1", port: int = 8788) -> None:
         "::1",
     }:
         raise RuntimeError("authentication is required for a non-loopback TCP bind")
-    Handler.store = BrainStore(dsn, semantic_runtime=SemanticRuntime.from_env())
+    configure_runtime(dsn)
     server = ThreadingHTTPServer((host, port), Handler)
     LOG.info("brainstore listening host=%s port=%s", host, port)
     try:
@@ -623,7 +804,7 @@ def serve_unix(dsn: str, path: str) -> None:
         if not stat.S_ISSOCK(existing.st_mode):
             raise RuntimeError("refusing to replace a non-socket Unix path")
         os.unlink(path)
-    Handler.store = BrainStore(dsn, semantic_runtime=SemanticRuntime.from_env())
+    configure_runtime(dsn)
     server = ThreadingUnixHTTPServer(path, Handler)
     os.chmod(path, 0o600)
     LOG.info("brainstore listening unix_socket=%s", path)

@@ -61,7 +61,7 @@ infrastructure. The example is synthetic; a live manifest belongs in a private m
 location and contains references, never credential values.
 
 The production database gate requires a standard PostgreSQL URL with
-`sslmode=verify-full` and an explicit trust root, schema migrations 1 through 26,
+`sslmode=verify-full` and an explicit trust root, schema migrations 1 through 27,
 pgvector 0.8.0 or newer, and a runtime role without superuser, database/role creation,
 replication, or RLS-bypass privilege:
 
@@ -164,6 +164,26 @@ Recall does not read a Cloudflare management API token. Validate the configured
 archive with `python -m recall_server.cli archive-check`; the probe writes,
 replays, reads, deletes, and verifies absence using synthetic bytes, then emits
 only a content-free status.
+
+Enable the canonical v2 write plane only after the archive probe and database
+migrations pass:
+
+```text
+RECALL_CANONICAL_V2_ENABLED=1
+RECALL_CANONICAL_INGEST_PUBLIC=1
+RECALL_TENANT_ID=tenant:personal
+RECALL_PRINCIPAL_ID=principal:owner
+```
+
+`RECALL_CANONICAL_INGEST_PUBLIC=1` adds only the authenticated
+`POST /v2/archive/objects` and `POST /v2/ingest/canonical` routes to a public
+profile. Both require a write credential bound to the exact tenant, principal,
+and source. Create one such credential per source with `token-create --tenant
+TENANT --principal PRINCIPAL --source SOURCE --scopes write`. The connector
+runner archives raw bytes through the fenced archive route, applies privacy,
+writes only the redacted envelope to its private spool, and advances its cursor
+only after the canonical ACK. Do not enable this flag on an MCP-only service
+that has no collector ingress.
 
 `RECALL_DATABASE_URL` must be a PlanetScale application role URL with
 `sslmode=verify-full` and an explicit trust root. Prefer

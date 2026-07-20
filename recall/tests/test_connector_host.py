@@ -170,6 +170,41 @@ class ClosedFactoryTest(unittest.TestCase):
         )
         host.close()
 
+    def test_canonical_mode_wires_one_tenant_scoped_writer_and_archive_client(self) -> None:
+        value = ConnectorHostConfig.from_mapping(
+            json.loads(CORPUS.read_text().splitlines()[0])["config"]
+        )
+        environment = {
+            "RECALL_CANONICAL_V2_ENABLED": "1",
+            "RECALL_TENANT_ID": "tenant:personal",
+            "RECALL_PRINCIPAL_ID": "principal:owner",
+        }
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.dict(os.environ, environment, clear=False), \
+             mock.patch("connectors.host.load_file_token", return_value="brain-token"), \
+             mock.patch("connectors.host.CanonicalBrainWriter") as writer_type, \
+             mock.patch("connectors.host.CanonicalArchiveClient") as archive_type, \
+             mock.patch("connectors.host.ExportInboxConnector") as connector_type, \
+             mock.patch("connectors.host.ConnectorRunner") as runner_type:
+            connector_type.return_value.connector_id = "openai.export-inbox"
+            connector_type.return_value.source_id = "synthetic:export:c8g"
+            runner_type.return_value = mock.Mock(
+                run_once=mock.Mock(return_value={"status": "committed"}),
+                close=mock.Mock(),
+            )
+            host = build_host(
+                value,
+                state_path=Path(directory) / "supervisor.db",
+            )
+        writer_type.assert_called_once()
+        archive_type.assert_called_once()
+        call = runner_type.call_args.kwargs
+        self.assertIs(call["brain"], writer_type.return_value)
+        self.assertIs(call["archive"], archive_type.return_value)
+        self.assertEqual(call["tenant_id"], "tenant:personal")
+        self.assertEqual(call["principal_id"], "principal:owner")
+        host.close()
+
 
 class HostCliTest(unittest.TestCase):
     def private_config(self, directory: str) -> Path:
