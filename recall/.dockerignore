@@ -18,3 +18,10 @@ spikes/
 README.md
 package.json
 package-lock.json
+!client/
+!client/**
+!collector/
+!collector/**
+!scripts/
+scripts/*
+!scripts/install_gws.py

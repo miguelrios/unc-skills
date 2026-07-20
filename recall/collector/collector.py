@@ -8,6 +8,7 @@ import sqlite3
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -77,7 +78,8 @@ class Collector:
                  endpoint: str, token: str, principal_id: str = "owner",
                  visibility: str = "private", batch_size: int = 500,
                  privacy: PrivacyPolicy | None = None, brain_writer: Any = None,
-                 archive: Any = None, tenant_id: str | None = None):
+                 archive: Any = None, tenant_id: str | None = None,
+                 archive_workers: int = 8):
         if harness not in {"claude", "codex"}:
             raise ValueError("harness must be claude or codex")
         if visibility not in {"private", "shared"}:
@@ -86,6 +88,11 @@ class Collector:
             archive is not None and not tenant_id
         ):
             raise ValueError("canonical collector runtime is incomplete")
+        if (
+            type(archive_workers) is not int
+            or not 1 <= archive_workers <= 16
+        ):
+            raise ValueError("archive_workers must be between 1 and 16")
         self.root = Path(root).expanduser().resolve()
         self.harness = harness
         self.source_id = source_id
@@ -99,6 +106,7 @@ class Collector:
         self.brain_writer = brain_writer
         self.archive = archive
         self.tenant_id = tenant_id
+        self.archive_workers = archive_workers
         self.shard_count = 1
         self.shard_index = 0
         self.spool_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -276,114 +284,188 @@ class Collector:
         summary = {"files_seen": 0, "records_queued": 0, "tombstones_queued": 0,
                    "parse_errors": 0, "partial_files": 0}
         privacy_receipts = []
-        for path in self.discover():
-            summary["files_seen"] += 1
-            stat = path.stat()
-            path_text = str(path)
-            row = self.db.execute("SELECT * FROM files WHERE path=?", (path_text,)).fetchone()
-            current_fingerprint = fingerprint(path, stat.st_size)
-            if row and not row["status"].startswith("scanning-") and row["size"] == stat.st_size and row["mtime_ns"] == stat.st_mtime_ns and row["fingerprint"] == current_fingerprint:
-                self.db.execute("UPDATE files SET last_scan_id=? WHERE path=?", (scan_id, path_text))
-                continue
-            resume_mode = row["status"].removeprefix("scanning-") if row and row["status"].startswith("scanning-") else None
-            if resume_mode:
-                mode = resume_mode
-                file_scan_id = row["last_scan_id"]
-            else:
-                mode = "append" if row and stat.st_size > row["size"] and fingerprint(path, row["size"]) == row["fingerprint"] else ("full" if row else "new")
-                file_scan_id = scan_id
-                if mode != "append":
-                    self.db.execute("DELETE FROM scan_members WHERE path=?", (path_text,))
-            append = mode == "append"
-            start_offset = int(row["scanned_offset"]) if append or resume_mode else 0
-            old_active = {item["native_id"]: item for item in self.db.execute("SELECT * FROM active_records WHERE path=?", (path_text,))}
-            seen_native: set[str] = set(old_active) if append else {item["native_id"] for item in self.db.execute("SELECT native_id FROM scan_members WHERE path=?", (path_text,))}
-            complete_end = start_offset
-            complete_records = 0
-            with path.open("rb") as source:
-                source.seek(start_offset)
-                while True:
-                    line_start = source.tell()
-                    line = source.readline()
-                    if not line:
-                        break
-                    if not line.endswith(b"\n"):
-                        summary["partial_files"] += 1
-                        break
-                    complete_end = source.tell()
-                    complete_records += 1
-                    native_id = f"{self._file_key(path)}-{line_start:016x}"
-                    try:
-                        content = json.loads(line)
-                        if not isinstance(content, dict):
-                            raise ValueError("record is not an object")
-                    except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
-                        summary["parse_errors"] += 1
-                        self.db.execute(
-                            "INSERT OR IGNORE INTO dead_letters(path,byte_offset,error_code,error_summary,created_at) VALUES (?,?,?,?,?)",
-                            (path_text, line_start, type(exc).__name__, "record rejected", time.time()),
-                        )
-                        continue
-                    occurred_at = normalized_timestamp(content.get("timestamp"), stat.st_mtime)
-                    privacy = self.privacy.apply(content)
-                    privacy_receipts.append(privacy.receipt())
-                    if privacy.action == "drop":
-                        seen_native.add(native_id)
-                        if not append:
-                            self.db.execute("INSERT OR IGNORE INTO scan_members(path,native_id) VALUES (?,?)", (path_text, native_id))
-                        continue
-                    content = privacy.value
-                    artifact_ref = self._archive_raw(
-                        native_id=native_id,
-                        payload=line,
-                        occurred_at=occurred_at,
+        executor = (
+            ThreadPoolExecutor(max_workers=self.archive_workers)
+            if self.archive is not None and self.archive_workers > 1
+            else None
+        )
+        try:
+            for path in self.discover():
+                summary["files_seen"] += 1
+                stat = path.stat()
+                path_text = str(path)
+                row = self.db.execute("SELECT * FROM files WHERE path=?", (path_text,)).fetchone()
+                current_fingerprint = fingerprint(path, stat.st_size)
+                if row and not row["status"].startswith("scanning-") and row["size"] == stat.st_size and row["mtime_ns"] == stat.st_mtime_ns and row["fingerprint"] == current_fingerprint:
+                    self.db.execute("UPDATE files SET last_scan_id=? WHERE path=?", (scan_id, path_text))
+                    continue
+                resume_mode = row["status"].removeprefix("scanning-") if row and row["status"].startswith("scanning-") else None
+                if resume_mode:
+                    mode = resume_mode
+                    file_scan_id = row["last_scan_id"]
+                else:
+                    mode = "append" if row and stat.st_size > row["size"] and fingerprint(path, row["size"]) == row["fingerprint"] else ("full" if row else "new")
+                    file_scan_id = scan_id
+                    if mode != "append":
+                        self.db.execute("DELETE FROM scan_members WHERE path=?", (path_text,))
+                append = mode == "append"
+                start_offset = int(row["scanned_offset"]) if append or resume_mode else 0
+                old_active = {item["native_id"]: item for item in self.db.execute("SELECT * FROM active_records WHERE path=?", (path_text,))}
+                seen_native: set[str] = set(old_active) if append else {item["native_id"] for item in self.db.execute("SELECT native_id FROM scan_members WHERE path=?", (path_text,))}
+                complete_end = start_offset
+                complete_records = 0
+                pending: list[tuple[
+                    str, dict[str, Any], str, int, int,
+                    Future[dict[str, Any] | None] | None,
+                    dict[str, Any] | None,
+                ]] = []
+
+                def commit_pending() -> None:
+                    (
+                        native_id,
+                        content,
+                        occurred_at,
+                        line_start,
+                        line_end,
+                        future,
+                        artifact_ref,
+                    ) = pending.pop(0)
+                    if future is not None:
+                        artifact_ref = future.result()
+                    versioned_content = self._versioned_record_content(
+                        native_id,
+                        content,
+                        was_active=native_id in old_active,
                     )
-                    versioned_content = self._versioned_record_content(native_id, content, was_active=native_id in old_active)
                     envelope = self._envelope(
-                        path, native_id, "transcript_record", versioned_content,
-                        occurred_at, line_start, complete_end, artifact_ref,
+                        path,
+                        native_id,
+                        "transcript_record",
+                        versioned_content,
+                        occurred_at,
+                        line_start,
+                        line_end,
+                        artifact_ref,
                     )
-                    if self._queue(path, envelope, complete_end):
+                    if self._queue(path, envelope, line_end):
                         summary["records_queued"] += 1
                     self.db.execute(
                         "INSERT INTO active_records(path,native_id,content_sha256,start_offset,end_offset) VALUES (?,?,?,?,?) "
                         "ON CONFLICT(path,native_id) DO UPDATE SET content_sha256=excluded.content_sha256,start_offset=excluded.start_offset,end_offset=excluded.end_offset",
-                        (path_text, native_id, envelope["content_sha256"], line_start, complete_end),
+                        (
+                            path_text,
+                            native_id,
+                            envelope["content_sha256"],
+                            line_start,
+                            line_end,
+                        ),
                     )
                     seen_native.add(native_id)
                     if not append:
-                        self.db.execute("INSERT OR IGNORE INTO scan_members(path,native_id) VALUES (?,?)", (path_text, native_id))
-                    if complete_records % 1000 == 0:
-                        self._save_file_progress(path_text, stat, current_fingerprint, complete_end, "scanning-" + mode, file_scan_id)
-                        self.db.commit()
-            if not append:
-                for native_id, old in old_active.items():
-                    if native_id in seen_native:
-                        continue
-                    content = {"target_native_id": native_id, "deletion_id": scan_id}
-                    occurred_at = iso_now()
-                    artifact_ref = self._archive_raw(
-                        native_id=native_id,
-                        payload=canonical_json({
-                            "deleted": True,
-                            "native_id": native_id,
-                        }),
-                        occurred_at=occurred_at,
-                    )
-                    envelope = self._envelope(
-                        path, native_id, "tombstone", content, occurred_at,
-                        old["start_offset"], old["end_offset"], artifact_ref,
-                    )
-                    if self._queue(path, envelope, complete_end):
-                        summary["tombstones_queued"] += 1
-                    self.db.execute("DELETE FROM active_records WHERE path=? AND native_id=?", (path_text, native_id))
-            status = "partial" if complete_end < stat.st_size else "ok"
-            self._save_file_progress(path_text, stat, current_fingerprint, complete_end, status, scan_id)
-            if not self.db.execute("SELECT 1 FROM outbox WHERE path=? AND state='pending' LIMIT 1", (path_text,)).fetchone():
-                self.db.execute("UPDATE files SET committed_offset=scanned_offset WHERE path=?", (path_text,))
-            self.db.execute("DELETE FROM scan_members WHERE path=?", (path_text,))
-            # Bound crash recovery to one source file; acknowledged offsets still move only in flush().
-            self.db.commit()
+                        self.db.execute(
+                            "INSERT OR IGNORE INTO scan_members(path,native_id) VALUES (?,?)",
+                            (path_text, native_id),
+                        )
+
+                with path.open("rb") as source:
+                    source.seek(start_offset)
+                    while True:
+                        line_start = source.tell()
+                        line = source.readline()
+                        if not line:
+                            break
+                        if not line.endswith(b"\n"):
+                            summary["partial_files"] += 1
+                            break
+                        complete_end = source.tell()
+                        complete_records += 1
+                        native_id = f"{self._file_key(path)}-{line_start:016x}"
+                        try:
+                            content = json.loads(line)
+                            if not isinstance(content, dict):
+                                raise ValueError("record is not an object")
+                        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+                            summary["parse_errors"] += 1
+                            self.db.execute(
+                                "INSERT OR IGNORE INTO dead_letters(path,byte_offset,error_code,error_summary,created_at) VALUES (?,?,?,?,?)",
+                                (path_text, line_start, type(exc).__name__, "record rejected", time.time()),
+                            )
+                            continue
+                        occurred_at = normalized_timestamp(content.get("timestamp"), stat.st_mtime)
+                        privacy = self.privacy.apply(content)
+                        privacy_receipts.append(privacy.receipt())
+                        if privacy.action == "drop":
+                            seen_native.add(native_id)
+                            if not append:
+                                self.db.execute("INSERT OR IGNORE INTO scan_members(path,native_id) VALUES (?,?)", (path_text, native_id))
+                            continue
+                        content = privacy.value
+                        if executor is None:
+                            future = None
+                            artifact_ref = self._archive_raw(
+                                native_id=native_id,
+                                payload=line,
+                                occurred_at=occurred_at,
+                            )
+                        else:
+                            future = executor.submit(
+                                self._archive_raw,
+                                native_id=native_id,
+                                payload=line,
+                                occurred_at=occurred_at,
+                            )
+                            artifact_ref = None
+                        pending.append(
+                            (
+                                native_id,
+                                content,
+                                occurred_at,
+                                line_start,
+                                complete_end,
+                                future,
+                                artifact_ref,
+                            )
+                        )
+                        if len(pending) >= self.archive_workers * 2:
+                            commit_pending()
+                        if complete_records % 1000 == 0:
+                            while pending:
+                                commit_pending()
+                            self._save_file_progress(path_text, stat, current_fingerprint, complete_end, "scanning-" + mode, file_scan_id)
+                            self.db.commit()
+                while pending:
+                    commit_pending()
+                if not append:
+                    for native_id, old in old_active.items():
+                        if native_id in seen_native:
+                            continue
+                        content = {"target_native_id": native_id, "deletion_id": scan_id}
+                        occurred_at = iso_now()
+                        artifact_ref = self._archive_raw(
+                            native_id=native_id,
+                            payload=canonical_json({
+                                "deleted": True,
+                                "native_id": native_id,
+                            }),
+                            occurred_at=occurred_at,
+                        )
+                        envelope = self._envelope(
+                            path, native_id, "tombstone", content, occurred_at,
+                            old["start_offset"], old["end_offset"], artifact_ref,
+                        )
+                        if self._queue(path, envelope, complete_end):
+                            summary["tombstones_queued"] += 1
+                        self.db.execute("DELETE FROM active_records WHERE path=? AND native_id=?", (path_text, native_id))
+                status = "partial" if complete_end < stat.st_size else "ok"
+                self._save_file_progress(path_text, stat, current_fingerprint, complete_end, status, scan_id)
+                if not self.db.execute("SELECT 1 FROM outbox WHERE path=? AND state='pending' LIMIT 1", (path_text,)).fetchone():
+                    self.db.execute("UPDATE files SET committed_offset=scanned_offset WHERE path=?", (path_text,))
+                self.db.execute("DELETE FROM scan_members WHERE path=?", (path_text,))
+                # Bound crash recovery to one source file; acknowledged offsets still move only in flush().
+                self.db.commit()
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=True, cancel_futures=True)
         missing = list(self.db.execute("SELECT path FROM files WHERE last_scan_id != ? AND status != 'tombstone'", (scan_id,)))
         for item in missing:
             for old in self.db.execute("SELECT * FROM active_records WHERE path=?", (item["path"],)):
