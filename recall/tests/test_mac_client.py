@@ -6,6 +6,7 @@ import io
 import json
 import tempfile
 import unittest
+import urllib.error
 import zipfile
 from pathlib import Path
 from unittest import mock
@@ -15,6 +16,7 @@ from client.mac import (
     BrainClient,
     CanonicalArchiveClient,
     CanonicalBrainWriter,
+    CanonicalClientError,
     ExportImporter,
     MemoryClient,
     PrivacyError,
@@ -332,6 +334,95 @@ class CanonicalV2ClientTest(unittest.TestCase):
                 created_at="2026-07-20T00:00:00Z",
             )
         opened.assert_not_called()
+
+    def test_archive_retries_transient_transport_failure_idempotently(self) -> None:
+        payload = b'{"raw":"synthetic-retry"}'
+        artifact = {
+            "contract": "recall.artifact-ref.v1",
+            "schema_version": 1,
+            "tenant_id": "tenant:personal",
+            "source_id": "source:personal",
+            "artifact_id": "art_" + "b" * 32,
+            "storage_backend": "s3",
+            "object_key": "objects/bb/" + "b" * 64,
+            "content_sha256": hashlib.sha256(payload).hexdigest(),
+            "size_bytes": len(payload),
+            "media_type": "application/json",
+            "encryption": "sse-s3",
+            "version_id": "synthetic-version",
+            "created_at": "2026-07-20T00:00:00Z",
+        }
+        archive = CanonicalArchiveClient(
+            endpoint="https://brain.example.invalid",
+            token="synthetic",
+            source_id="source:personal",
+            tenant_id="tenant:personal",
+            principal_id="principal:owner",
+        )
+        attempts = [
+            urllib.error.URLError("synthetic-timeout"),
+            OSError("synthetic-reset"),
+            FakeResponse(201, artifact),
+        ]
+        with (
+            mock.patch(
+                "client.mac.open_no_redirect",
+                side_effect=attempts,
+            ) as opened,
+            mock.patch("client.mac.time.sleep") as slept,
+        ):
+            result = archive.put_raw(
+                tenant_id="tenant:personal",
+                source_id="source:personal",
+                native_id="native:retry",
+                payload=payload,
+                media_type="application/json",
+                created_at="2026-07-20T00:00:00Z",
+            )
+        self.assertEqual(result, artifact)
+        self.assertEqual(opened.call_count, 3)
+        self.assertEqual(
+            [call.args[0] for call in slept.call_args_list],
+            [1, 2],
+        )
+        bodies = [
+            json.loads(call.args[0].data)
+            for call in opened.call_args_list
+        ]
+        self.assertEqual(bodies[0], bodies[1])
+        self.assertEqual(bodies[1], bodies[2])
+
+    def test_archive_retry_budget_is_bounded_and_content_free(self) -> None:
+        archive = CanonicalArchiveClient(
+            endpoint="https://brain.example.invalid",
+            token="synthetic",
+            source_id="source:personal",
+            tenant_id="tenant:personal",
+            principal_id="principal:owner",
+        )
+        with (
+            mock.patch(
+                "client.mac.open_no_redirect",
+                side_effect=OSError("synthetic-private-upstream-detail"),
+            ) as opened,
+            mock.patch("client.mac.time.sleep") as slept,
+            self.assertRaises(CanonicalClientError) as raised,
+        ):
+            archive.put_raw(
+                tenant_id="tenant:personal",
+                source_id="source:personal",
+                native_id="native:retry-budget",
+                payload=b"synthetic",
+                media_type="application/json",
+                created_at="2026-07-20T00:00:00Z",
+            )
+        self.assertEqual(raised.exception.error_code, "archive_unavailable")
+        self.assertNotIn("upstream", str(raised.exception))
+        self.assertEqual(opened.call_count, 5)
+        self.assertEqual(
+            [call.args[0] for call in slept.call_args_list],
+            [1, 2, 4, 8],
+        )
 
 
 class ExplicitMemoryTest(unittest.TestCase):
