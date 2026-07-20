@@ -9,6 +9,8 @@ from pathlib import Path
 
 from . import SCHEMA_VERSION
 from .app import serve, serve_unix
+from .archive import ArchiveError
+from .archive_runtime import build_archive_store, probe_archive
 from .capabilities import CapabilityError, probe_database
 from .db import BrainStore
 from .deployment import DeploymentManifestError, load_manifest, preview
@@ -39,6 +41,7 @@ def main() -> None:
     ap.add_argument("--dsn", default=os.environ.get("RECALL_DATABASE_URL"))
     sub = ap.add_subparsers(dest="command", required=True)
     sub.add_parser("migrate")
+    sub.add_parser("archive-check")
     capability = sub.add_parser("capability-check")
     capability.add_argument(
         "--profile", choices=("production", "local-fixture"), default="production"
@@ -203,6 +206,19 @@ def main() -> None:
             print(
                 json.dumps(
                     {"status": "rejected", "code": "mcp_conformance_failed"}
+                ),
+                file=sys.stderr,
+            )
+            raise SystemExit(2) from None
+        return
+    if args.command == "archive-check":
+        try:
+            print(json.dumps(probe_archive(build_archive_store()), sort_keys=True))
+        except (ArchiveError, ValueError):
+            print(
+                json.dumps(
+                    {"status": "rejected", "code": "archive_check_failed"},
+                    sort_keys=True,
                 ),
                 file=sys.stderr,
             )
