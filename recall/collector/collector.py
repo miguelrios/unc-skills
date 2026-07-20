@@ -18,6 +18,7 @@ from privacy.transport import open_no_redirect
 
 COLLECTOR_VERSION = 1
 MAX_BATCH_BYTES = 8_000_000
+MAX_CANONICAL_BATCH_EVENTS = 50
 SENSITIVE_KEY = re.compile(r"(?:litellm.*master.*key|api[_-]?key|password|secret|authorization|bearer|access[_-]?token|refresh[_-]?token|token)$", re.I)
 SENSITIVE_LINE = re.compile(
     r"(?i)\b(LITELLM_MASTER_KEY|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|password|secret|authorization|bearer|access[_-]?token|refresh[_-]?token|token|key)"
@@ -93,6 +94,8 @@ class Collector:
             or not 1 <= archive_workers <= 16
         ):
             raise ValueError("archive_workers must be between 1 and 16")
+        if type(batch_size) is not int or batch_size < 1:
+            raise ValueError("batch_size must be a positive integer")
         self.root = Path(root).expanduser().resolve()
         self.harness = harness
         self.source_id = source_id
@@ -101,7 +104,11 @@ class Collector:
         self.token = token
         self.principal_id = principal_id
         self.visibility = visibility
-        self.batch_size = batch_size
+        self.batch_size = (
+            min(batch_size, MAX_CANONICAL_BATCH_EVENTS)
+            if brain_writer is not None
+            else batch_size
+        )
         self.privacy = privacy or PrivacyPolicy(mode="off")
         self.brain_writer = brain_writer
         self.archive = archive
@@ -547,7 +554,13 @@ class Collector:
                     (row["path"],),
                 )
                 result["recovered"] += 1
-            except (OSError, ValueError, json.JSONDecodeError, UnicodeDecodeError):
+            except (
+                OSError,
+                TypeError,
+                ValueError,
+                json.JSONDecodeError,
+                UnicodeDecodeError,
+            ):
                 self.db.execute(
                     "INSERT OR IGNORE INTO dead_letters(path,byte_offset,error_code,error_summary,created_at) VALUES (?,?,?,?,?)",
                     (row["path"], row["start_offset"], "RecoveryError", "record recovery rejected", time.time()),
@@ -558,6 +571,87 @@ class Collector:
 
     def _repair_pending_envelope(self, row: sqlite3.Row) -> dict | None:
         envelope = json.loads(row["envelope_json"])
+        if (
+            self.archive is not None
+            and "artifact_ref" not in envelope.get("provenance", {})
+        ):
+            try:
+                if envelope.get("kind") == "tombstone":
+                    raw = canonical_json({
+                        "deleted": True,
+                        "native_id": row["native_id"],
+                    })
+                    content = envelope["content"]
+                else:
+                    path = Path(row["path"])
+                    with path.open("rb") as source:
+                        source.seek(row["start_offset"])
+                        raw = source.read(row["end_offset"] - row["start_offset"])
+                    if not raw.endswith(b"\n"):
+                        raise ValueError("source byte window is incomplete")
+                    original = json.loads(raw)
+                    if not isinstance(original, dict):
+                        raise ValueError("record is not an object")
+                    privacy = self.privacy.apply(original)
+                    if privacy.action == "drop":
+                        self.db.execute("DELETE FROM outbox WHERE id=?", (row["id"],))
+                        return None
+                    content = envelope["content"]
+                    expected_content = dict(content)
+                    generation = expected_content.pop(
+                        "_recall_collector_generation",
+                        None,
+                    )
+                    if (
+                        not isinstance(generation, int)
+                        or sanitize(privacy.value) != expected_content
+                    ):
+                        raise ValueError("source byte window changed")
+                artifact_ref = self._archive_raw(
+                    native_id=row["native_id"],
+                    payload=raw,
+                    occurred_at=envelope["occurred_at"],
+                )
+                envelope = self._envelope(
+                    Path(row["path"]),
+                    row["native_id"],
+                    envelope["kind"],
+                    content,
+                    envelope["occurred_at"],
+                    row["start_offset"],
+                    row["end_offset"],
+                    artifact_ref,
+                )
+                rendered = canonical_json(envelope).decode()
+                self.db.execute(
+                    "UPDATE outbox SET envelope_json=?,queued_at=? WHERE id=?",
+                    (rendered, time.time(), row["id"]),
+                )
+                repaired = dict(row)
+                repaired["envelope_json"] = rendered
+                row = repaired
+            except (
+                OSError,
+                TypeError,
+                ValueError,
+                json.JSONDecodeError,
+                UnicodeDecodeError,
+            ):
+                self.db.execute(
+                    "UPDATE outbox SET state='dead' WHERE id=?",
+                    (row["id"],),
+                )
+                self.db.execute(
+                    "INSERT OR IGNORE INTO dead_letters(path,byte_offset,error_code,error_summary,created_at) VALUES (?,?,?,?,?)",
+                    (
+                        row["path"],
+                        row["start_offset"],
+                        "RecoveryError",
+                        "record recovery rejected",
+                        time.time(),
+                    ),
+                )
+                return None
         if envelope.get("kind") == "tombstone":
             clean = sanitize(envelope["content"])
         else:
