@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "loop": "X0",
+  "captured_at_utc": "2026-07-20T06:02:20Z",
+  "parable_baseline_head": "ddd5f1df94f72311539fb220169fbe7aa872f5d6",
+  "runtime": {
+    "cliproxyapi_upstream_release": "v7.2.88",
+    "cliproxyapi_upstream_commit": "93d74a890a44802f656d7f39a573916b2611896e",
+    "cliproxyapi_local_fix_commit": "ad20a87efbbd41a9d4f24c83ca8bdd934bf34ab7",
+    "cliproxyapi_binary_sha256": "139e1305a878e08026dd0fb6d85a3817801f32e40a40c1954ea1973c5bb9d697",
+    "configuration_mode": "0600"
+  },
+  "authorization": {
+    "provider": "xai",
+    "flow": "oauth_device_code",
+    "attempts": 1,
+    "operator_authorized": true,
+    "record_count": 1,
+    "record_mode": "0600",
+    "record_type": "xai",
+    "auth_kind": "oauth",
+    "has_access_token": true,
+    "has_refresh_token": true,
+    "has_id_token": true,
+    "has_expiry": true,
+    "base_url_host": "api.x.ai"
+  },
+  "environment": {
+    "xai_api_key_set": false,
+    "openai_api_key_set": false,
+    "anthropic_api_key_set": false
+  },
+  "parable_verification": {
+    "tests_passed": 81,
+    "tests_total": 81,
+    "isolated_home": true
+  },
+  "safety": {
+    "device_code_committed": false,
+    "verification_url_committed": false,
+    "account_identifier_committed": false,
+    "credential_material_committed": false,
+    "oauth_record_path_committed": false,
+    "raw_auth_output_committed": false
+  }
+}
