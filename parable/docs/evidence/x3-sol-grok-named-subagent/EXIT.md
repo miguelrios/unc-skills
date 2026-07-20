@@ -71,8 +71,8 @@ named-child coverage moved from zero to five parent-effort permutations.
 - JSON invariants: PASS.
 - Complete Parable suite: PASS, 81/81.
 - Local Claudio-Michel review: 5/5.
-- Focused PR: pending.
-- Verified merged `main`: pending.
+- Focused PR: [#158](https://github.com/miguelrios/unc-skills/pull/158).
+- Verified merged `main`: `63e715f8e6b2baf16d8782d0426970eec3dd7347`.
 
 ## exit → X4
 
