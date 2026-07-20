@@ -384,6 +384,7 @@ for NAME in bin lib runtime RUNTIME_LOCK.json MANIFEST.json; do
 done
 for PLIST in "$LAUNCH_AGENTS"/ai.parcha.recall.*.plist; do
   [ -e "$PLIST" ] || [ -L "$PLIST" ] || continue
+  [ ! -L "$PLIST" ] || { echo "install_location_unsafe" >&2; exit 1; }
   cp -p "$PLIST" "$TRANSACTION/old/plists/"
 done
 
@@ -449,6 +450,97 @@ try:
 finally:
     connection.close()
 PY
+
+preserve_canonical_route() {
+  PLIST=$1
+  SOURCE_ID=$2
+  PREVIOUS="$TRANSACTION/old/plists/$(basename "$PLIST")"
+  [ -f "$PREVIOUS" ] && [ ! -L "$PREVIOUS" ] || return 0
+  "$RUNTIME" - "$PREVIOUS" "$PLIST" "$SOURCE_ID" <<'PY'
+import os
+import plistlib
+import re
+import sys
+import tempfile
+from pathlib import Path
+
+previous_path = Path(sys.argv[1])
+current_path = Path(sys.argv[2])
+expected_source_id = sys.argv[3]
+identity = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._/@+-]{1,255}\Z")
+
+try:
+    with previous_path.open("rb") as source:
+        previous = plistlib.load(source)
+    with current_path.open("rb") as source:
+        current = plistlib.load(source)
+    previous_environment = previous.get("EnvironmentVariables", {})
+    current_environment = current.get("EnvironmentVariables", {})
+    route_keys = {
+        "RECALL_CANONICAL_V2_ENABLED",
+        "RECALL_TENANT_ID",
+        "RECALL_PRINCIPAL_ID",
+    }
+    if not route_keys.intersection(previous_environment):
+        raise SystemExit(0)
+    tenant_id = previous_environment.get("RECALL_TENANT_ID")
+    principal_id = previous_environment.get("RECALL_PRINCIPAL_ID")
+    if (
+        previous_environment.get("RECALL_CANONICAL_V2_ENABLED") != "1"
+        or not isinstance(tenant_id, str)
+        or not identity.fullmatch(tenant_id)
+        or not isinstance(principal_id, str)
+        or not identity.fullmatch(principal_id)
+        or not isinstance(current_environment, dict)
+    ):
+        raise ValueError
+
+    def option(arguments, name):
+        index = arguments.index(name) + 1
+        if index >= len(arguments) or not isinstance(arguments[index], str):
+            raise ValueError
+        return index, arguments[index]
+
+    previous_arguments = previous["ProgramArguments"]
+    current_arguments = list(current["ProgramArguments"])
+    _, previous_source_id = option(previous_arguments, "--source-id")
+    _, previous_principal_id = option(previous_arguments, "--principal-id")
+    _, current_source_id = option(current_arguments, "--source-id")
+    current_principal_index, _ = option(current_arguments, "--principal-id")
+    if (
+        previous_source_id != expected_source_id
+        or current_source_id != expected_source_id
+        or previous_principal_id != principal_id
+    ):
+        raise ValueError
+
+    current_arguments[current_principal_index] = principal_id
+    current_environment = dict(current_environment)
+    current_environment.update({
+        "RECALL_CANONICAL_V2_ENABLED": "1",
+        "RECALL_TENANT_ID": tenant_id,
+        "RECALL_PRINCIPAL_ID": principal_id,
+    })
+    current["ProgramArguments"] = current_arguments
+    current["EnvironmentVariables"] = current_environment
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".recall-install-", suffix=".plist", dir=current_path.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as output:
+            plistlib.dump(current, output, sort_keys=True)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, current_path)
+    finally:
+        temporary.unlink(missing_ok=True)
+except (KeyError, OSError, TypeError, ValueError, plistlib.InvalidFileException):
+    raise SystemExit("canonical_route_preservation_failed") from None
+PY
+}
+
 rm -rf "$PREFIX/bin" "$PREFIX/lib" "$PREFIX/runtime"
 rm -f "$PREFIX/RUNTIME_LOCK.json" "$PREFIX/MANIFEST.json"
 for NAME in bin lib runtime RUNTIME_LOCK.json MANIFEST.json; do
@@ -494,6 +586,7 @@ value = {
 with open(path, "wb") as output:
     plistlib.dump(value, output, sort_keys=True)
 PY
+  preserve_canonical_route "$PLIST" "$SOURCE_ID"
   chmod 600 "$PLIST"
   if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
     launchctl bootstrap "gui/$(id -u)" "$PLIST"
@@ -538,6 +631,7 @@ value = {
 with open(path, "wb") as output:
     plistlib.dump(value, output, sort_keys=True)
 PY
+  preserve_canonical_route "$PLIST" "$SOURCE_ID"
   chmod 600 "$PLIST"
   if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
     launchctl bootstrap "gui/$(id -u)" "$PLIST"
@@ -580,6 +674,7 @@ value = {
 with open(path, "wb") as output:
     plistlib.dump(value, output, sort_keys=True)
 PY
+  preserve_canonical_route "$PLIST" "$SOURCE_ID"
   chmod 600 "$PLIST"
   if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
     launchctl bootstrap "gui/$(id -u)" "$PLIST"
@@ -675,6 +770,7 @@ value = {
 with open(path, "wb") as output:
     plistlib.dump(value, output, sort_keys=True)
 PY
+  preserve_canonical_route "$PLIST" "$SOURCE_ID"
   chmod 600 "$PLIST"
   if [ "$NO_LOAD" -eq 0 ] && command -v launchctl >/dev/null 2>&1; then
     launchctl bootstrap "gui/$(id -u)" "$PLIST"
