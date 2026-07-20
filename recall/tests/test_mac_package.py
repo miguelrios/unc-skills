@@ -238,6 +238,9 @@ class MacPackageTest(unittest.TestCase):
         self.assertIn("lib/client/capture.py", packaged_paths)
         self.assertIn("lib/client/mcp.py", packaged_paths)
         self.assertIn("lib/client/macos_utility.py", packaged_paths)
+        self.assertIn("macos_admin/RecallBrainAdmin.swift", packaged_paths)
+        self.assertIn("macos_admin/Info.plist", packaged_paths)
+        self.assertIn("macos_admin/build.sh", packaged_paths)
 
         wrapper = (package / "bin" / "recall-brain").read_text()
         cli = (package / "lib" / "client" / "cli.py").read_text()
@@ -246,6 +249,10 @@ class MacPackageTest(unittest.TestCase):
         installer = (package / "install.sh").read_text()
         subprocess.run(["sh", "-n", str(package / "install.sh")], check=True)
         subprocess.run(["sh", "-n", str(package / "uninstall.sh")], check=True)
+        subprocess.run(
+            ["sh", "-n", str(package / "macos_admin" / "build.sh")],
+            check=True,
+        )
         self.assertIn('$PREFIX/runtime/bin/python3', installer)
         self.assertNotRegex(installer, r"(?m)(?:^|[ ;])python3(?:[ ;]|$)")
         self.assertIn('RUNTIME_LOCK.json', installer)

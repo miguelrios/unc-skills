@@ -26,8 +26,11 @@ from client.macos_utility import (
     MacUtilityError,
     disable_source,
     mac_status,
+    pause_source,
     reset_local_source,
+    resume_source,
     revoke_source,
+    route_info,
     support_report,
 )
 from client.local_surfaces import (
@@ -440,6 +443,27 @@ def parser() -> argparse.ArgumentParser:
     )
     mac_disable.add_argument("--no-load", action="store_true")
 
+    for command in ("mac-pause", "mac-resume"):
+        lifecycle = commands.add_parser(command)
+        lifecycle.add_argument("--source", choices=tuple(SOURCE_SPECS), required=True)
+        lifecycle.add_argument(
+            "--prefix",
+            default=str(
+                Path.home() / "Library" / "Application Support" / "RecallBrain"
+            ),
+        )
+        lifecycle.add_argument(
+            "--launch-agents",
+            default=str(Path.home() / "Library" / "LaunchAgents"),
+        )
+        lifecycle.add_argument("--no-load", action="store_true")
+
+    mac_route = commands.add_parser("mac-route-info")
+    mac_route.add_argument("--source", choices=tuple(SOURCE_SPECS), required=True)
+    mac_route.add_argument(
+        "--launch-agents", default=str(Path.home() / "Library" / "LaunchAgents")
+    )
+
     mac_revoke = commands.add_parser("mac-revoke")
     mac_revoke.add_argument("--source", choices=tuple(SOURCE_SPECS), required=True)
     mac_revoke.add_argument(
@@ -562,6 +586,28 @@ def main() -> None:
         try:
             result = disable_source(
                 args.source, launch_agents=Path(args.launch_agents), no_load=args.no_load,
+            )
+        except MacUtilityError as error:
+            raise SystemExit(str(error)) from None
+        print(json.dumps(result, sort_keys=True))
+        return
+    if args.command in {"mac-pause", "mac-resume"}:
+        action = pause_source if args.command == "mac-pause" else resume_source
+        try:
+            result = action(
+                args.source,
+                prefix=Path(args.prefix),
+                launch_agents=Path(args.launch_agents),
+                no_load=args.no_load,
+            )
+        except MacUtilityError as error:
+            raise SystemExit(str(error)) from None
+        print(json.dumps(result, sort_keys=True))
+        return
+    if args.command == "mac-route-info":
+        try:
+            result = route_info(
+                args.source, launch_agents=Path(args.launch_agents)
             )
         except MacUtilityError as error:
             raise SystemExit(str(error)) from None

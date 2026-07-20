@@ -63,7 +63,7 @@ infrastructure. The example is synthetic; a live manifest belongs in a private m
 location and contains references, never credential values.
 
 The production database gate requires a standard PostgreSQL URL with
-`sslmode=verify-full` and an explicit trust root, schema migrations 1 through 29,
+`sslmode=verify-full` and an explicit trust root, schema migrations 1 through 30,
 pgvector 0.8.0 or newer, and a runtime role without superuser, database/role creation,
 replication, or RLS-bypass privilege:
 
@@ -211,18 +211,24 @@ grant on the exact source.
 
 ## Unified connector administration
 
-Schema 029 adds one tenant-aware connector control plane for the web switchboard
-and native utilities. A connector installation is always bound to one principal,
+Schemas 029–030 add one tenant-aware connector control plane for the web
+switchboard and native utilities. A connector installation is always bound to one principal,
 one destination brain, and one opaque source ID. Connecting the same provider to
 personal and company memory creates separate installations; it never implies a
 cross-brain grant.
 
-Enable the browser surface only after injecting all of these through the runtime
-secret manager:
+Enable the browser and native control surface only after injecting the required
+owner boundary through the runtime secret manager:
 
 ```text
 RECALL_ADMIN_WEB_ENABLED=1
 RECALL_CONTROL_ENCRYPTION_KEY=<base64url-encoded random 32 bytes>
+```
+
+Google Workspace is optional. It becomes available only when all three values
+below are configured; a partial set fails startup closed:
+
+```text
 RECALL_GOOGLE_CLIENT_ID=<Google web application client ID>
 RECALL_GOOGLE_CLIENT_SECRET=<Google web application client secret>
 RECALL_GOOGLE_REDIRECT_URI=https://<public-host>/admin/oauth/callback/google

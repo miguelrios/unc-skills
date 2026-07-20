@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Recall BrainStore API
-  version: 0.7.0-unified-control
+  version: 0.8.0-device-control
   license:
     name: MIT
     identifier: MIT
@@ -245,6 +245,24 @@ paths:
         '400': {description: Invalid callback}
         '403': {description: Expired, consumed, or insufficient-scope grant}
         '502': {description: Provider exchange failed closed}
+  /admin/api/v1/device/installations:
+    post:
+      summary: Route one installed local collector to exactly one administrable brain
+      operationId: createDeviceConnectorInstallation
+      security:
+        - adminSession: []
+      parameters:
+        - $ref: '#/components/parameters/AdminCsrf'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/DeviceRouteRequestV1'}
+      responses:
+        '201':
+          description: Prior device route revoked and one-time source credential returned
+        '400': {description: Invalid device, connector, source, selector, or privacy policy}
+        '403': {description: CSRF failure or destination brain is not administrable}
   /admin/api/v1/installations/{installation_id}/actions:
     post:
       summary: Enable, pause, resume, revoke, or uninstall one routed source
@@ -323,6 +341,21 @@ components:
       properties:
         connector_id: {type: string, minLength: 3, maxLength: 128}
         tenant_id: {type: string, minLength: 2, maxLength: 256}
+        privacy_mode: {enum: [scrub, drop]}
+        selectors:
+          type: object
+          description: Closed against the selected connector's registry fields.
+    DeviceRouteRequestV1:
+      type: object
+      additionalProperties: false
+      required:
+        [connector_id, tenant_id, device_id, source_id, privacy_mode, selectors]
+      properties:
+        connector_id: {type: string, minLength: 3, maxLength: 128}
+        tenant_id: {type: string, minLength: 2, maxLength: 256}
+        device_id:
+          {type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9_.-]{2,63}$'}
+        source_id: {type: string, minLength: 2, maxLength: 256}
         privacy_mode: {enum: [scrub, drop]}
         selectors:
           type: object

@@ -6,6 +6,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from server.recall_server.control import (
     ControlError,
+    ControlPlane,
     GoogleOAuthProvider,
     SecretBox,
 )
@@ -103,6 +104,46 @@ class AdminProfileTests(unittest.TestCase):
         }
         with patch.dict(os.environ, complete, clear=True):
             validate_http_profile()
+
+    def test_public_admin_operates_without_an_oauth_provider(self):
+        local_only = {
+            "RECALL_ADMIN_WEB_ENABLED": "1",
+            "RECALL_AUTH_REQUIRED": "1",
+            "RECALL_HTTP_PROFILE": "public-mcp",
+            "RECALL_CONTROL_ENCRYPTION_KEY": base64.urlsafe_b64encode(
+                b"k" * 32
+            ).rstrip(b"=").decode(),
+        }
+        with patch.dict(os.environ, local_only, clear=True):
+            validate_http_profile()
+            self.assertEqual(ControlPlane.from_env(object()).providers, {})
+
+    def test_partial_google_configuration_fails_closed(self):
+        partial = {
+            "RECALL_ADMIN_WEB_ENABLED": "1",
+            "RECALL_AUTH_REQUIRED": "1",
+            "RECALL_HTTP_PROFILE": "public-mcp",
+            "RECALL_CONTROL_ENCRYPTION_KEY": base64.urlsafe_b64encode(
+                b"k" * 32
+            ).rstrip(b"=").decode(),
+            "RECALL_GOOGLE_CLIENT_ID": "synthetic-client",
+        }
+        with patch.dict(os.environ, partial, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "must be complete"):
+                validate_http_profile()
+
+    def test_device_route_rejects_non_scalar_identifiers_before_storage(self):
+        plane = ControlPlane(object(), object(), {})
+        with self.assertRaisesRegex(ControlError, "device_route_invalid"):
+            plane.create_device_installation(
+                principal_id="principal:owner",
+                connector_id=["local.codex"],
+                tenant_id="tenant:personal",
+                device_id="mac-synthetic",
+                source_id="codex:synthetic",
+                privacy_mode="scrub",
+                selectors={},
+            )
 
 
 if __name__ == "__main__":

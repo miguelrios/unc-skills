@@ -22,41 +22,53 @@ class SourceSpec:
     label: str
     spool_name: str
     surface: str
+    connector_id: str
 
 
 SOURCE_SPECS = {
     "claude-code": SourceSpec(
-        "ai.parcha.recall.claude", "claude.db", "claude-code-project-jsonl"
+        "ai.parcha.recall.claude", "claude.db", "claude-code-project-jsonl",
+        "local.claude-code",
     ),
     "codex": SourceSpec(
-        "ai.parcha.recall.codex", "codex.db", "chatgpt-codex-desktop-rollouts"
+        "ai.parcha.recall.codex", "codex.db", "chatgpt-codex-desktop-rollouts",
+        "local.codex",
     ),
     "cowork": SourceSpec(
-        "ai.parcha.recall.cowork", "cowork.db", "claude-cowork-project-jsonl"
+        "ai.parcha.recall.cowork", "cowork.db", "claude-cowork-project-jsonl",
+        "local.cowork",
     ),
     "chatgpt-export": SourceSpec(
-        "ai.parcha.recall.chatgpt-export", "chatgpt-export-runner.db", "chatgpt-export-inbox"
+        "ai.parcha.recall.chatgpt-export", "chatgpt-export-runner.db",
+        "chatgpt-export-inbox", "local.chatgpt-export",
     ),
     "imessage": SourceSpec(
-        "ai.parcha.recall.imessage", "imessage.db", "apple-imessage-read-only-snapshot"
+        "ai.parcha.recall.imessage", "imessage.db",
+        "apple-imessage-read-only-snapshot", "apple.imessage",
     ),
     "whatsapp": SourceSpec(
-        "ai.parcha.recall.whatsapp", "whatsapp.db", "whatsapp-selected-text-export"
+        "ai.parcha.recall.whatsapp", "whatsapp.db",
+        "whatsapp-selected-text-export", "whatsapp.export",
     ),
     "selected-text": SourceSpec(
-        "ai.parcha.recall.selected-text", "selected-text.db", "selected-markdown-obsidian-root"
+        "ai.parcha.recall.selected-text", "selected-text.db",
+        "selected-markdown-obsidian-root", "local.selected-text",
     ),
     "safari": SourceSpec(
-        "ai.parcha.recall.safari", "safari.db", "selected-safari-history-bookmarks"
+        "ai.parcha.recall.safari", "safari.db",
+        "selected-safari-history-bookmarks", "apple.safari",
     ),
     "chrome": SourceSpec(
-        "ai.parcha.recall.chrome", "chrome.db", "selected-chrome-history-bookmarks"
+        "ai.parcha.recall.chrome", "chrome.db",
+        "selected-chrome-history-bookmarks", "google.chrome",
     ),
     "apple-notes": SourceSpec(
-        "ai.parcha.recall.apple-notes", "apple-notes.db", "apple-notes-pinned-snippet-schema"
+        "ai.parcha.recall.apple-notes", "apple-notes.db",
+        "apple-notes-pinned-snippet-schema", "apple.notes",
     ),
     "hermes": SourceSpec(
-        "ai.parcha.recall.hermes", "hermes.db", "hermes-session-schema-v22"
+        "ai.parcha.recall.hermes", "hermes.db", "hermes-session-schema-v22",
+        "hermes.sessions",
     ),
 }
 
@@ -145,11 +157,22 @@ def _source_status(*, prefix: Path, launch_agents: Path, name: str, now: float) 
     plist = launch_agents / f"{spec.label}.plist"
     plist_exists = plist.exists() or plist.is_symlink()
     privacy_mode = _plist_privacy(plist)
-    enabled = _regular(plist) and privacy_mode is not None
+    marker = prefix / "state" / f"{name}.paused"
+    marker_exists = marker.exists() or marker.is_symlink()
+    paused = _regular(marker)
+    enabled = (
+        _regular(plist)
+        and privacy_mode is not None
+        and not marker_exists
+    )
     state = prefix / "state" / spec.spool_name
     state_exists = state.exists() or state.is_symlink()
     metadata = _metadata(state)
-    if plist_exists and not enabled:
+    if marker_exists and not paused:
+        health = "invalid_local_state"
+    elif paused and _regular(plist) and privacy_mode is not None:
+        health = "paused"
+    elif plist_exists and not enabled:
         health = "invalid_local_state"
     elif not enabled:
         health = "disabled"
@@ -180,6 +203,150 @@ def _source_status(*, prefix: Path, launch_agents: Path, name: str, now: float) 
         "state_present": metadata is not None,
         "privacy_mode": privacy_mode,
         "surface": spec.surface,
+        "connector_id": spec.connector_id,
+    }
+
+
+def _launch_target(spec: SourceSpec) -> str:
+    return f"gui/{os.getuid()}/{spec.label}"
+
+
+def _stop_agent(spec: SourceSpec) -> None:
+    target = _launch_target(spec)
+    try:
+        subprocess.run(
+            ["/bin/launchctl", "bootout", target],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        for _ in range(100):
+            result = subprocess.run(
+                ["/bin/launchctl", "print", target],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if result.returncode != 0:
+                return
+            time.sleep(0.1)
+    except OSError:
+        raise MacUtilityError("launch_control_unavailable") from None
+    raise MacUtilityError("launch_agent_stop_failed")
+
+
+def _pause_marker(prefix: Path, name: str) -> Path:
+    root = _state_root(Path(prefix))
+    try:
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        details = root.lstat()
+        if stat.S_ISLNK(details.st_mode) or not stat.S_ISDIR(details.st_mode):
+            raise OSError
+    except OSError:
+        raise MacUtilityError("local_state_unsafe") from None
+    return root / f"{name}.paused"
+
+
+def pause_source(
+    name: str,
+    *,
+    prefix: Path,
+    launch_agents: Path,
+    no_load: bool = False,
+) -> dict[str, Any]:
+    """Stop a configured collector while retaining its exact launch configuration."""
+
+    if name not in SOURCE_SPECS:
+        raise MacUtilityError("unknown_source")
+    plist = Path(launch_agents) / f"{SOURCE_SPECS[name].label}.plist"
+    _plist_arguments(plist)
+    if not no_load:
+        _stop_agent(SOURCE_SPECS[name])
+    marker = _pause_marker(Path(prefix), name)
+    try:
+        descriptor = os.open(
+            marker,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(b"paused\n")
+    except OSError:
+        raise MacUtilityError("pause_marker_failed") from None
+    return {
+        "schema_version": 1,
+        "mode": "mac-pause",
+        "source": name,
+        "enabled": False,
+        "configuration_retained": True,
+        "state_retained": True,
+    }
+
+
+def resume_source(
+    name: str,
+    *,
+    prefix: Path,
+    launch_agents: Path,
+    no_load: bool = False,
+) -> dict[str, Any]:
+    """Restart an explicitly configured collector without changing its authority."""
+
+    if name not in SOURCE_SPECS:
+        raise MacUtilityError("unknown_source")
+    spec = SOURCE_SPECS[name]
+    plist = Path(launch_agents) / f"{spec.label}.plist"
+    _plist_arguments(plist)
+    marker = _pause_marker(Path(prefix), name)
+    try:
+        marker.unlink(missing_ok=True)
+    except OSError:
+        raise MacUtilityError("pause_marker_failed") from None
+    if not no_load:
+        try:
+            result = subprocess.run(
+                ["/bin/launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            raise MacUtilityError("launch_control_unavailable") from None
+        if result.returncode != 0:
+            pause_source(
+                name,
+                prefix=prefix,
+                launch_agents=launch_agents,
+                no_load=True,
+            )
+            raise MacUtilityError("launch_agent_start_failed")
+    return {
+        "schema_version": 1,
+        "mode": "mac-resume",
+        "source": name,
+        "enabled": True,
+        "configuration_retained": True,
+        "state_retained": True,
+    }
+
+
+def route_info(name: str, *, launch_agents: Path) -> dict[str, Any]:
+    """Return only the authority references needed to rotate one installed route."""
+
+    if name not in SOURCE_SPECS:
+        raise MacUtilityError("unknown_source")
+    arguments = _plist_arguments(
+        Path(launch_agents) / f"{SOURCE_SPECS[name].label}.plist"
+    )
+    return {
+        "schema_version": 1,
+        "mode": "mac-route-info",
+        "source": name,
+        "connector_id": SOURCE_SPECS[name].connector_id,
+        "source_id": _option(arguments, "--source-id"),
+        "keychain_service": _option(arguments, "--keychain-service"),
+        "keychain_account": _option(arguments, "--keychain-account"),
+        "privacy_mode": _option(arguments, "--privacy-mode"),
     }
 
 
@@ -216,24 +383,7 @@ def disable_source(name: str, *, launch_agents: Path, no_load: bool = False) -> 
         raise MacUtilityError("invalid_no_load")
     spec = SOURCE_SPECS[name]
     if not no_load:
-        target = f"gui/{os.getuid()}/{spec.label}"
-        try:
-            subprocess.run(
-                ["/bin/launchctl", "bootout", target], check=False,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            for _ in range(100):
-                result = subprocess.run(
-                    ["/bin/launchctl", "print", target], check=False,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
-                if result.returncode != 0:
-                    break
-                time.sleep(0.1)
-            else:
-                raise MacUtilityError("launch_agent_stop_failed")
-        except OSError:
-            raise MacUtilityError("launch_control_unavailable") from None
+        _stop_agent(spec)
     try:
         (Path(launch_agents) / f"{spec.label}.plist").unlink(missing_ok=True)
     except OSError:
