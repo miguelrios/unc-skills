@@ -65,8 +65,8 @@ from private evidence to all three packaged public entry points.
 - Complete Parable suite: PASS, 81/81.
 - Package dry-run: PASS, 32 files.
 - Local Claudio-Michel review: 5/5.
-- Focused PR: pending.
-- Verified merged `main`: pending.
+- Focused PR: [#160](https://github.com/miguelrios/unc-skills/pull/160).
+- Verified merged `main`: `7a97cb3946743f6311a71d6a9e36b1d8a2b0219c`.
 
 ## exit → X5
 
