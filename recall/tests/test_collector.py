@@ -397,6 +397,11 @@ class CollectorTest(unittest.TestCase):
             tenant_id="tenant:personal",
         )
 
+        self.assertEqual(
+            archived,
+            [],
+            "privacy-state migration must not archive the entire pending spool",
+        )
         self.assertEqual(canonical.flush()["acked"], 51)
         self.assertEqual(len(archived), 51)
         self.assertEqual(len(ingested), 51)
