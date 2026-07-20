@@ -178,7 +178,11 @@ class Collector:
         if self.privacy.mode != "off":
             self.db.execute("PRAGMA secure_delete=ON")
             for row in list(self.db.execute("SELECT * FROM outbox WHERE state='pending' ORDER BY id")):
-                self._repair_pending_envelope(row)
+                # A privacy-policy migration must not turn startup into an
+                # unbounded archive backfill. Re-scrub the durable envelope
+                # here; the ordinary bounded flush repairs missing artifact
+                # references immediately before their batch is committed.
+                self._repair_pending_envelope(row, repair_artifact=False)
             self.db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('privacy_policy_state',?)", (state,))
             self.db.commit()
             self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -571,10 +575,16 @@ class Collector:
         self.db.commit()
         return result
 
-    def _repair_pending_envelope(self, row: sqlite3.Row) -> dict | None:
+    def _repair_pending_envelope(
+        self,
+        row: sqlite3.Row,
+        *,
+        repair_artifact: bool = True,
+    ) -> dict | None:
         envelope = json.loads(row["envelope_json"])
         if (
-            self.archive is not None
+            repair_artifact
+            and self.archive is not None
             and "artifact_ref" not in envelope.get("provenance", {})
         ):
             try:
