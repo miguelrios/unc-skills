@@ -79,7 +79,7 @@ class Collector:
                  visibility: str = "private", batch_size: int = 500,
                  privacy: PrivacyPolicy | None = None, brain_writer: Any = None,
                  archive: Any = None, tenant_id: str | None = None,
-                 archive_workers: int = 8):
+                 archive_workers: int = 2):
         if harness not in {"claude", "codex"}:
             raise ValueError("harness must be claude or codex")
         if visibility not in {"private", "shared"}:
@@ -433,6 +433,8 @@ class Collector:
                                 commit_pending()
                             self._save_file_progress(path_text, stat, current_fingerprint, complete_end, "scanning-" + mode, file_scan_id)
                             self.db.commit()
+                            if self.brain_writer is not None:
+                                self.flush()
                 while pending:
                     commit_pending()
                 if not append:
