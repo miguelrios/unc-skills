@@ -179,23 +179,29 @@ every agent's own `model:` field and would otherwise silently route all children
 The proxy owns provider OAuth. Parable stores no provider credential and does not implement an
 OAuth flow.
 
-### Verified GPT effort caveat
+### Verified GPT effort support
 
-With stock Claude Code `2.1.215` and CLIProxyAPI `v7.2.88`, Sol, Terra, and
-Luna all complete text and tool-using requests through ChatGPT subscription
-OAuth. However, only `medium` is currently effective upstream. Claude Code
-sends every explicit `--effort` as `output_config.effort` for these exact
-third-party model ids but omits the `thinking` object; CLIProxyAPI's
-Claude-to-Codex translator therefore defaults every request to
-`reasoning.effort=medium`. Setting
-`CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1` does not change that wire shape.
+With stock Claude Code `2.1.215`, Sol, Terra, and Luna complete text and
+tool-using requests through ChatGPT subscription OAuth. Released CLIProxyAPI
+`v7.2.88` does **not** provide exact non-medium effort: Claude Code sends
+`output_config.effort` but omits `thinking`, and that release translates all
+five settings to `reasoning.effort=medium`. The
+[released-binary receipt](../../../docs/evidence/g1-gpt-model-effort-live/receipt.json)
+and [mechanism diagnosis](../../../docs/evidence/g1-gpt-model-effort-live/mechanism.md)
+record the 3/15 exact baseline. Setting
+`CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1` does not change the wire shape.
 
-Treat `low`, `high`, `xhigh`, and `max` as accepted-but-not-effective for this
-version pair. Do not infer GPT effort from the Claude CLI flag. See the
-[sanitized live receipt](../../../docs/evidence/g1-gpt-model-effort-live/receipt.json)
-and [mechanism diagnosis](../../../docs/evidence/g1-gpt-model-effort-live/mechanism.md).
-Exact non-medium control requires a CLIProxyAPI translator fix followed by a
-repeat of the live matrix.
+A source patch based on CLIProxyAPI commit
+`93d74a890a44802f656d7f39a573916b2611896e` fixes the general
+Claude-to-Codex translation boundary. Its independently built binary preserved
+`low|medium|high|xhigh|max` exactly for all three models: 15/15 text cells and
+3/3 medium tool canaries passed through ChatGPT OAuth. See the
+[patched live receipt](../../../docs/evidence/e2-cliproxy-effort-live/receipt.json).
+
+The patch is not an upstream release. Until CLIProxyAPI merges and releases
+the change, released `v7.2.88` users must treat non-medium effort as
+accepted-but-not-effective. The reproducible patched-source build route is
+published separately by loop E3.
 
 ## Reading subscription headroom (parable-usage.sh)
 
