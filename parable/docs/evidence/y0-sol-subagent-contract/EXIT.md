@@ -38,8 +38,8 @@ canonical OSS path remains the provider's standard OAuth flow.
 
 - JSON invariants: PASS.
 - Local Claudio-Michel review: 5/5.
-- Focused PR: pending.
-- Verified merged `main`: pending.
+- Focused PR: [#163](https://github.com/miguelrios/unc-skills/pull/163).
+- Verified merged `main`: `d8d660cd0134c371bc3f9ae0d419cdb20b835e6f`.
 
 ## exit → Y1
 
