@@ -26,7 +26,12 @@ struct ProviderState: Codable, Identifiable {
     let status: String
 }
 
+struct Principal: Codable {
+    let id: String
+}
+
 struct ControlState: Codable {
+    let principal: Principal
     let brains: [Brain]
     let providers: [ProviderState]
     let installations: [Installation]
@@ -66,6 +71,10 @@ struct TransitionResponse: Codable {
 
 struct LifecycleResponse: Codable {
     let enabled: Bool
+}
+
+struct RouteApplyResponse: Codable {
+    let canonical_v2: Bool
 }
 
 enum AdminFailure: LocalizedError {
@@ -206,15 +215,20 @@ final class RecallAdminModel: ObservableObject {
             $0.device_id == deviceID && $0.connector_id == source.connector_id
                 && !["revoked", "uninstalled"].contains($0.state)
         })
+        let route: RouteInfo = try await runRecall([
+            "mac-route-info", "--source", name,
+        ])
+        if source.enabled {
+            let _: LifecycleResponse = try await runRecall([
+                "mac-pause", "--source", name,
+            ])
+        }
         if active?.tenant_id == tenant && active?.state == "paused" {
             try await transition(active!.id, action: "resume")
         } else if active?.tenant_id == tenant && active?.state == "enabled"
                     && source.enabled {
-            return
+            // Restart below so retained LaunchAgent authority changes take effect.
         } else if active?.tenant_id != tenant || active == nil {
-            let route: RouteInfo = try await runRecall([
-                "mac-route-info", "--source", name,
-            ])
             let payload: [String: Any] = [
                 "connector_id": route.connector_id,
                 "tenant_id": tenant,
@@ -237,11 +251,16 @@ final class RecallAdminModel: ObservableObject {
                 service: route.keychain_service,
                 account: route.keychain_account
             )
-            if source.enabled {
-                let _: LifecycleResponse = try await runRecall([
-                    "mac-pause", "--source", name,
-                ])
-            }
+        }
+        guard let principal = control?.principal.id else {
+            throw AdminFailure.closed("brain_principal_missing")
+        }
+        let applied: RouteApplyResponse = try await runRecall([
+            "mac-route-apply", "--source", name,
+            "--tenant-id", tenant, "--principal-id", principal,
+        ])
+        guard applied.canonical_v2 else {
+            throw AdminFailure.closed("canonical_route_apply_failed")
         }
         let _: LifecycleResponse = try await runRecall([
             "mac-resume", "--source", name,
@@ -533,7 +552,7 @@ enum RecallBrainAdminMain {
     static func main() {
         if CommandLine.arguments == [CommandLine.arguments[0], "--self-test"] {
             let controlJSON = """
-            {"brains":[
+            {"principal":{"id":"principal:synthetic"},"brains":[
               {"tenant_id":"tenant:personal:synthetic","slug":"personal","brain_kind":"personal","display_name":"Personal","permission":"owner"},
               {"tenant_id":"tenant:company:synthetic","slug":"company","brain_kind":"company","display_name":"Company","permission":"owner"}
             ],"providers":[],"installations":[]}
