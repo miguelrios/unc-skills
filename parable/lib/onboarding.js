@@ -2,6 +2,7 @@
 
 const crypto = require("crypto");
 const fs = require("fs");
+const http = require("http");
 const os = require("os");
 const path = require("path");
 const readline = require("readline/promises");
@@ -21,6 +22,9 @@ const PROXY_REPOSITORY = "https://github.com/router-for-me/CLIProxyAPI.git";
 const PROXY_COMMIT = "93d74a890a44802f656d7f39a573916b2611896e";
 const PROXY_PATCH_SHA256 = "d35b422da321265150fe393da80a686862ef642ee45c65a3e2fb908d689d5d1f";
 const PROXY_BINARY_NAME = "parable-cliproxy-api";
+const DEFAULT_PROXY_READY_TIMEOUT_MS = 15_000;
+const PROXY_PROBE_TIMEOUT_MS = 750;
+const PROXY_STOP_TIMEOUT_MS = 2_000;
 const VENDOR_ORDER = Object.freeze(["chatgpt", "claude", "xai"]);
 const AUTH_FLAGS = Object.freeze({
   chatgpt: Object.freeze({ browser: "--codex-login", device: "--codex-device-login" }),
@@ -41,7 +45,12 @@ const VENDORS = Object.freeze({
   xai: Object.freeze({ models: Object.freeze(["grok-4.5"]) }),
 });
 
-class OnboardingError extends Error {}
+class OnboardingError extends Error {
+  constructor(message, exitCode = 1) {
+    super(message);
+    this.exitCode = exitCode;
+  }
+}
 
 class PromptSession {
   constructor(input, output) {
@@ -906,11 +915,15 @@ async function runAuthStatus(argv, log) {
   log(options.json ? JSON.stringify(status, null, 2) : renderAuthStatus(status));
 }
 
-function forwardSignals(child) {
+function forwardSignals(children, onSignal = () => {}) {
+  const targets = Array.isArray(children) ? children : [children];
   const handlers = new Map();
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
     const handler = () => {
-      if (!child.killed) child.kill(signal);
+      onSignal(signal);
+      for (const child of targets) {
+        if (child.exitCode === null && child.signalCode === null) child.kill(signal);
+      }
     };
     handlers.set(signal, handler);
     process.on(signal, handler);
@@ -952,6 +965,277 @@ async function runProxyStart(argv, log) {
       else resolve(128 + (os.constants.signals[signal] || 0));
     });
   });
+}
+
+function signalExitCode(signal) {
+  return 128 + (os.constants.signals[signal] || 0);
+}
+
+function childExitCode(outcome) {
+  return outcome.code === null ? signalExitCode(outcome.signal) : outcome.code;
+}
+
+function observeChild(child, label) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      reject(new OnboardingError(`${label} could not start: ${error.message}`));
+    });
+    child.once("exit", (code, signal) => {
+      if (settled) return;
+      settled = true;
+      resolve({ code, signal });
+    });
+  });
+}
+
+function observedChild(child, label) {
+  const record = { child, outcome: null, error: null, done: null };
+  record.done = observeChild(child, label).then(
+    (outcome) => {
+      record.outcome = outcome;
+      return outcome;
+    },
+    (error) => {
+      record.error = error;
+      return null;
+    },
+  );
+  return record;
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function readinessTimeoutMs() {
+  const raw = process.env.PARABLE_PROXY_READY_TIMEOUT_MS;
+  if (raw === undefined) return DEFAULT_PROXY_READY_TIMEOUT_MS;
+  if (!/^[0-9]+$/.test(raw)) {
+    throw new OnboardingError("PARABLE_PROXY_READY_TIMEOUT_MS must be an integer");
+  }
+  const value = Number(raw);
+  if (value < 50 || value > 120_000) {
+    throw new OnboardingError(
+      "PARABLE_PROXY_READY_TIMEOUT_MS must be between 50 and 120000",
+    );
+  }
+  return value;
+}
+
+function probeModels(port, token) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+    const request = http.request(
+      {
+        hostname: "127.0.0.1",
+        port,
+        path: "/v1/models",
+        method: "GET",
+        agent: false,
+        headers: {
+          Accept: "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+      },
+      (response) => {
+        let body = "";
+        let oversized = false;
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          if (body.length + chunk.length > 1_048_576) {
+            oversized = true;
+            return;
+          }
+          body += chunk;
+        });
+        response.on("end", () => {
+          if (response.statusCode !== 200) {
+            finish({ kind: "occupied", detail: `HTTP ${response.statusCode}` });
+            return;
+          }
+          if (oversized) {
+            finish({ kind: "occupied", detail: "oversized /v1/models response" });
+            return;
+          }
+          try {
+            const payload = JSON.parse(body);
+            if (!payload || !Array.isArray(payload.data)) throw new Error("missing data array");
+            finish({ kind: "ready" });
+          } catch {
+            finish({ kind: "occupied", detail: "invalid /v1/models response" });
+          }
+        });
+      },
+    );
+    request.setTimeout(PROXY_PROBE_TIMEOUT_MS, () => {
+      const error = new Error("probe timeout");
+      error.code = "ETIMEDOUT";
+      request.destroy(error);
+    });
+    request.once("error", (error) => {
+      if (error.code === "ECONNREFUSED") finish({ kind: "absent" });
+      else finish({ kind: "occupied", detail: error.code || "network error" });
+    });
+    request.end();
+  });
+}
+
+function spawnManagedProxy(context) {
+  const child = spawn(
+    context.manifest.proxyBinary,
+    ["--config", context.paths.proxyConfig, "--local-model"],
+    { stdio: ["ignore", "ignore", "ignore"], env: process.env },
+  );
+  return observedChild(child, "CLIProxyAPI");
+}
+
+function outcomeDescription(outcome) {
+  if (!outcome) return "before reporting an exit status";
+  if (outcome.code !== null) return `with exit status ${outcome.code}`;
+  return `from signal ${outcome.signal}`;
+}
+
+async function waitForOwnedProxy(record, port, token, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let lastDetail = "connection refused";
+  while (Date.now() < deadline) {
+    if (record.error) throw record.error;
+    if (record.outcome) {
+      const status = childExitCode(record.outcome);
+      throw new OnboardingError(
+        `CLIProxyAPI exited ${outcomeDescription(record.outcome)} before readiness`,
+        status === 0 ? 1 : status,
+      );
+    }
+    const probe = await probeModels(port, token);
+    if (record.error) throw record.error;
+    if (record.outcome) {
+      const status = childExitCode(record.outcome);
+      throw new OnboardingError(
+        `CLIProxyAPI exited ${outcomeDescription(record.outcome)} before readiness`,
+        status === 0 ? 1 : status,
+      );
+    }
+    if (probe.kind === "ready") return;
+    lastDetail = probe.detail || "connection refused";
+    if (probe.kind === "occupied") {
+      throw new OnboardingError(
+        `managed CLIProxyAPI did not expose an authenticated model catalog (${lastDetail})`,
+      );
+    }
+    await Promise.race([delay(100), record.done]);
+  }
+  throw new OnboardingError(
+    `timed out after ${timeoutMs}ms waiting for managed CLIProxyAPI readiness (${lastDetail})`,
+  );
+}
+
+async function stopObservedChild(record, signal = "SIGTERM") {
+  if (!record || record.outcome || record.error) return;
+  record.child.kill(signal);
+  await Promise.race([record.done, delay(PROXY_STOP_TIMEOUT_MS)]);
+  if (!record.outcome && !record.error) {
+    record.child.kill("SIGKILL");
+    await record.done;
+  }
+}
+
+function spawnClaude(argv, env) {
+  const child = spawn(
+    "python3",
+    [PARABLE_PY, "claude", "--", ...argv],
+    { stdio: "inherit", env },
+  );
+  return observedChild(child, "python3");
+}
+
+async function runClaude(argv, log) {
+  const setupDirectory = path.resolve(activeSetupDirectory());
+  const paths = setupPaths(setupDirectory);
+  if (!lstatOrNull(paths.manifest)) {
+    const legacy = spawnClaude(argv, claudeClientEnvironment());
+    let forwardedSignal = null;
+    const stopForwarding = forwardSignals(legacy.child, (signal) => {
+      forwardedSignal = signal;
+    });
+    try {
+      const outcome = await legacy.done;
+      if (legacy.error) throw legacy.error;
+      return forwardedSignal ? signalExitCode(forwardedSignal) : childExitCode(outcome);
+    } finally {
+      stopForwarding();
+    }
+  }
+
+  const context = loadSetupContext();
+  const token = readExistingToken(context.paths);
+  const env = { ...process.env, CLIPROXY_API_KEY: token };
+  const initialProbe = await probeModels(context.manifest.port, token);
+  if (initialProbe.kind === "occupied") {
+    throw new OnboardingError(
+      `configured proxy endpoint is occupied or unhealthy (${initialProbe.detail}); `
+        + "refusing to start or stop an unknown listener",
+    );
+  }
+
+  let ownedProxy = null;
+  try {
+    if (initialProbe.kind === "ready") {
+      log("proxy: reusing healthy configured endpoint");
+    } else {
+      log("proxy: starting managed CLIProxyAPI");
+      ownedProxy = spawnManagedProxy(context);
+      await waitForOwnedProxy(
+        ownedProxy,
+        context.manifest.port,
+        token,
+        readinessTimeoutMs(),
+      );
+    }
+
+    const claude = spawnClaude(argv, env);
+    let forwardedSignal = null;
+    const signalTargets = ownedProxy
+      ? [claude.child, ownedProxy.child] : [claude.child];
+    const stopForwarding = forwardSignals(signalTargets, (signal) => {
+      forwardedSignal = signal;
+    });
+    try {
+      if (!ownedProxy) {
+        const outcome = await claude.done;
+        if (claude.error) throw claude.error;
+        return forwardedSignal ? signalExitCode(forwardedSignal) : childExitCode(outcome);
+      }
+      const winner = await Promise.race([
+        claude.done.then((outcome) => ({ owner: "claude", outcome })),
+        ownedProxy.done.then((outcome) => ({ owner: "proxy", outcome })),
+      ]);
+      if (winner.owner === "claude") {
+        if (claude.error) throw claude.error;
+        return forwardedSignal ? signalExitCode(forwardedSignal) : childExitCode(winner.outcome);
+      }
+      await stopObservedChild(claude);
+      if (ownedProxy.error) throw ownedProxy.error;
+      if (forwardedSignal) return signalExitCode(forwardedSignal);
+      const status = childExitCode(winner.outcome);
+      throw new OnboardingError(
+        `managed CLIProxyAPI exited ${outcomeDescription(winner.outcome)} while Claude was running`,
+        status === 0 ? 1 : status,
+      );
+    } finally {
+      stopForwarding();
+    }
+  } finally {
+    await stopObservedChild(ownedProxy);
+  }
 }
 
 async function runSetup(argv, log) {
@@ -1035,9 +1319,9 @@ async function runSetup(argv, log) {
   }
   if (!options.no_auth) {
     for (const vendor of context.vendors) runNativeAuth(context, vendor, false, log);
-    log("authorization complete; next: parable proxy start");
+    log("authorization complete; next: parable claude");
   } else {
-    log("next: authorize each selected subscription, then start the local proxy");
+    log("next: authorize each selected subscription, then run parable claude");
   }
   return context;
 }
@@ -1052,6 +1336,7 @@ module.exports = {
   claudeClientEnvironment,
   runAuthAdd,
   runAuthStatus,
+  runClaude,
   runProxyBuild,
   runProxyStart,
   runSetup,

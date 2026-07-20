@@ -5,9 +5,12 @@ import json
 import os
 import secrets
 import shutil
+import signal
+import socket
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -37,7 +40,9 @@ echo '{"type":"agent_end"}'
 FAKE_CLAUDE = """#!/usr/bin/env python3
 import json
 import os
+import signal
 import sys
+import time
 
 capture = {
     "argv": sys.argv[1:],
@@ -57,6 +62,18 @@ capture = {
 }
 with open(os.environ["FAKE_CLAUDE_CAPTURE"], "w") as handle:
     json.dump(capture, handle)
+if os.environ.get("FAKE_CLAUDE_WAIT"):
+    def stop(signum, _frame):
+        target = os.environ.get("FAKE_CLAUDE_SIGNAL_CAPTURE")
+        if target:
+            with open(target, "w") as handle:
+                json.dump({"pid": os.getpid(), "signal": signum}, handle)
+        raise SystemExit(128 + signum)
+    for handled in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(handled, stop)
+    while True:
+        time.sleep(0.05)
+raise SystemExit(int(os.environ.get("FAKE_CLAUDE_EXIT", "0")))
 """
 
 CONFIG = """
@@ -117,6 +134,9 @@ class _ModelHandler(BaseHTTPRequestHandler):
         server.authorization_ok = (
             self.headers.get("Authorization") == f"Bearer {server.expected_token}"
         )
+        if not server.authorization_ok:
+            self.send_error(401)
+            return
         body = json.dumps({"data": [{"id": model} for model in server.models]}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -813,6 +833,34 @@ if args and args[0] == "build":
             self.assertFalse(go_log.exists())
             self.assertFalse((home / ".config" / "parable").exists())
 
+    def test_interactive_setup_builds_without_flag_after_consent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bindir, git_log, go_log = self.make_tools(root)
+            home = root / "home"
+            home.mkdir()
+            data_home = root / "data"
+            env = self.build_env(home, bindir, git_log, go_log)
+            env["XDG_DATA_HOME"] = str(data_home)
+            python_bin = Path(shutil.which("python3") or "/usr/bin/python3").parent
+            env["PATH"] = f"{bindir}:{python_bin}"
+            proc = subprocess.run(
+                [NODE, str(REPO / "bin" / "parable.js"), "setup", "--no-auth"],
+                cwd=home,
+                env=env,
+                input="n\nn\ny\n",
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("Build pinned commit", proc.stdout)
+            self.assertIn("next: authorize each selected subscription, then run parable claude", proc.stdout)
+            manifest = json.loads((home / ".config" / "parable" / "setup.json").read_text())
+            expected = data_home / "parable" / "cliproxyapi" / PROXY_COMMIT / "parable-cliproxy-api"
+            self.assertEqual(manifest["proxyBinary"], str(expected))
+            self.assertTrue(expected.is_file())
+
     def test_wrong_source_pin_and_existing_destination_stop_before_patch_or_go(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1395,6 +1443,293 @@ with open(os.environ["FAKE_PROXY_CAPTURE"], "a") as handle:
                 ["handwritten.md", "parable-handwritten.md"],
             )
             self.assertFalse(claude_capture.exists())
+
+
+class TestMagicalClaudeSupervisor(unittest.TestCase):
+    MODELS = [
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "claude-sonnet-5",
+        "claude-opus-4-8",
+        "claude-haiku-4-5-20251001",
+        "grok-4.5",
+    ]
+
+    PROXY = r'''#!/usr/bin/env python3
+import json
+import os
+import re
+import signal
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+capture_path = os.environ["FAKE_PROXY_CAPTURE"]
+
+def event(kind, **fields):
+    with open(capture_path, "a") as handle:
+        handle.write(json.dumps({"event": kind, "pid": os.getpid(), **fields}) + "\n")
+
+event("start", argv=sys.argv[1:])
+
+def stop(signum, _frame):
+    event("signal", signal=signum)
+    raise SystemExit(128 + signum)
+
+for handled in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    signal.signal(handled, stop)
+
+mode = os.environ.get("FAKE_PROXY_MODE", "serve")
+if mode == "early":
+    raise SystemExit(int(os.environ.get("FAKE_PROXY_EXIT", "17")))
+if mode == "hang":
+    while True:
+        time.sleep(0.05)
+
+config_path = sys.argv[sys.argv.index("--config") + 1]
+config = open(config_path).read()
+port = int(re.search(r"^port: ([0-9]+)$", config, re.MULTILINE).group(1))
+token = re.search(r'^  - "([0-9a-f]{64})"$', config, re.MULTILINE).group(1)
+models = json.loads(os.environ["FAKE_PROXY_MODELS"])
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path != "/v1/models":
+            self.send_error(404)
+            return
+        if self.headers.get("Authorization") != f"Bearer {token}":
+            self.send_error(401)
+            return
+        body = json.dumps({"data": [{"id": model} for model in models]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, _format, *_args):
+        pass
+
+server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+exit_after = os.environ.get("FAKE_PROXY_EXIT_AFTER_MS")
+if exit_after:
+    timer = threading.Timer(
+        int(exit_after) / 1000,
+        lambda: os._exit(int(os.environ.get("FAKE_PROXY_EXIT", "19"))),
+    )
+    timer.daemon = True
+    timer.start()
+try:
+    server.serve_forever(poll_interval=0.05)
+finally:
+    server.server_close()
+    event("stop")
+'''
+
+    def free_port(self) -> int:
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            return listener.getsockname()[1]
+
+    def setup_case(self, tmp: str, port: int | None = None) -> dict:
+        root = Path(tmp)
+        home = root / "home"
+        home.mkdir()
+        repo = root / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        bindir = fake_bin(tmp)
+        proxy = bindir / "fake-managed-proxy"
+        proxy.write_text(self.PROXY)
+        proxy.chmod(0o755)
+        proxy_capture = root / "proxy.jsonl"
+        claude_capture = root / "claude.json"
+        claude_signal_capture = root / "claude-signal.json"
+        env = os.environ | {
+            "HOME": str(home),
+            "PATH": f"{bindir}:{os.environ['PATH']}",
+            "FAKE_PROXY_CAPTURE": str(proxy_capture),
+            "FAKE_PROXY_MODELS": json.dumps(self.MODELS),
+            "FAKE_CLAUDE_CAPTURE": str(claude_capture),
+            "FAKE_CLAUDE_SIGNAL_CAPTURE": str(claude_signal_capture),
+        }
+        for name in (
+            "PARABLE_CONFIG",
+            "PARABLE_CLIPROXY_BIN",
+            "CLIPROXY_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+        ):
+            env.pop(name, None)
+        selected_port = port or self.free_port()
+        setup = subprocess.run(
+            [
+                NODE, str(REPO / "bin" / "parable.js"),
+                "setup", "--non-interactive", "--vendors", "chatgpt,claude,xai",
+                "--proxy-bin", str(proxy), "--port", str(selected_port), "--no-auth",
+            ],
+            cwd=repo,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(setup.returncode, 0, setup.stdout + setup.stderr)
+        token_text = (home / ".config" / "parable" / "cliproxy.env").read_text()
+        token = token_text.removeprefix("export CLIPROXY_API_KEY='").removesuffix("'\n")
+        return {
+            "home": home,
+            "repo": repo,
+            "env": env,
+            "port": selected_port,
+            "token": token,
+            "proxy_capture": proxy_capture,
+            "claude_capture": claude_capture,
+            "claude_signal_capture": claude_signal_capture,
+        }
+
+    def run_claude(self, case: dict, **extra_env: str) -> subprocess.CompletedProcess:
+        env = case["env"] | extra_env
+        return subprocess.run(
+            [NODE, str(REPO / "bin" / "parable.js"), "claude", "--print", "hello"],
+            cwd=case["repo"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+
+    def events(self, case: dict) -> list[dict]:
+        path = case["proxy_capture"]
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text().splitlines()]
+
+    def assert_pid_gone(self, pid: int):
+        for _ in range(100):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.02)
+        self.fail(f"child process {pid} remained after supervisor exit")
+
+    def wait_for_path(self, target: Path, proc: subprocess.Popen):
+        for _ in range(200):
+            if target.exists():
+                return
+            if proc.poll() is not None:
+                stdout, stderr = proc.communicate()
+                self.fail(f"supervisor exited before readiness: {stdout}{stderr}")
+            time.sleep(0.025)
+        proc.kill()
+        stdout, stderr = proc.communicate()
+        self.fail(f"timed out waiting for {target.name}: {stdout}{stderr}")
+
+    def test_owned_proxy_starts_then_claude_exit_is_preserved_and_proxy_is_cleaned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            case = self.setup_case(tmp)
+            proc = self.run_claude(case, FAKE_CLAUDE_EXIT="23")
+            self.assertEqual(proc.returncode, 23, proc.stdout + proc.stderr)
+            self.assertIn("proxy: starting managed CLIProxyAPI", proc.stdout)
+            self.assertTrue(case["claude_capture"].is_file())
+            events = self.events(case)
+            self.assertEqual(events[0]["argv"][-1], "--local-model")
+            self.assertTrue(any(item["event"] == "signal" for item in events))
+            self.assert_pid_gone(events[0]["pid"])
+            evidence = proc.stdout + proc.stderr + json.dumps(events)
+            self.assertNotIn(case["token"], evidence)
+
+    def test_healthy_existing_proxy_is_reused_and_never_stopped(self):
+        with tempfile.TemporaryDirectory() as tmp, model_server(self.MODELS) as (
+            server, _base_url, _initial_token
+        ):
+            case = self.setup_case(tmp, server.server_address[1])
+            server.expected_token = case["token"]
+            proc = self.run_claude(case)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("proxy: reusing healthy configured endpoint", proc.stdout)
+            self.assertTrue(server.authorization_ok)
+            self.assertEqual(self.events(case), [])
+
+    def test_wrong_listener_fails_closed_before_proxy_or_claude(self):
+        with tempfile.TemporaryDirectory() as tmp, model_server(self.MODELS) as (
+            server, _base_url, _wrong_token
+        ):
+            case = self.setup_case(tmp, server.server_address[1])
+            proc = self.run_claude(case)
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("occupied or unhealthy (HTTP 401)", proc.stderr)
+            self.assertIn("refusing to start or stop an unknown listener", proc.stderr)
+            self.assertEqual(self.events(case), [])
+            self.assertFalse(case["claude_capture"].exists())
+
+    def test_proxy_early_exit_and_readiness_timeout_fail_without_orphans(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            early = self.setup_case(tmp)
+            proc = self.run_claude(early, FAKE_PROXY_MODE="early", FAKE_PROXY_EXIT="17")
+            self.assertEqual(proc.returncode, 17, proc.stdout + proc.stderr)
+            self.assertIn("before readiness", proc.stderr)
+            self.assertFalse(early["claude_capture"].exists())
+            self.assert_pid_gone(self.events(early)[0]["pid"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            waiting = self.setup_case(tmp)
+            proc = self.run_claude(
+                waiting,
+                FAKE_PROXY_MODE="hang",
+                PARABLE_PROXY_READY_TIMEOUT_MS="150",
+            )
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("timed out after 150ms", proc.stderr)
+            self.assertFalse(waiting["claude_capture"].exists())
+            events = self.events(waiting)
+            self.assertTrue(any(item["event"] == "signal" for item in events))
+            self.assert_pid_gone(events[0]["pid"])
+
+    def test_proxy_exit_while_claude_runs_stops_claude_and_preserves_proxy_exit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            case = self.setup_case(tmp)
+            proc = self.run_claude(
+                case,
+                FAKE_CLAUDE_WAIT="1",
+                FAKE_PROXY_EXIT_AFTER_MS="300",
+                FAKE_PROXY_EXIT="19",
+            )
+            self.assertEqual(proc.returncode, 19, proc.stdout + proc.stderr)
+            self.assertIn("while Claude was running", proc.stderr)
+            signal_report = json.loads(case["claude_signal_capture"].read_text())
+            self.assertEqual(signal_report["signal"], signal.SIGTERM)
+            self.assert_pid_gone(signal_report["pid"])
+            self.assert_pid_gone(self.events(case)[0]["pid"])
+
+    def test_parent_signals_reach_both_owned_children_and_leave_no_orphans(self):
+        for sent in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(signal=sent), tempfile.TemporaryDirectory() as tmp:
+                case = self.setup_case(tmp)
+                env = case["env"] | {"FAKE_CLAUDE_WAIT": "1"}
+                proc = subprocess.Popen(
+                    [NODE, str(REPO / "bin" / "parable.js"), "claude", "--print", "hello"],
+                    cwd=case["repo"],
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                self.wait_for_path(case["claude_capture"], proc)
+                os.kill(proc.pid, sent)
+                stdout, stderr = proc.communicate(timeout=10)
+                self.assertEqual(proc.returncode, 128 + sent, stdout + stderr)
+                claude_signal = json.loads(case["claude_signal_capture"].read_text())
+                self.assertEqual(claude_signal["signal"], sent)
+                events = self.events(case)
+                self.assertTrue(any(
+                    item["event"] == "signal" and item["signal"] == sent
+                    for item in events
+                ))
+                self.assert_pid_gone(claude_signal["pid"])
+                self.assert_pid_gone(events[0]["pid"])
 
 
 if __name__ == "__main__":
