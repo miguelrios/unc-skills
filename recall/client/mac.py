@@ -539,10 +539,12 @@ class CanonicalBrainWriter(_CanonicalClient):
                 or not isinstance(event.get("provenance", {}).get("artifact_ref"), dict)
             ):
                 raise PermissionError("canonical ingest scope mismatch")
+        events_payload = canonical_json(events)
         body = {
             "tenant_id": self.tenant_id,
             "principal_id": self.principal_id,
-            "events": events,
+            "source_id": self.source_id,
+            "events_base64": base64.b64encode(events_payload).decode(),
         }
         encoded = canonical_json(body)
         if len(encoded) > MAX_INGEST_BYTES:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import contextlib
 import io
@@ -308,6 +309,16 @@ class CanonicalV2ClientTest(unittest.TestCase):
         canonical_body = json.loads(requests[1].data)
         self.assertEqual(archive_body["tenant_id"], "tenant:personal")
         self.assertEqual(canonical_body["principal_id"], "principal:owner")
+        self.assertNotIn("events", canonical_body)
+        self.assertEqual(
+            json.loads(
+                base64.b64decode(
+                    canonical_body["events_base64"],
+                    validate=True,
+                )
+            ),
+            [event],
+        )
         self.assertNotIn("RAW_ARCHIVE_CANARY", json.dumps(canonical_body))
         self.assertNotIn(b"CANONICAL_TOKEN_CANARY", requests[0].data)
         self.assertNotIn(b"CANONICAL_TOKEN_CANARY", requests[1].data)
