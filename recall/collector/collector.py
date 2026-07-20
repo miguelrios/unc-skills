@@ -76,11 +76,16 @@ class Collector:
     def __init__(self, *, root: Path, harness: str, source_id: str, spool_path: Path,
                  endpoint: str, token: str, principal_id: str = "owner",
                  visibility: str = "private", batch_size: int = 500,
-                 privacy: PrivacyPolicy | None = None):
+                 privacy: PrivacyPolicy | None = None, brain_writer: Any = None,
+                 archive: Any = None, tenant_id: str | None = None):
         if harness not in {"claude", "codex"}:
             raise ValueError("harness must be claude or codex")
         if visibility not in {"private", "shared"}:
             raise ValueError("visibility must be private or shared")
+        if (brain_writer is None) != (archive is None) or (
+            archive is not None and not tenant_id
+        ):
+            raise ValueError("canonical collector runtime is incomplete")
         self.root = Path(root).expanduser().resolve()
         self.harness = harness
         self.source_id = source_id
@@ -91,6 +96,9 @@ class Collector:
         self.visibility = visibility
         self.batch_size = batch_size
         self.privacy = privacy or PrivacyPolicy(mode="off")
+        self.brain_writer = brain_writer
+        self.archive = archive
+        self.tenant_id = tenant_id
         self.shard_count = 1
         self.shard_index = 0
         self.spool_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -183,8 +191,21 @@ class Collector:
         return int.from_bytes(hashlib.sha256(path.encode()).digest()[:8], "big") & ((1 << 63) - 1)
 
     def _envelope(self, path: Path, native_id: str, kind: str, content: Any,
-                  occurred_at: str, start: int, end: int) -> dict:
+                  occurred_at: str, start: int, end: int,
+                  artifact_ref: dict[str, Any] | None = None) -> dict:
         clean = sanitize(content)
+        provenance = {
+            "harness": self.harness,
+            "connector_id": f"{self.harness}.jsonl",
+            "connector_schema_version": COLLECTOR_VERSION,
+            "collector_version": COLLECTOR_VERSION,
+            "privacy_policy_version": self.privacy.apply({}).policy_version,
+            "original_path": str(path),
+            "byte_start": start,
+            "byte_end": end,
+        }
+        if artifact_ref is not None:
+            provenance["artifact_ref"] = artifact_ref
         return {
             "schema_version": 1,
             "source_id": self.source_id,
@@ -198,15 +219,26 @@ class Collector:
             "content_type": "application/json",
             "content": clean,
             "content_sha256": hashlib.sha256(canonical_json(clean)).hexdigest(),
-            "provenance": {
-                "harness": self.harness,
-                "collector_version": COLLECTOR_VERSION,
-                "privacy_policy_version": self.privacy.apply({}).policy_version,
-                "original_path": str(path),
-                "byte_start": start,
-                "byte_end": end,
-            },
+            "provenance": provenance,
         }
+
+    def _archive_raw(
+        self,
+        *,
+        native_id: str,
+        payload: bytes,
+        occurred_at: str,
+    ) -> dict[str, Any] | None:
+        if self.archive is None:
+            return None
+        return self.archive.put_raw(
+            tenant_id=self.tenant_id,
+            source_id=self.source_id,
+            native_id=native_id,
+            payload=payload,
+            media_type="application/x-ndjson",
+            created_at=occurred_at,
+        )
 
     def _versioned_record_content(self, native_id: str, content: dict, *, was_active: bool) -> dict:
         clean = sanitize(content)
@@ -301,8 +333,16 @@ class Collector:
                             self.db.execute("INSERT OR IGNORE INTO scan_members(path,native_id) VALUES (?,?)", (path_text, native_id))
                         continue
                     content = privacy.value
+                    artifact_ref = self._archive_raw(
+                        native_id=native_id,
+                        payload=line,
+                        occurred_at=occurred_at,
+                    )
                     versioned_content = self._versioned_record_content(native_id, content, was_active=native_id in old_active)
-                    envelope = self._envelope(path, native_id, "transcript_record", versioned_content, occurred_at, line_start, complete_end)
+                    envelope = self._envelope(
+                        path, native_id, "transcript_record", versioned_content,
+                        occurred_at, line_start, complete_end, artifact_ref,
+                    )
                     if self._queue(path, envelope, complete_end):
                         summary["records_queued"] += 1
                     self.db.execute(
@@ -321,7 +361,19 @@ class Collector:
                     if native_id in seen_native:
                         continue
                     content = {"target_native_id": native_id, "deletion_id": scan_id}
-                    envelope = self._envelope(path, native_id, "tombstone", content, iso_now(), old["start_offset"], old["end_offset"])
+                    occurred_at = iso_now()
+                    artifact_ref = self._archive_raw(
+                        native_id=native_id,
+                        payload=canonical_json({
+                            "deleted": True,
+                            "native_id": native_id,
+                        }),
+                        occurred_at=occurred_at,
+                    )
+                    envelope = self._envelope(
+                        path, native_id, "tombstone", content, occurred_at,
+                        old["start_offset"], old["end_offset"], artifact_ref,
+                    )
                     if self._queue(path, envelope, complete_end):
                         summary["tombstones_queued"] += 1
                     self.db.execute("DELETE FROM active_records WHERE path=? AND native_id=?", (path_text, native_id))
@@ -336,7 +388,21 @@ class Collector:
         for item in missing:
             for old in self.db.execute("SELECT * FROM active_records WHERE path=?", (item["path"],)):
                 path = Path(item["path"])
-                envelope = self._envelope(path, old["native_id"], "tombstone", {"target_native_id": old["native_id"], "deletion_id": scan_id}, iso_now(), old["start_offset"], old["end_offset"])
+                occurred_at = iso_now()
+                artifact_ref = self._archive_raw(
+                    native_id=old["native_id"],
+                    payload=canonical_json({
+                        "deleted": True,
+                        "native_id": old["native_id"],
+                    }),
+                    occurred_at=occurred_at,
+                )
+                envelope = self._envelope(
+                    path, old["native_id"], "tombstone",
+                    {"target_native_id": old["native_id"], "deletion_id": scan_id},
+                    occurred_at, old["start_offset"], old["end_offset"],
+                    artifact_ref,
+                )
                 if self._queue(path, envelope, old["end_offset"]):
                     summary["tombstones_queued"] += 1
             self.db.execute("DELETE FROM active_records WHERE path=?", (item["path"],))
@@ -372,10 +438,19 @@ class Collector:
                     result["recovered"] += 1
                     continue
                 versioned = self._versioned_record_content(row["native_id"], privacy.value, was_active=True)
+                occurred_at = normalized_timestamp(
+                    content.get("timestamp"),
+                    path.stat().st_mtime,
+                )
+                artifact_ref = self._archive_raw(
+                    native_id=row["native_id"],
+                    payload=raw,
+                    occurred_at=occurred_at,
+                )
                 envelope = self._envelope(
                     path, row["native_id"], "transcript_record", versioned,
-                    normalized_timestamp(content.get("timestamp"), path.stat().st_mtime),
-                    row["start_offset"], row["end_offset"],
+                    occurred_at, row["start_offset"], row["end_offset"],
+                    artifact_ref,
                 )
                 self.db.execute(
                     "UPDATE outbox SET state='pending',content_sha256=?,envelope_json=?,queued_at=?,acked_at=NULL,receipt=NULL WHERE id=?",
@@ -488,10 +563,19 @@ class Collector:
             acknowledgement = None
             for attempt in range(5):
                 try:
-                    with open_no_redirect(request, timeout=60) as response:
-                        acknowledgement = json.loads(response.read())
-                        if response.status not in {200, 201} or acknowledgement.get("status") != "committed":
-                            raise RuntimeError("server did not return a commit acknowledgement")
+                    if self.brain_writer is not None:
+                        acknowledgement = self.brain_writer.ingest(events)
+                    else:
+                        with open_no_redirect(request, timeout=60) as response:
+                            acknowledgement = json.loads(response.read())
+                            if response.status not in {200, 201}:
+                                raise RuntimeError(
+                                    "server did not return a commit acknowledgement"
+                                )
+                    if acknowledgement.get("status") != "committed":
+                        raise RuntimeError(
+                            "server did not return a commit acknowledgement"
+                        )
                     break
                 except urllib.error.HTTPError as exc:
                     result["errors"] += 1

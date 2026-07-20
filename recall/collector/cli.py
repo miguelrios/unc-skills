@@ -7,7 +7,11 @@ import time
 from pathlib import Path
 
 from .collector import Collector
-from client.mac import load_file_token
+from client.mac import (
+    CanonicalArchiveClient,
+    CanonicalBrainWriter,
+    load_file_token,
+)
 from privacy.policy import AgenticJudge, PrivacyPolicy, load_scoped_virtual_key
 
 
@@ -47,13 +51,40 @@ def main() -> None:
         model=args.privacy_judge_model,
     ) if all(judge_values) else None
     privacy = PrivacyPolicy(mode=args.privacy_mode, judge=judge, judge_failure=args.privacy_judge_failure)
+    token = token_from_file(args.token_file) if args.token_file else "unused"
+    canonical = None
+    if os.environ.get("RECALL_CANONICAL_V2_ENABLED") == "1":
+        tenant_id = os.environ.get("RECALL_TENANT_ID")
+        principal_id = os.environ.get("RECALL_PRINCIPAL_ID")
+        if (
+            not tenant_id
+            or not principal_id
+            or principal_id != args.principal_id
+            or args.visibility != "private"
+        ):
+            parser.error("canonical collector identity is incomplete")
+        common = {
+            "endpoint": args.endpoint,
+            "token": token,
+            "source_id": args.source_id,
+            "tenant_id": tenant_id,
+            "principal_id": principal_id,
+        }
+        canonical = (
+            CanonicalBrainWriter(**common),
+            CanonicalArchiveClient(**common),
+            tenant_id,
+        )
     collector = Collector(
         root=Path(args.root), harness=args.harness, source_id=args.source_id,
         spool_path=Path(args.spool), endpoint=args.endpoint or "http://127.0.0.1:1",
-        token=token_from_file(args.token_file) if args.token_file else "unused",
+        token=token,
         principal_id=args.principal_id,
         visibility=args.visibility,
         privacy=privacy,
+        brain_writer=canonical[0] if canonical else None,
+        archive=canonical[1] if canonical else None,
+        tenant_id=canonical[2] if canonical else None,
     )
     if args.shard_count < 1 or not 0 <= args.shard_index < args.shard_count:
         parser.error("shard index must be within shard count")

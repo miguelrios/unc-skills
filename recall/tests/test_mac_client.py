@@ -11,7 +11,16 @@ from pathlib import Path
 from unittest import mock
 from client import cli as client_cli
 
-from client.mac import BrainClient, ExportImporter, MemoryClient, PrivacyError, dry_run_manifest, load_file_token
+from client.mac import (
+    BrainClient,
+    CanonicalArchiveClient,
+    CanonicalBrainWriter,
+    ExportImporter,
+    MemoryClient,
+    PrivacyError,
+    dry_run_manifest,
+    load_file_token,
+)
 from privacy.policy import PrivacyPolicy
 
 
@@ -216,6 +225,113 @@ class BrainEndpointValidationTest(unittest.TestCase):
         ):
             with self.subTest(endpoint=endpoint), self.assertRaises(ValueError):
                 BrainClient(endpoint=endpoint, token="synthetic", source_id="test-source")
+
+
+class CanonicalV2ClientTest(unittest.TestCase):
+    def test_archive_then_canonical_writer_use_closed_tenant_scoped_routes(self) -> None:
+        requests = []
+        raw_payload = b'{"raw":"RAW_ARCHIVE_CANARY"}'
+        artifact = {
+            "contract": "recall.artifact-ref.v1",
+            "schema_version": 1,
+            "tenant_id": "tenant:personal",
+            "source_id": "source:personal",
+            "artifact_id": "art_" + "a" * 32,
+            "storage_backend": "s3",
+            "object_key": "objects/aa/" + "a" * 64,
+            "content_sha256": hashlib.sha256(raw_payload).hexdigest(),
+            "size_bytes": len(raw_payload),
+            "media_type": "application/json",
+            "encryption": "sse-s3",
+            "version_id": "r2-sha256-" + hashlib.sha256(raw_payload).hexdigest(),
+            "created_at": "2026-07-20T00:00:00Z",
+        }
+
+        def open_request(request, **_kwargs):
+            requests.append(request)
+            if request.full_url.endswith("/v2/archive/objects"):
+                return FakeResponse(201, artifact)
+            return FakeResponse(201, {
+                "status": "committed",
+                "inserted": 1,
+                "duplicate_events": 0,
+                "receipts": ["recall://source:personal/native:one?rev=1"],
+                "replay": False,
+            })
+
+        common = {
+            "endpoint": "https://brain.example.invalid",
+            "token": "CANONICAL_TOKEN_CANARY",
+            "source_id": "source:personal",
+            "tenant_id": "tenant:personal",
+            "principal_id": "principal:owner",
+        }
+        archive = CanonicalArchiveClient(**common)
+        writer = CanonicalBrainWriter(**common)
+        with mock.patch("client.mac.open_no_redirect", side_effect=open_request):
+            reference = archive.put_raw(
+                tenant_id="tenant:personal",
+                source_id="source:personal",
+                native_id="native:one",
+                payload=raw_payload,
+                media_type="application/json",
+                created_at="2026-07-20T00:00:00Z",
+            )
+            event = {
+                "schema_version": 1,
+                "source_id": "source:personal",
+                "native_id": "native:one",
+                "native_parent_id": "native:one",
+                "kind": "connector_record",
+                "occurred_at": "2026-07-20T00:00:00Z",
+                "observed_at": "2026-07-20T00:00:00Z",
+                "principal_id": "principal:owner",
+                "visibility": "private",
+                "content_type": "application/json",
+                "content": {"text": "safe"},
+                "provenance": {
+                    "connector_id": "synthetic.connector",
+                    "connector_schema_version": 1,
+                    "artifact_ref": reference,
+                },
+                "content_sha256": hashlib.sha256(b'{"text":"safe"}').hexdigest(),
+            }
+            acknowledgement = writer.ingest([event])
+
+        self.assertEqual(
+            [request.full_url.rsplit("/", 3)[-3:] for request in requests],
+            [["v2", "archive", "objects"], ["v2", "ingest", "canonical"]],
+        )
+        archive_body = json.loads(requests[0].data)
+        canonical_body = json.loads(requests[1].data)
+        self.assertEqual(archive_body["tenant_id"], "tenant:personal")
+        self.assertEqual(canonical_body["principal_id"], "principal:owner")
+        self.assertNotIn("RAW_ARCHIVE_CANARY", json.dumps(canonical_body))
+        self.assertNotIn(b"CANONICAL_TOKEN_CANARY", requests[0].data)
+        self.assertNotIn(b"CANONICAL_TOKEN_CANARY", requests[1].data)
+        self.assertEqual(acknowledgement["inserted"], 1)
+
+    def test_canonical_clients_reject_cross_scope_calls_before_network(self) -> None:
+        common = {
+            "endpoint": "https://brain.example.invalid",
+            "token": "synthetic",
+            "source_id": "source:personal",
+            "tenant_id": "tenant:personal",
+            "principal_id": "principal:owner",
+        }
+        archive = CanonicalArchiveClient(**common)
+        with mock.patch("client.mac.open_no_redirect") as opened, self.assertRaises(
+            PermissionError
+        ):
+            archive.put_raw(
+                tenant_id="tenant:other",
+                source_id="source:personal",
+                native_id="native:one",
+                payload=b"private",
+                media_type="application/json",
+                created_at="2026-07-20T00:00:00Z",
+            )
+        opened.assert_not_called()
 
 
 class ExplicitMemoryTest(unittest.TestCase):

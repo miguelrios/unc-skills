@@ -16,7 +16,13 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping
 from urllib.parse import urlparse
 
-from client.mac import BrainClient, load_file_token, load_keychain_token
+from client.mac import (
+    BrainClient,
+    CanonicalArchiveClient,
+    CanonicalBrainWriter,
+    load_file_token,
+    load_keychain_token,
+)
 from connectors.export_inbox import ExportInboxConnector
 from connectors.grep_ai import GrepAIConnector, load_private_api_key, validate_api_key
 from connectors.google_workspace import (
@@ -26,7 +32,7 @@ from connectors.google_workspace import (
     GoogleDriveConnector,
 )
 from connectors.registry import ConnectorRegistryError, validate_policy
-from connectors.sdk import SOURCE_ID, ConnectorRunner
+from connectors.sdk import IDENTITY, SOURCE_ID, ConnectorRunner
 from connectors.supervisor import (
     ConnectorSupervisor,
     ScheduleDefinition,
@@ -690,13 +696,40 @@ def build_host(
     runners: list[ConnectorRunner] = []
     connectors: list[Any] = []
     jobs: list[ScheduledJob] = []
+    canonical_v2 = os.environ.get("RECALL_CANONICAL_V2_ENABLED") == "1"
+    tenant_id = os.environ.get("RECALL_TENANT_ID") if canonical_v2 else None
+    principal_id = os.environ.get("RECALL_PRINCIPAL_ID") if canonical_v2 else "owner"
+    if canonical_v2 and (
+        not isinstance(tenant_id, str)
+        or not IDENTITY.fullmatch(tenant_id)
+        or not isinstance(principal_id, str)
+        or not IDENTITY.fullmatch(principal_id)
+    ):
+        store.close()
+        raise ConnectorHostError("invalid_canonical_identity")
     try:
         for item in config.jobs:
             privacy = PrivacyPolicy(mode=item.privacy_mode)
-            brain = BrainClient(
-                endpoint=item.endpoint, token=item.brain_authority.load_brain(),
-                source_id=item.source_id, principal_id="owner", visibility="private",
-            )
+            token = item.brain_authority.load_brain()
+            if canonical_v2:
+                common = {
+                    "endpoint": item.endpoint,
+                    "token": token,
+                    "source_id": item.source_id,
+                    "tenant_id": tenant_id,
+                    "principal_id": principal_id,
+                }
+                brain = CanonicalBrainWriter(**common)
+                archive = CanonicalArchiveClient(**common)
+            else:
+                brain = BrainClient(
+                    endpoint=item.endpoint,
+                    token=token,
+                    source_id=item.source_id,
+                    principal_id="owner",
+                    visibility="private",
+                )
+                archive = None
             factory = HOSTED_FACTORIES[item.schedule.connector_id]
             transport = (
                 grep_transport
@@ -707,7 +740,13 @@ def build_host(
                 item.connector, item.source_id, item.privacy_mode, transport,
             )
             runner = ConnectorRunner(
-                connector=connector, brain=brain, spool_path=spool, privacy=privacy,
+                connector=connector,
+                brain=brain,
+                spool_path=spool,
+                privacy=privacy,
+                archive=archive,
+                tenant_id=tenant_id,
+                principal_id=principal_id,
             )
             connectors.append(connector)
             runners.append(runner)

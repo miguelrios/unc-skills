@@ -263,6 +263,70 @@ class CollectorTest(unittest.TestCase):
         self.assertNotIn(canary, json.dumps(AckServer.received))
         collector.close()
 
+    def test_canonical_runtime_archives_raw_before_safe_spool_and_ack(self) -> None:
+        canary = "synthetic-canonical-collector-canary-96"
+        (self.root / "session.jsonl").write_text(
+            claude_line(f"keep context api_key={canary} after")
+        )
+        archived = []
+        ingested = []
+
+        class Archive:
+            def put_raw(self, **kwargs):
+                archived.append(kwargs)
+                return {
+                    "contract": "recall.artifact-ref.v1",
+                    "schema_version": 1,
+                    "tenant_id": kwargs["tenant_id"],
+                    "source_id": kwargs["source_id"],
+                    "artifact_id": "art_" + "a" * 32,
+                    "storage_backend": "s3",
+                    "object_key": "objects/aa/" + "a" * 64,
+                    "content_sha256": hashlib.sha256(kwargs["payload"]).hexdigest(),
+                    "size_bytes": len(kwargs["payload"]),
+                    "media_type": kwargs["media_type"],
+                    "encryption": "sse-s3",
+                    "version_id": "synthetic-version",
+                    "created_at": kwargs["created_at"],
+                }
+
+        class Writer:
+            def ingest(self, events):
+                ingested.extend(events)
+                return {
+                    "status": "committed",
+                    "inserted": len(events),
+                    "duplicate_events": 0,
+                    "receipts": [
+                        f"recall://{event['source_id']}/{event['native_id']}?rev=1"
+                        for event in events
+                    ],
+                    "replay": False,
+                }
+
+        collector = Collector(
+            root=self.root,
+            harness="claude",
+            source_id="claude:linux:test",
+            spool_path=self.spool,
+            endpoint=self.endpoint,
+            token="test-token-not-a-secret",
+            principal_id="owner",
+            privacy=PrivacyPolicy(mode="scrub"),
+            brain_writer=Writer(),
+            archive=Archive(),
+            tenant_id="tenant:personal",
+        )
+        self.assertEqual(collector.scan()["records_queued"], 1)
+        self.assertEqual(collector.flush()["acked"], 1)
+        self.assertEqual(len(archived), 1)
+        self.assertIn(canary.encode(), archived[0]["payload"])
+        self.assertEqual(len(ingested), 1)
+        self.assertIn("artifact_ref", ingested[0]["provenance"])
+        self.assertNotIn(canary, json.dumps(ingested))
+        self.assertNotIn(canary.encode(), self.spool.read_bytes())
+        collector.close()
+
     def test_enabling_drop_compacts_sensitive_pending_bytes_from_legacy_spool(self) -> None:
         canary = "synthetic-legacy-spool-canary-95"
         (self.root / "session.jsonl").write_text(claude_line("legacy pending row"))

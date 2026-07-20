@@ -205,6 +205,7 @@ class CanonicalPlane:
             raise CanonicalLifecycleError("canonical_contract_invalid") from None
         source_id = event["source_id"]
         native_id = event["native_id"]
+        is_tombstone = event["kind"] == "tombstone"
         if (
             artifact["tenant_id"] != tenant_id
             or artifact["source_id"] != source_id
@@ -316,42 +317,57 @@ class CanonicalPlane:
                            tenant_id,source_id,event_id,native_id,native_parent_id,
                            artifact_id,job_id,kind,content_sha256,revision,
                            occurred_at,observed_at,is_tombstone,canonical_redacted
-                       ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,false,%s)""",
+                       ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                     (
                         tenant_id, source_id, event_id, native_id,
                         event.get("native_parent_id"), artifact["artifact_id"], job_id,
                         event["kind"], raw_sha256, revision, event["occurred_at"],
-                        event["observed_at"], json.dumps(event),
+                        event["observed_at"], is_tombstone, json.dumps(event),
                     ),
                 )
                 conn.execute(
                     """UPDATE canonical_documents
-                       SET is_current=false
+                       SET is_current=false,
+                           deleted_at=CASE WHEN %s THEN now() ELSE deleted_at END
                        WHERE tenant_id=%s AND source_id=%s AND native_id=%s
                          AND is_current""",
-                    (tenant_id, source_id, native_id),
+                    (is_tombstone, tenant_id, source_id, native_id),
                 )
-                conn.execute(
-                    """INSERT INTO canonical_documents(
-                           tenant_id,source_id,document_id,event_id,artifact_id,native_id,
-                           content_sha256,revision,is_current,text_redacted,text_sha256
-                       ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,true,%s,%s)""",
-                    (
-                        tenant_id, source_id, document_id, event_id,
-                        artifact["artifact_id"], native_id, raw_sha256, revision,
-                        text_redacted, text_sha256,
-                    ),
-                )
-                conn.execute(
-                    """INSERT INTO canonical_chunks(
-                           tenant_id,source_id,chunk_id,document_id,ordinal,receipt,
-                           text_redacted,text_sha256
-                       ) VALUES (%s,%s,%s,%s,0,%s,%s,%s)""",
-                    (
-                        tenant_id, source_id, chunk_id, document_id, receipt,
-                        text_redacted, text_sha256,
-                    ),
-                )
+                if is_tombstone:
+                    conn.execute(
+                        """UPDATE canonical_chunks chunk
+                           SET deleted_at=now()
+                           FROM canonical_documents document
+                           WHERE chunk.tenant_id=document.tenant_id
+                             AND chunk.source_id=document.source_id
+                             AND chunk.document_id=document.document_id
+                             AND document.tenant_id=%s AND document.source_id=%s
+                             AND document.native_id=%s
+                             AND chunk.deleted_at IS NULL""",
+                        (tenant_id, source_id, native_id),
+                    )
+                else:
+                    conn.execute(
+                        """INSERT INTO canonical_documents(
+                               tenant_id,source_id,document_id,event_id,artifact_id,native_id,
+                               content_sha256,revision,is_current,text_redacted,text_sha256
+                           ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,true,%s,%s)""",
+                        (
+                            tenant_id, source_id, document_id, event_id,
+                            artifact["artifact_id"], native_id, raw_sha256, revision,
+                            text_redacted, text_sha256,
+                        ),
+                    )
+                    conn.execute(
+                        """INSERT INTO canonical_chunks(
+                               tenant_id,source_id,chunk_id,document_id,ordinal,receipt,
+                               text_redacted,text_sha256
+                           ) VALUES (%s,%s,%s,%s,0,%s,%s,%s)""",
+                        (
+                            tenant_id, source_id, chunk_id, document_id, receipt,
+                            text_redacted, text_sha256,
+                        ),
+                    )
                 conn.execute(
                     """INSERT INTO canonical_audit_events(
                            tenant_id,source_id,audit_id,operation,status,
@@ -370,6 +386,45 @@ class CanonicalPlane:
             "revision": revision,
             "receipt": receipt,
             "replay": False,
+        }
+
+    def ingest_batch(
+        self,
+        *,
+        tenant_id: str,
+        principal_id: str,
+        events: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if not isinstance(events, list) or not 1 <= len(events) <= 500:
+            raise CanonicalLifecycleError("canonical_batch_invalid")
+        results = []
+        for envelope in events:
+            provenance = envelope.get("provenance", {})
+            connector_id = provenance.get("connector_id")
+            artifact_ref = provenance.get("artifact_ref")
+            text_redacted = json.dumps(
+                envelope.get("content"),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            results.append(self.ingest_document(
+                tenant_id=tenant_id,
+                principal_id=principal_id,
+                connector_id=connector_id,
+                artifact_ref=artifact_ref,
+                envelope=envelope,
+                text_redacted="" if envelope.get("kind") == "tombstone" else text_redacted,
+            ))
+        return {
+            "status": "committed",
+            "inserted": sum(result["inserted"] for result in results),
+            "duplicate_events": sum(
+                result["duplicate_events"] for result in results
+            ),
+            "receipts": [result["receipt"] for result in results],
+            "replay": all(result["replay"] for result in results),
         }
 
     def _archive_references(

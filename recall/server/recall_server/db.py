@@ -34,6 +34,7 @@ TURN_USER_MARKER = "User request:\n"
 TURN_ASSISTANT_MARKER = "\nAssistant response:\n"
 TURN_CONTINUATION_MARKER = "\n\nAssistant continuation:\n"
 TURN_EMBEDDING_CONTRACT = "recall.turn-embedding.v1:question-complete-response"
+V2_AUTHORITY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._/@+-]{1,255}\Z")
 
 
 class IdempotencyConflict(Exception):
@@ -179,6 +180,7 @@ class BrainStore:
         source_id: str | None,
         scopes: list[str],
         *,
+        tenant_id: str | None = None,
         principal_id: str | None = None,
         capture_origin: str | None = None,
         webhook_privacy_mode: str | None = None,
@@ -188,6 +190,15 @@ class BrainStore:
             raise ValueError("invalid collector credential")
         if "write" in scopes and not source_id:
             raise ValueError("write credential requires a source")
+        if tenant_id is not None and (
+            not V2_AUTHORITY_RE.fullmatch(tenant_id)
+            or "write" not in scopes
+            or not isinstance(source_id, str)
+            or not V2_AUTHORITY_RE.fullmatch(source_id)
+            or not isinstance(principal_id, str)
+            or not V2_AUTHORITY_RE.fullmatch(principal_id)
+        ):
+            raise ValueError("invalid canonical tenant credential")
         if capture_origin is not None and (
             "write" not in scopes
             or not source_id
@@ -211,18 +222,12 @@ class BrainStore:
         with self.connect() as conn:
             conn.execute(
                 """INSERT INTO collector_credentials(
-                       id,name,token_sha256,source_id,scopes,principal_id,
+                       id,name,token_sha256,tenant_id,source_id,scopes,principal_id,
                        capture_origin,webhook_privacy_mode
-                   ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+                   ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                 (
-                    credential_id,
-                    name,
-                    digest,
-                    source_id,
-                    scopes,
-                    principal_id,
-                    capture_origin,
-                    webhook_privacy_mode,
+                    credential_id, name, digest, tenant_id, source_id, scopes,
+                    principal_id, capture_origin, webhook_privacy_mode,
                 ),
             )
             conn.execute(
@@ -230,6 +235,7 @@ class BrainStore:
                 (json.dumps({
                     "credential_id": str(credential_id),
                     "name": name,
+                    "tenant_id": tenant_id,
                     "source_id": source_id,
                     "principal_id": principal_id,
                     "capture_origin": capture_origin,
@@ -241,6 +247,7 @@ class BrainStore:
             "id": str(credential_id),
             "name": name,
             "token": plaintext,
+            "tenant_id": tenant_id,
             "source_id": source_id,
             "principal_id": principal_id,
             "capture_origin": capture_origin,
@@ -359,7 +366,7 @@ class BrainStore:
         digest = hashlib.sha256(plaintext.encode()).hexdigest()
         with self.connect() as conn:
             row = conn.execute(
-                """SELECT id,name,source_id,principal_id,capture_origin,
+                """SELECT id,name,tenant_id,source_id,principal_id,capture_origin,
                           webhook_privacy_mode,scopes
                    FROM collector_credentials
                    WHERE token_sha256=%s AND revoked_at IS NULL""",
