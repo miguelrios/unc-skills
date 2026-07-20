@@ -1,0 +1,279 @@
+{
+  "schema_version": 1,
+  "loop": "Y1",
+  "captured_at_utc": "2026-07-20T07:06:23Z",
+  "parable_baseline_head": "ebb1bc51d044b32989f84c5ef40a1138411d14f6",
+  "runtime": {
+    "claude_code_version": "2.1.215",
+    "cliproxyapi_upstream_release": "v7.2.88",
+    "cliproxyapi_upstream_commit": "93d74a890a44802f656d7f39a573916b2611896e",
+    "cliproxyapi_local_fix_commit": "ad20a87efbbd41a9d4f24c83ca8bdd934bf34ab7",
+    "cliproxyapi_binary_sha256": "139e1305a878e08026dd0fb6d85a3817801f32e40a40c1954ea1973c5bb9d697",
+    "loopback_only": true,
+    "fresh_named_parent_sessions": 10,
+    "session_persistence": false,
+    "generated_agents": {
+      "parable-terra": "gpt-5.6-terra",
+      "parable-luna": "gpt-5.6-luna"
+    }
+  },
+  "effort_order": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+  ],
+  "children": [
+    {
+      "agent": "parable-terra",
+      "model": "gpt-5.6-terra",
+      "cells_passed": "5/5",
+      "parent_inbound_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "parent_upstream_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "child_inbound_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "child_upstream_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "effort_classification": "inherited_exact_5_of_5",
+      "parent_observed_tools": [
+        "Agent",
+        "Bash"
+      ],
+      "child_observed_tools_by_effort": [
+        [
+          "Bash"
+        ],
+        [
+          "Bash"
+        ],
+        [
+          "Bash",
+          "Read"
+        ],
+        [
+          "Bash"
+        ],
+        [
+          "Bash"
+        ]
+      ],
+      "parent_model_requests_by_effort": [
+        3,
+        3,
+        3,
+        11,
+        3
+      ],
+      "child_model_requests_by_effort": [
+        3,
+        3,
+        3,
+        3,
+        3
+      ],
+      "http_status_counts_by_effort": [
+        {
+          "200": 12
+        },
+        {
+          "200": 12
+        },
+        {
+          "200": 12
+        },
+        {
+          "200": 13,
+          "502": 1,
+          "503": 7
+        },
+        {
+          "200": 12
+        }
+      ],
+      "artifact_sha256_by_effort": [
+        "5366d3f6272dcad796a5f92e697a8a549c37227f5f642bac82caf4510485d09b",
+        "0d93c7e6ab930d17868cf19622c6187702ffa3c214e7cc7f3768007eca5f76c4",
+        "7e90e59fb71900dee3b7d6a2f31cb68a0d8eb22604b4b168a14bdf6decde307d",
+        "5057356d8148691aba030a1ea360d8b490e7b99c1360c51b5ff1dc2ccc848ace",
+        "f32d6b6c806fe5b02ca0d4bd5845c6084857f4e57f2083aa5c74fe3931e456dd"
+      ],
+      "parent_marker_sha256_by_effort": [
+        "5739efd379ad054f6c944267b0313dd8b872c9391173bcdcb39bf416ce095f20",
+        "7ff856d5225ffafb77f5d4ab7bd1cabed660627e2e1b743bbc9f0897ee0bb247",
+        "7a47e7ffa45ed61c82b6cf603ba1938f01a58e2b5e6573cac90c6374442cf8dd",
+        "1cd9ec03795e7cb211bf08737be8e66c765ea89104a771ba76a74533bb81cd5e",
+        "23a4322dc6b9dfab6c3e6cfa2d09200c528ad280cdf20c0acc9b347d3da41525"
+      ],
+      "deterministic_child_artifacts": "5/5",
+      "deterministic_parent_consumption": "5/5"
+    },
+    {
+      "agent": "parable-luna",
+      "model": "gpt-5.6-luna",
+      "cells_passed": "5/5",
+      "parent_inbound_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "parent_upstream_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "child_inbound_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "child_upstream_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "effort_classification": "inherited_exact_5_of_5",
+      "parent_observed_tools": [
+        "Agent",
+        "Bash"
+      ],
+      "child_observed_tools_by_effort": [
+        [
+          "Bash"
+        ],
+        [
+          "Bash"
+        ],
+        [
+          "Bash"
+        ],
+        [
+          "Bash",
+          "Read"
+        ],
+        [
+          "Bash"
+        ]
+      ],
+      "parent_model_requests_by_effort": [
+        3,
+        3,
+        3,
+        3,
+        3
+      ],
+      "child_model_requests_by_effort": [
+        3,
+        3,
+        3,
+        3,
+        3
+      ],
+      "http_status_counts_by_effort": [
+        {
+          "200": 12
+        },
+        {
+          "200": 12
+        },
+        {
+          "200": 12
+        },
+        {
+          "200": 12
+        },
+        {
+          "200": 12
+        }
+      ],
+      "artifact_sha256_by_effort": [
+        "624431769dc1e84a8eefe8558c31c9235d1dda34ac25afea756552655d79a291",
+        "fff7b92d82211a2eae052f7613942ec9c39b73814b388118d0f3dccae9f9b38c",
+        "09e509599d233b61c70323eaed5b1c43340eff7553648c35ce18fcea71e77e0a",
+        "04520d1fd5d0740cc5fef09d5bc05811297c314b6f5f34491d014452f0309fc8",
+        "f8f527a4a5fc54b2b4f4eec7fbe60353d3206228755e71732530885fa79b7586"
+      ],
+      "parent_marker_sha256_by_effort": [
+        "af55fbfbd6cb98bc0d8483429bdc26b442055f0e87a1dca79b6e225d6a11ed1a",
+        "8b3daae031de2d31da9a8caf533cc13d90876bd33ebf7d1065f1ef0251a910b6",
+        "c5cf78ee8026c10a71ed1df49ce4fcca4390ca28759198c988e804419e16554f",
+        "e8f65e2288131dacac08ebde29ef9a2f5e3c15d15846703b0041c62a25a8ecf6",
+        "5f8d785b98bd7cf03cc07dad64844f8d0faf088c1e379a767bd0b6d736e9a367"
+      ],
+      "deterministic_child_artifacts": "5/5",
+      "deterministic_parent_consumption": "5/5"
+    }
+  ],
+  "transient_transport_event": {
+    "cell": "parable-terra:xhigh",
+    "upstream_status_502": 1,
+    "local_retry_status_503": 7,
+    "provider_fallback_observed": false,
+    "bounded_session_recovered": true,
+    "final_deterministic_checks_passed": true
+  },
+  "summary": {
+    "matrix_cells_passed": "10/10",
+    "exact_parent_model_cells": "10/10",
+    "exact_named_child_model_cells": "10/10",
+    "child_effort_inheritance_exact": "10/10",
+    "deterministic_child_tool_artifacts": "10/10",
+    "deterministic_parent_consumption": "10/10",
+    "correctly_wired_attempts": "10/20",
+    "evidence_failures": 0,
+    "instrument_failures": 0
+  },
+  "routing": {
+    "parent_model": "gpt-5.6-sol",
+    "parent_provider": "openai",
+    "child_provider": "openai",
+    "auth_kind": "oauth",
+    "all_successful_turns_chatgpt_oauth": true,
+    "provider_fallback_observed": false,
+    "xai_api_key_set": false,
+    "openai_api_key_set": false,
+    "anthropic_api_key_set": false
+  },
+  "safety": {
+    "local_proxy_key_committed": false,
+    "credential_material_committed": false,
+    "oauth_state_committed": false,
+    "account_identifier_committed": false,
+    "raw_prompt_committed": false,
+    "raw_response_committed": false,
+    "raw_proxy_log_committed": false,
+    "generated_agent_committed": false,
+    "private_artifact_committed": false,
+    "private_path_committed": false
+  }
+}
