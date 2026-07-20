@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "loop": "Y2",
+  "captured_at_utc": "2026-07-20T16:45:00Z",
+  "parable_baseline_head": "3c66a1554f798359b2b157f0e68d655aaf1f7f85",
+  "authentication": {
+    "provider": "claude",
+    "auth_kind": "oauth",
+    "oauth_protocol": "authorization_code_pkce",
+    "standard_client": true,
+    "access_token_present": true,
+    "refresh_token_present": true,
+    "expiry_present": true,
+    "record_mode": "0600",
+    "record_count": 1,
+    "pending_state_removed": true,
+    "native_claude_credential_copied": false,
+    "anthropic_api_key_used": false,
+    "model_turns_spent": 0
+  },
+  "redacted_inventory_after": {
+    "claude_oauth_records": 1,
+    "codex_oauth_records": 1,
+    "xai_oauth_records": 1,
+    "anthropic_api_key_set": false,
+    "openai_api_key_set": false,
+    "xai_api_key_set": false
+  },
+  "gate_transport": {
+    "standard_cli_pkce_flows_generated": 8,
+    "split_phase_pkce_flows_generated": 2,
+    "successful_token_exchanges": 1,
+    "provider_exchange_failures": 0,
+    "declared_flow_bound": 2,
+    "actual_flows_generated": 10,
+    "bound_exceeded": true,
+    "cause": "chat_turn_cleanup_and_terminal_line_clipping_invalidated_ephemeral_callback_transport",
+    "replan": "persist_only_pkce_verifier_and_state_mode_0600_then_finish_with_standard_sdk_exchange",
+    "temporary_bridge_binary_sha256": "124e8b9f3eb1e8a074694051ffe5cbbd791d095d46856acaeb223ead7cc63a1d",
+    "temporary_bridge_source_committed": false
+  },
+  "safety": {
+    "credential_material_committed": false,
+    "oauth_state_committed": false,
+    "account_identifier_committed": false,
+    "callback_url_committed": false,
+    "authorization_code_committed": false,
+    "raw_cli_output_committed": false,
+    "private_path_committed": false
+  }
+}
