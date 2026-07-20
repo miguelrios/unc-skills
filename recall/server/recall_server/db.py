@@ -115,10 +115,24 @@ def related_candidate_limit(result_limit: int) -> int:
 class BrainStore:
     def __init__(self, dsn: str, search_deadline_ms: int | None = None,
                  semantic_runtime: SemanticRuntime | None = None,
-                 semantic_minimum_similarity: float | None = None):
+                 semantic_minimum_similarity: float | None = None,
+                 pool_max_size: int | None = None):
         self.dsn = dsn
         self._pool: ConnectionPool | None = None
         self._pool_lock = threading.Lock()
+        try:
+            configured_pool_size = (
+                pool_max_size
+                if pool_max_size is not None
+                else int(os.environ.get("RECALL_DATABASE_POOL_MAX_SIZE", "8"))
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "database pool size must be between 4 and 32"
+            ) from exc
+        if not 4 <= configured_pool_size <= 32:
+            raise ValueError("database pool size must be between 4 and 32")
+        self.pool_max_size = configured_pool_size
         configured = search_deadline_ms if search_deadline_ms is not None else int(os.environ.get("RECALL_SEARCH_DEADLINE_MS", str(DEFAULT_SEARCH_DEADLINE_MS)))
         if not 10 <= configured <= 5000:
             raise ValueError("search deadline must be between 10 and 5000 milliseconds")
@@ -155,7 +169,7 @@ class BrainStore:
                         self.dsn,
                         kwargs={"row_factory": dict_row},
                         min_size=1,
-                        max_size=4,
+                        max_size=self.pool_max_size,
                         timeout=5,
                         max_idle=300,
                         max_lifetime=1800,

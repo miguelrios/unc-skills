@@ -87,6 +87,11 @@ class CollectorTest(unittest.TestCase):
             token="test-token-not-a-secret",
         )
 
+    def test_default_archive_concurrency_leaves_capacity_for_ingest(self) -> None:
+        collector = self.collector()
+        self.assertEqual(collector.archive_workers, 2)
+        collector.close()
+
     def test_committed_cursor_waits_for_ack_and_survives_restart(self) -> None:
         transcript = self.root / "session.jsonl"
         transcript.write_text(claude_line("first") + claude_line("second"))
@@ -446,6 +451,75 @@ class CollectorTest(unittest.TestCase):
         second = collector.scan()
         self.assertEqual(second["records_queued"], 1)
         self.assertEqual(len(archived), 2)
+        collector.close()
+
+    def test_canonical_scan_flushes_each_durable_checkpoint(self) -> None:
+        source = self.root / "session.jsonl"
+        source.write_text(
+            "".join(claude_line(f"record-{index}") for index in range(1001))
+        )
+        archived = 0
+        ingested: list[list[dict]] = []
+
+        class Archive:
+            def put_raw(inner, **kwargs):
+                nonlocal archived
+                archived += 1
+                if archived == 1001:
+                    self.assertEqual(
+                        sum(len(batch) for batch in ingested),
+                        1000,
+                        "the durable checkpoint must be indexed before scanning resumes",
+                    )
+                digest = hashlib.sha256(kwargs["payload"]).hexdigest()
+                return {
+                    "contract": "recall.artifact-ref.v1",
+                    "schema_version": 1,
+                    "tenant_id": kwargs["tenant_id"],
+                    "source_id": kwargs["source_id"],
+                    "artifact_id": "art_" + digest[:32],
+                    "storage_backend": "s3",
+                    "object_key": "objects/aa/" + digest,
+                    "content_sha256": digest,
+                    "size_bytes": len(kwargs["payload"]),
+                    "media_type": kwargs["media_type"],
+                    "encryption": "sse-s3",
+                    "version_id": "synthetic-version",
+                    "created_at": kwargs["created_at"],
+                }
+
+        class Writer:
+            def ingest(self, events):
+                ingested.append(events)
+                return {
+                    "status": "committed",
+                    "inserted": len(events),
+                    "duplicate_events": 0,
+                    "receipts": [
+                        f"recall://{event['source_id']}/{event['native_id']}?rev=1"
+                        for event in events
+                    ],
+                    "replay": False,
+                }
+
+        collector = Collector(
+            root=self.root,
+            harness="claude",
+            source_id="claude:linux:test",
+            spool_path=self.spool,
+            endpoint=self.endpoint,
+            token="test-token-not-a-secret",
+            principal_id="owner",
+            privacy=PrivacyPolicy(mode="scrub"),
+            brain_writer=Writer(),
+            archive=Archive(),
+            tenant_id="tenant:personal",
+            archive_workers=1,
+        )
+        self.assertEqual(collector.scan()["records_queued"], 1001)
+        self.assertEqual(collector.doctor()["acked"], 1000)
+        self.assertEqual(collector.doctor()["pending"], 1)
+        self.assertEqual(collector.flush()["acked"], 1)
         collector.close()
 
     def test_enabling_drop_compacts_sensitive_pending_bytes_from_legacy_spool(self) -> None:

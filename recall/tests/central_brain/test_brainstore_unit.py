@@ -774,6 +774,20 @@ class DeliberateCaptureContractTest(unittest.TestCase):
 
 
 class SemanticRetrievalConfigurationTest(unittest.TestCase):
+    def test_database_pool_size_is_bounded_deployment_config(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {"RECALL_DATABASE_POOL_MAX_SIZE": "20"},
+        ):
+            store = BrainStore("postgresql://synthetic.invalid/recall")
+        self.assertEqual(store.pool_max_size, 20)
+        for invalid in (3, 33):
+            with self.assertRaisesRegex(ValueError, "database pool size"):
+                BrainStore(
+                    "postgresql://synthetic.invalid/recall",
+                    pool_max_size=invalid,
+                )
+
     def test_similarity_floor_is_explicit_validated_deployment_config(self) -> None:
         with mock.patch.dict(
             os.environ,
@@ -928,7 +942,7 @@ class SemanticRetrievalContractTest(unittest.TestCase):
         self.assertIs(store.connect(), second)
         pool_type.assert_called_once()
         self.assertEqual(pool_type.call_args.kwargs["min_size"], 1)
-        self.assertEqual(pool_type.call_args.kwargs["max_size"], 4)
+        self.assertEqual(pool_type.call_args.kwargs["max_size"], 8)
 
         store.close()
         pool.close.assert_called_once_with()
