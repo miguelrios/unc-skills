@@ -12,6 +12,7 @@ from .app import serve, serve_unix
 from .archive import ArchiveError
 from .archive_runtime import build_archive_store, probe_archive
 from .capabilities import CapabilityError, probe_database
+from .canonical_retrieval import CanonicalRetrieval
 from .db import BrainStore
 from .deployment import DeploymentManifestError, load_manifest, preview
 from .federation import QUALITY_SCORES, SOURCE_FAMILIES
@@ -81,6 +82,10 @@ def main() -> None:
     backfill_turn_embeddings.add_argument("--batch-size", type=int, default=128)
     backfill_turn_embeddings.add_argument("--max-batches", type=int)
     backfill_turn_embeddings.add_argument("--source-id")
+    canonical_embeddings = sub.add_parser("backfill-canonical-embeddings")
+    canonical_embeddings.add_argument("--tenant")
+    canonical_embeddings.add_argument("--batch-size", type=int, default=100)
+    canonical_embeddings.add_argument("--max-batches", type=int, default=10)
     sub.add_parser("export")
     conformance = sub.add_parser("mcp-conformance")
     conformance.add_argument("--config", type=Path, required=True)
@@ -112,6 +117,24 @@ def main() -> None:
     )
     revoke_token = sub.add_parser("token-revoke")
     revoke_token.add_argument("name")
+    brain = sub.add_parser("brain-provision")
+    brain.add_argument("--organization", required=True)
+    brain.add_argument(
+        "--kind", choices=("personal", "company"), required=True
+    )
+    brain.add_argument("--display-name", required=True)
+    brain.add_argument("--tenant", required=True)
+    brain.add_argument("--slug", required=True)
+    brain.add_argument("--owner-principal", required=True)
+    create_mcp_token = sub.add_parser("mcp-token-create")
+    create_mcp_token.add_argument("name")
+    create_mcp_token.add_argument("--tenant", required=True)
+    create_mcp_token.add_argument("--principal", required=True)
+    create_mcp_token.add_argument("--scopes", default="read")
+    create_mcp_token.add_argument("--expires-in-days", type=int, default=30)
+    create_mcp_token.add_argument("--output", required=True)
+    revoke_mcp_token = sub.add_parser("mcp-token-revoke")
+    revoke_mcp_token.add_argument("name")
     source_profile = sub.add_parser("source-profile-set")
     source_profile.add_argument("source_id")
     source_profile.add_argument(
@@ -304,6 +327,17 @@ def main() -> None:
                 sort_keys=True,
             )
         )
+    elif args.command == "backfill-canonical-embeddings":
+        print(
+            json.dumps(
+                CanonicalRetrieval(store).embed_pending(
+                    tenant_id=args.tenant,
+                    batch_size=args.batch_size,
+                    max_batches=args.max_batches,
+                ),
+                sort_keys=True,
+            )
+        )
     elif args.command == "export":
         for envelope in store.export_raw():
             print(json.dumps(envelope, sort_keys=True))
@@ -329,6 +363,49 @@ def main() -> None:
         )
     elif args.command == "token-revoke":
         print(json.dumps({"revoked": store.revoke_collector_token(args.name)}))
+    elif args.command == "brain-provision":
+        print(
+            json.dumps(
+                store.provision_brain(
+                    organization_id=args.organization,
+                    organization_kind=args.kind,
+                    display_name=args.display_name,
+                    tenant_id=args.tenant,
+                    brain_kind=args.kind,
+                    slug=args.slug,
+                    owner_principal_id=args.owner_principal,
+                ),
+                sort_keys=True,
+            )
+        )
+    elif args.command == "mcp-token-create":
+        credential = store.create_mcp_token(
+            args.name,
+            tenant_id=args.tenant,
+            principal_id=args.principal,
+            scopes=[
+                scope.strip()
+                for scope in args.scopes.split(",")
+                if scope.strip()
+            ],
+            expires_in_days=args.expires_in_days,
+        )
+        payload = (json.dumps(credential, sort_keys=True) + "\n").encode()
+        descriptor = os.open(
+            args.output,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(payload)
+        print(
+            json.dumps(
+                {key: value for key, value in credential.items() if key != "token"},
+                sort_keys=True,
+            )
+        )
+    elif args.command == "mcp-token-revoke":
+        print(json.dumps({"revoked": store.revoke_mcp_token(args.name)}))
     elif args.command == "source-profile-set":
         print(
             json.dumps(

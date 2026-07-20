@@ -52,6 +52,7 @@ jobs:
             e2e_v2_lifecycle.py \
             e2e_v2_isolation.py \
             e2e_v2_connector_writer.py \
+            e2e_v2_multitenant_mcp.py \
             e2e_session_source_l1.py \
             e2e_semantic_l2.py \
             e2e_capture_mcp.py \

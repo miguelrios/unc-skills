@@ -180,6 +180,14 @@ class CanonicalPlane:
         ).fetchone()
         if owner is None or owner["owner_principal_id"] != principal_id:
             raise CanonicalLifecycleError("canonical_authority_forbidden")
+        conn.execute(
+            """INSERT INTO canonical_source_grants(
+                   tenant_id,principal_id,source_id,permission
+               ) VALUES (%s,%s,%s,'owner')
+               ON CONFLICT(tenant_id,principal_id,source_id)
+               DO UPDATE SET permission='owner'""",
+            (tenant_id, principal_id, source_id),
+        )
 
     def ingest_document(
         self,

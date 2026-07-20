@@ -38,12 +38,19 @@ FROM (VALUES
   ('source_events','id'),
   ('brain_tenants','tenant_id'),
   ('brain_principals','tenant_id,principal_id'),
+  ('brain_organizations','organization_id'),
+  ('brain_spaces','tenant_id'),
+  ('brain_memberships','organization_id,principal_id'),
+  ('brain_access_grants','tenant_id,principal_id'),
   ('canonical_sources','tenant_id,source_id'),
+  ('canonical_source_grants','tenant_id,principal_id,source_id'),
+  ('mcp_credentials','id'),
   ('raw_artifacts','tenant_id,source_id,artifact_id'),
   ('canonical_ingest_jobs','tenant_id,source_id,job_id'),
   ('canonical_events','tenant_id,source_id,event_id'),
   ('canonical_documents','tenant_id,source_id,document_id'),
   ('canonical_chunks','tenant_id,source_id,chunk_id'),
+  ('canonical_chunk_embeddings','tenant_id,source_id,chunk_id'),
   ('receipt_redirects','tenant_id,old_receipt'),
   ('forget_tombstones','tenant_id,source_id,target_identity_sha256'),
   ('canonical_audit_events','tenant_id,source_id,audit_id')
@@ -61,8 +68,11 @@ import re
 
 approved = {
     "schema_migrations", "source_events", "brain_tenants", "brain_principals",
-    "canonical_sources", "raw_artifacts", "canonical_ingest_jobs",
+    "brain_organizations", "brain_spaces", "brain_memberships",
+    "brain_access_grants", "canonical_sources", "canonical_source_grants",
+    "mcp_credentials", "raw_artifacts", "canonical_ingest_jobs",
     "canonical_events", "canonical_documents", "canonical_chunks",
+    "canonical_chunk_embeddings",
     "receipt_redirects", "forget_tombstones", "canonical_audit_events",
 }
 rows = []
