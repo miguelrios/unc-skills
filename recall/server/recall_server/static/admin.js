@@ -62,7 +62,28 @@ function brainOptions() {
 function renderGoogle() {
   const target = $("#google-routes");
   target.replaceChildren();
-  const available = state.data.providers.some((item) => item.id === "google");
+  const providerIds = new Set(state.data.providers.map((item) => item.id));
+  const supported = [
+    ["composio", "Hosted connection (Composio)"],
+    ["google", "Direct Google OAuth"],
+  ].filter(([id]) => providerIds.has(id));
+  const available = supported.length > 0;
+  const provider = $("#google-auth-provider");
+  const previous = provider.value;
+  provider.replaceChildren(...supported.map(([id, label]) => {
+    const option = document.createElement("option");
+    option.value = id;
+    option.textContent = label;
+    return option;
+  }));
+  if (supported.some(([id]) => id === previous)) provider.value = previous;
+  provider.disabled = !available;
+  const renderProviderNote = () => {
+    $("#google-auth-note").textContent = provider.value === "composio"
+      ? "Authorize one source per trip; Recall binds the exact hosted account."
+      : "Authorize several selected sources in one direct Google trip.";
+  };
+  renderProviderNote();
   Object.entries(googleLabels).forEach(([connectorId, label]) => {
     const row = document.createElement("div");
     row.className = "route-row";
@@ -73,24 +94,22 @@ function renderGoogle() {
       <label class="switch"><input type="checkbox" aria-label="Enable ${label}" ${available ? "" : "disabled"}><span></span></label>`;
     target.append(row);
   });
-  const connected = state.data.connections.find((item) => item.provider === "google");
+  const connected = state.data.connections.filter((item) =>
+    item.provider === "google" || item.provider === "composio"
+  );
   const connection = $("#google-connection");
   connection.replaceChildren();
-  connection.append(
-    connected
-      ? "Connected · encrypted server-side"
-      : available
-        ? "Not connected"
-        : "OAuth client not configured"
-  );
-  if (connected) {
+  connection.append(connected.length
+    ? `${connected.length} connection${connected.length === 1 ? "" : "s"} · authority bound server-side`
+    : available ? "Not connected" : "No connection provider configured");
+  connected.forEach((item) => {
     const disconnect = document.createElement("button");
     disconnect.type = "button";
-    disconnect.dataset.connectionId = connected.id;
-    disconnect.textContent = "Disconnect";
+    disconnect.dataset.connectionId = item.id;
+    disconnect.textContent = `Disconnect ${item.provider}`;
     connection.append(disconnect);
-  }
-  connection.classList.toggle("connected", Boolean(connected));
+  });
+  connection.classList.toggle("connected", connected.length > 0);
   $("#google-form button[type=submit]").disabled = !available;
 }
 
@@ -197,10 +216,14 @@ $("#google-form").addEventListener("submit", async (event) => {
       selectors: {},
     }));
   if (!routes.length) return toast("Switch on at least one Google source.");
+  const provider = $("#google-auth-provider").value;
+  if (provider === "composio" && routes.length !== 1) {
+    return toast("Hosted connections authorize one Google source at a time.");
+  }
   try {
     const result = await api("/admin/api/v1/oauth/start", {
       method: "POST",
-      body: JSON.stringify({ provider: "google", routes }),
+      body: JSON.stringify({ provider, routes }),
     });
     window.location.assign(result.authorization_url);
   } catch (error) {
@@ -236,11 +259,17 @@ $("#google-connection").addEventListener("click", async (event) => {
       method: "POST",
       body: JSON.stringify({}),
     });
-    toast("Google authority revoked and encrypted credentials wiped.");
+    toast("Provider authority revoked and encrypted references wiped.");
     await load();
   } catch (error) {
-    toast(`Google remains connected: ${error.message}`);
+    toast(`Provider remains connected: ${error.message}`);
   }
+});
+
+$("#google-auth-provider").addEventListener("change", () => {
+  $("#google-auth-note").textContent = $("#google-auth-provider").value === "composio"
+    ? "Authorize one source per trip; Recall binds the exact hosted account."
+    : "Authorize several selected sources in one direct Google trip.";
 });
 
 const oauth = new URLSearchParams(window.location.search).get("oauth");

@@ -187,6 +187,8 @@ h1 em { color: var(--blue); font-weight: 400; }
   cursor: pointer;
 }
 .route-matrix { padding: 34px; align-self: stretch; display: flex; flex-direction: column; }
+.provider-choice { display: grid; grid-template-columns: 1fr minmax(180px, 1.4fr); gap: 18px; align-items: center; font: 800 9px monospace; letter-spacing: .12em; text-transform: uppercase; }
+.provider-note { min-height: 32px; margin: 8px 0 18px; color: var(--muted); font-size: 11px; }
 .matrix-head, .route-row { display: grid; grid-template-columns: 1fr minmax(130px, .9fr) 48px; align-items: center; }
 .matrix-head { padding: 0 8px 13px; font: 800 9px monospace; letter-spacing: .14em; text-transform: uppercase; border-bottom: 1px solid; }
 .route-row { min-height: 67px; border-bottom: 1px solid var(--line); padding: 0 8px; }

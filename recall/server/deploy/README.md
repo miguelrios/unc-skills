@@ -234,6 +234,24 @@ RECALL_GOOGLE_CLIENT_SECRET=<Google web application client secret>
 RECALL_GOOGLE_REDIRECT_URI=https://<public-host>/admin/oauth/callback/google
 ```
 
+Composio is the hosted connection option. It is also optional and can coexist
+with direct Google OAuth; its API key and callback are an all-or-none pair:
+
+```text
+RECALL_COMPOSIO_API_KEY=<scoped server-side project key>
+RECALL_COMPOSIO_REDIRECT_URI=https://<public-host>/admin/oauth/callback/composio
+```
+
+Use a stable Recall principal ID as the Composio user ID. The switchboard opens
+one Google toolkit per hosted authorization trip and binds the returned exact
+`ca_...` account to that principal, connector, and brain route. Recall re-reads
+the account, verifies active status/owner/toolkit/scopes, and executes a minimal
+read capability probe before enabling ingestion. Only the opaque user, toolkit,
+and connected-account references are encrypted in Recall; provider tokens stay
+in Composio. Set the optional `RECALL_COMPOSIO_AUTH_CONFIG_*` variables from
+`service.env.example` for production-owned OAuth branding and scopes. Omit them
+only for Composio-managed development auth.
+
 The encryption key is independent of database, archive, Google, and MCP
 credentials. Keep it stable for the lifetime of encrypted provider connections;
 rotate it with an explicit decrypt/re-encrypt migration, never by silently

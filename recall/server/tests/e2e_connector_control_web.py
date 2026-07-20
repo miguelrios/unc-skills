@@ -18,7 +18,12 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT), str(ROOT / "server")]
 
 from recall_server.app import Handler
-from recall_server.control import ControlPlane, OAuthTokens, SecretBox
+from recall_server.control import (
+    ControlPlane,
+    ManagedOAuthStart,
+    OAuthTokens,
+    SecretBox,
+)
 from recall_server.db import BrainStore
 
 
@@ -72,6 +77,61 @@ class FakeGoogle:
         self.revoked = True
 
 
+class FakeComposio:
+    provider_id = "composio"
+    managed_connection = True
+
+    def __init__(self):
+        self.revoked = False
+        self.completed = 0
+
+    def start_connection(self, *, user_id, connector_id, state):
+        assert user_id == OWNER
+        assert connector_id == "google.drive"
+        return ManagedOAuthStart(
+            authorization_url=(
+                "https://connect.composio.dev/link/synthetic?"
+                + urlencode({"state": state})
+            ),
+            connected_account_id="ca_synthetic_drive_123",
+        )
+
+    def complete_connection(
+        self,
+        *,
+        user_id,
+        connector_id,
+        expected_connected_account_id,
+        callback_connected_account_id,
+        callback_status,
+        required_scopes,
+    ):
+        assert user_id == OWNER
+        assert connector_id == "google.drive"
+        assert expected_connected_account_id == "ca_synthetic_drive_123"
+        assert callback_connected_account_id == expected_connected_account_id
+        assert callback_status == "success"
+        self.completed += 1
+        return OAuthTokens(
+            subject_id="googledrive:ca_synthetic_drive_123",
+            granted_scopes=tuple(required_scopes),
+            credentials={
+                "user_id": user_id,
+                "connected_account_id": expected_connected_account_id,
+                "toolkit": "googledrive",
+            },
+            expires_at=None,
+        )
+
+    def revoke(self, credentials):
+        assert set(credentials) == {
+            "user_id",
+            "connected_account_id",
+            "toolkit",
+        }
+        self.revoked = True
+
+
 def request(server, method, path, *, body=None, cookie=None, csrf=None):
     payload = None if body is None else json.dumps(body).encode()
     headers = {"Accept": "application/json"}
@@ -82,9 +142,7 @@ def request(server, method, path, *, body=None, cookie=None, csrf=None):
         headers["Cookie"] = cookie
     if csrf:
         headers["X-Recall-CSRF"] = csrf
-    connection = http.client.HTTPConnection(
-        "127.0.0.1", server.server_port, timeout=10
-    )
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=10)
     connection.request(method, path, body=payload, headers=headers)
     response = connection.getresponse()
     raw = response.read()
@@ -158,8 +216,13 @@ def main():
         )
 
     provider = FakeGoogle()
+    composio = FakeComposio()
     box = SecretBox(b"e" * 32)
-    control = ControlPlane(store, box, {"google": provider})
+    control = ControlPlane(
+        store,
+        box,
+        {"google": provider, "composio": composio},
+    )
     owner_token = control.create_admin_token(
         "owner-control-e2e",
         principal_id=OWNER,
@@ -198,9 +261,7 @@ def main():
         assert security["X-Frame-Options"] == "DENY"
         assert security["Content-Security-Policy"].startswith("default-src 'none'")
 
-        status, _, stylesheet = request(
-            server, "GET", "/admin/assets/admin.css"
-        )
+        status, _, stylesheet = request(server, "GET", "/admin/assets/admin.css")
         assert status == 200 and b"--acid: #c8ff52" in stylesheet
         status, _, denied = request(server, "GET", "/admin/api/v1/state")
         assert status == 401 and denied["error"] == "admin_session_invalid"
@@ -219,7 +280,10 @@ def main():
         )
         assert status == 200
         assert len(initial["brains"]) == 2
-        assert initial["providers"] == [{"id": "google", "status": "available"}]
+        assert initial["providers"] == [
+            {"id": "composio", "status": "available"},
+            {"id": "google", "status": "available"},
+        ]
         assert {item["connector_id"] for item in initial["catalog"]}.issuperset(
             {"google.gmail", "google.calendar", "custom.webhook"}
         )
@@ -301,9 +365,7 @@ def main():
         credential = store.authenticate_bearer(rerouted["token"], "write")
         assert credential and credential["tenant_id"] == COMPANY
         rerouted_action = (
-            "/admin/api/v1/installations/"
-            + rerouted["installation_id"]
-            + "/actions"
+            "/admin/api/v1/installations/" + rerouted["installation_id"] + "/actions"
         )
         status, _, revoked_device = request(
             server,
@@ -384,9 +446,8 @@ def main():
         )
         assert status == 403 and denied["error"] == "oauth_brain_forbidden"
 
-        callback = (
-            "/admin/oauth/callback/google?"
-            + urlencode({"state": state, "code": "synthetic-code"})
+        callback = "/admin/oauth/callback/google?" + urlencode(
+            {"state": state, "code": "synthetic-code"}
         )
         status, headers, raw = request(server, "GET", callback)
         assert status == 303 and dict(headers)["Location"] == "/admin?oauth=connected"
@@ -404,18 +465,15 @@ def main():
             csrf=owner_csrf,
         )
         assert status == 201
-        reauth_state = parse_qs(
-            urlsplit(reauth["authorization_url"]).query
-        )["state"][0]
+        reauth_state = parse_qs(urlsplit(reauth["authorization_url"]).query)["state"][0]
         with store.connect() as connection:
             connection.execute(
                 """UPDATE brain_access_grants SET permission='read'
                    WHERE tenant_id=%s AND principal_id=%s""",
                 (COMPANY, OWNER),
             )
-        denied_callback = (
-            "/admin/oauth/callback/google?"
-            + urlencode({"state": reauth_state, "code": "synthetic-code"})
+        denied_callback = "/admin/oauth/callback/google?" + urlencode(
+            {"state": reauth_state, "code": "synthetic-code"}
         )
         status, _, denied = request(server, "GET", denied_callback)
         assert status == 403 and denied["error"] == "oauth_brain_forbidden"
@@ -442,10 +500,66 @@ def main():
         }
         assert SECRET_CANARY not in json.dumps(connected)
 
-        first = connected["installations"][0]
-        action_path = (
-            f"/admin/api/v1/installations/{first['id']}/actions"
+        composio_route = [
+            {
+                "connector_id": "google.drive",
+                "tenant_id": PERSONAL,
+                "privacy_mode": "scrub",
+                "selectors": {},
+            }
+        ]
+        status, _, denied = request(
+            server,
+            "POST",
+            "/admin/api/v1/oauth/start",
+            body={"provider": "composio", "routes": composio_route + routes[:1]},
+            cookie=owner_cookie,
+            csrf=owner_csrf,
         )
+        assert status == 400 and denied["error"] == "oauth_routes_invalid"
+        status, _, hosted = request(
+            server,
+            "POST",
+            "/admin/api/v1/oauth/start",
+            body={"provider": "composio", "routes": composio_route},
+            cookie=owner_cookie,
+            csrf=owner_csrf,
+        )
+        assert status == 201
+        hosted_state = parse_qs(urlsplit(hosted["authorization_url"]).query)["state"][0]
+        invalid_hosted_callback = "/admin/oauth/callback/composio?" + urlencode(
+            {
+                "state": hosted_state,
+                "status": "success",
+                "connected_account_id": "ca_synthetic_drive_123",
+                "unexpected": "blocked",
+            }
+        )
+        status, _, denied = request(server, "GET", invalid_hosted_callback)
+        assert status == 400 and denied["error"] == "oauth_callback_invalid"
+        hosted_callback = "/admin/oauth/callback/composio?" + urlencode(
+            {
+                "state": hosted_state,
+                "status": "success",
+                "connected_account_id": "ca_synthetic_drive_123",
+            }
+        )
+        status, headers, raw = request(server, "GET", hosted_callback)
+        assert status == 303 and dict(headers)["Location"] == "/admin?oauth=connected"
+        assert raw == b"" and composio.completed == 1
+        status, _, denied = request(server, "GET", hosted_callback)
+        assert status == 403 and denied["error"] == "oauth_state_invalid"
+
+        status, _, with_hosted = request(
+            server, "GET", "/admin/api/v1/state", cookie=owner_cookie
+        )
+        assert status == 200
+        assert len(with_hosted["connections"]) == 2
+        assert len(with_hosted["installations"]) == 3
+        assert SECRET_CANARY not in json.dumps(with_hosted)
+
+        first = connected["installations"][0]
+        action_path = f"/admin/api/v1/installations/{first['id']}/actions"
         status, _, paused = request(
             server,
             "POST",
@@ -465,7 +579,11 @@ def main():
         )
         assert status == 200 and replay["replay"]
 
-        connection_id = connected["connections"][0]["id"]
+        connection_id = next(
+            item["id"]
+            for item in with_hosted["connections"]
+            if item["provider"] == "google"
+        )
         status, _, revoked = request(
             server,
             "POST",
@@ -489,11 +607,31 @@ def main():
             ).fetchone()["count"]
         assert row["status"] == "revoked"
         assert row["encryption_key_id"] == box.key_id
-        assert box.open(
-            bytes(row["encrypted_credentials"]),
-            purpose=f"provider-connection:{connection_id}",
-        ) == {}
-        assert consumed == 2
+        assert (
+            box.open(
+                bytes(row["encrypted_credentials"]),
+                purpose=f"provider-connection:{connection_id}",
+            )
+            == {}
+        )
+        assert consumed == 3
+
+        hosted_connection_id = next(
+            item["id"]
+            for item in with_hosted["connections"]
+            if item["provider"] == "composio"
+        )
+        status, _, hosted_revoked = request(
+            server,
+            "POST",
+            f"/admin/api/v1/connections/{hosted_connection_id}/revoke",
+            body={},
+            cookie=owner_cookie,
+            csrf=owner_csrf,
+        )
+        assert status == 200
+        assert hosted_revoked["installations_revoked"] == 1
+        assert composio.revoked
     finally:
         server.shutdown()
         server.server_close()
@@ -511,13 +649,14 @@ def main():
             {
                 "status": "pass",
                 "brains": 2,
-                "routes": 4,
+                "routes": 5,
                 "device_token_rotations": 1,
                 "paused_device_authority_denials": 1,
                 "cross_brain_admin_writes": 0,
                 "mid_flow_authority_revocations": 1,
                 "csrf_denials": 1,
                 "oauth_state_replays": 0,
+                "hosted_account_binding_replays": 0,
                 "plaintext_secret_renders": 0,
                 "encrypted_secret_wiped_on_revoke": True,
                 "browser_assets": 3,

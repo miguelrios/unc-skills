@@ -54,6 +54,11 @@
           <div id="google-connection" class="connection-state">Not connected</div>
         </div>
         <form id="google-form" class="route-matrix">
+          <label class="provider-choice" for="google-auth-provider">
+            <span>Connection method</span>
+            <select id="google-auth-provider" aria-describedby="google-auth-note"></select>
+          </label>
+          <p id="google-auth-note" class="provider-note"></p>
           <div class="matrix-head"><span>Source</span><span>Destination</span><span>On</span></div>
           <div id="google-routes"></div>
           <button class="connect-button" type="submit">
