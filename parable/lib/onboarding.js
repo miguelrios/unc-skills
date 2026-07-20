@@ -179,6 +179,7 @@ function setupUsage() {
     "usage: parable setup [--vendors chatgpt[,claude][,xai]] [--proxy-bin PATH]",
     "                     [--config-dir DIR] [--port PORT] [--build-proxy]",
     "                     [--no-auth] [--non-interactive]",
+    "       parable setup finalize [--json]",
     "",
     "Create a private, loopback-only Parable + CLIProxyAPI configuration.",
     "ChatGPT is mandatory because the parent model is exact gpt-5.6-sol.",
@@ -701,6 +702,18 @@ function loadSetupContext(options = {}) {
   return { configDir, authDir, paths, manifest: desired, vendors };
 }
 
+function setupClientEnvironment() {
+  const context = loadSetupContext({ requireProxy: false });
+  const token = readExistingToken(context.paths);
+  return { ...process.env, CLIPROXY_API_KEY: token };
+}
+
+function claudeClientEnvironment() {
+  const paths = setupPaths(path.resolve(activeSetupDirectory()));
+  if (!lstatOrNull(paths.manifest)) return process.env;
+  return setupClientEnvironment();
+}
+
 function authUsage() {
   return [
     "usage: parable auth add chatgpt [--device]",
@@ -1036,11 +1049,13 @@ module.exports = {
   VENDORS,
   authUsage,
   proxyStartUsage,
+  claudeClientEnvironment,
   runAuthAdd,
   runAuthStatus,
   runProxyBuild,
   runProxyStart,
   runSetup,
+  setupClientEnvironment,
   setupUsage,
   proxyBuildUsage,
 };

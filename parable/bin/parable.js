@@ -8,11 +8,13 @@ const path = require("path");
 const { execSync, spawnSync } = require("child_process");
 const {
   OnboardingError,
+  claudeClientEnvironment,
   runAuthAdd,
   runAuthStatus,
   runProxyBuild,
   runProxyStart,
   runSetup,
+  setupClientEnvironment,
 } = require("../lib/onboarding");
 
 const PKG_ROOT = path.resolve(__dirname, "..");
@@ -121,17 +123,22 @@ function cmdDoctor() {
   process.exit(ok ? 0 : 1);
 }
 
-function runPython(args) {
-  const result = spawnSync("python3", [PARABLE_PY, ...args], { stdio: "inherit", env: process.env });
+function runPython(args, env = process.env) {
+  const result = spawnSync("python3", [PARABLE_PY, ...args], { stdio: "inherit", env });
   if (result.error) fail("could not start python3: " + result.error.message);
   process.exit(result.status === null ? 1 : result.status);
 }
 
 async function main() {
   const raw = process.argv.slice(2);
-  if (raw[0] === "claude") runPython(["claude", "--", ...raw.slice(1)]);
+  if (raw[0] === "claude") {
+    runPython(["claude", "--", ...raw.slice(1)], claudeClientEnvironment());
+  }
   if (raw[0] === "agents" && raw[1] === "sync") {
     runPython(["agents", "sync", ...raw.slice(2)]);
+  }
+  if (raw[0] === "setup" && raw[1] === "finalize") {
+    runPython(["finalize", ...raw.slice(2)], setupClientEnvironment());
   }
   if (raw[0] === "setup") {
     await runSetup(raw.slice(1), log);
@@ -162,6 +169,7 @@ async function main() {
     log("usage: npx @parcha/parable <install|setup|doctor|auth|proxy|claude|agents sync> [options]");
     log("  install            copy the skill to ~/.claude/skills (or ./.claude/skills with --project)");
     log("  setup              create a private loopback subscription configuration");
+    log("  setup finalize     verify exact catalog ids and synchronize named agents");
     log("  doctor             check python/codex/config health");
     log("  auth add VENDOR    authorize chatgpt, claude, or xai through CLIProxyAPI");
     log("  auth status        show credential-safe provider presence and record counts");
