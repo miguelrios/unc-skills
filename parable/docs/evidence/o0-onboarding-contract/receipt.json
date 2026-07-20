@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "loop": "O0",
+  "captured_at_utc": "2026-07-20T20:50:31Z",
+  "baseline": {
+    "source_version": "0.1.9",
+    "npm_registry_version": "0.1.7",
+    "source_commands": [
+      "install",
+      "doctor",
+      "claude",
+      "agents sync"
+    ],
+    "registry_commands": [
+      "install",
+      "doctor"
+    ],
+    "setup_present": false,
+    "auth_present": false,
+    "proxy_present": false,
+    "complete_parable_suite": "PASS_81_OF_81"
+  },
+  "contract": {
+    "chatgpt_required": true,
+    "optional_vendors": [
+      "claude",
+      "xai"
+    ],
+    "kimi_status": "paused_absent",
+    "generated_file_mode": "0600",
+    "generated_directory_mode": "0700",
+    "silent_overwrite_allowed": false,
+    "loopback_only": true,
+    "exact_catalog_fail_closed": true,
+    "provider_api_keys_used": false,
+    "broker_required": false,
+    "npm_publish_authorized": false
+  },
+  "bounds": {
+    "documentation_proofs": "1/2",
+    "evidence_failures": 0,
+    "instrument_failures": 2,
+    "review_rounds": "1/3",
+    "provider_turns": 0,
+    "oauth_flows": 0
+  },
+  "instrumentation_events": [
+    "The first baseline command used a repository-relative package path after entering the package directory.",
+    "The registry CLI treats --help as an unknown command; the corrected zero-argument help probe passed."
+  ],
+  "safety": {
+    "credential_material_committed": false,
+    "oauth_state_committed": false,
+    "account_identifier_committed": false,
+    "raw_provider_output_committed": false,
+    "private_path_committed": false
+  }
+}
