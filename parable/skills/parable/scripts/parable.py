@@ -9,6 +9,7 @@ Subcommands:
   list                           One line per executor: id, model, cost, status, tags
   usage [--all] [--json]         Live subscription headroom per pool (zero model tokens)
   claude [-- <args...>]           Launch Claude Code through the configured localhost proxy
+  finalize [--json]               Verify exact catalog ids and synchronize the named cast
   agents sync                     Synchronize Parable's project-local custom agents
   run <executor> <plan> [workdir] [--slug S] [--effort E]   Dispatch a plan to a codex- or pi-backed executor
   resume <run-dir|uuid> <delta prompt>            Continue a prior run's session with a fix-up
@@ -512,17 +513,65 @@ def cmd_agents_sync(_args: argparse.Namespace) -> int:
     return 0
 
 
+def reconcile_claude_cast(root: Path, cfg: dict, token: str
+                           ) -> tuple[set[str], dict[str, list[str]]]:
+    """Require every exact configured id before changing the project cast."""
+    available = fetch_proxy_models(cfg["claude"]["base_url"], token)
+    missing = [model for model in claude_required_models(cfg) if model not in available]
+    if missing:
+        raise ValueError(f"proxy model catalog is missing: {', '.join(missing)}")
+    return available, sync_claude_agents(root, cfg)
+
+
+def exact_named_cast(cfg: dict) -> list[dict[str, str]]:
+    return [
+        {"name": agent_slug(executor_id), "model": executor["model"]}
+        for executor_id, executor in sorted(custom_claude_executors(cfg).items())
+    ]
+
+
+def cmd_finalize(args: argparse.Namespace) -> int:
+    root = git_root()
+    try:
+        cfg, _loaded, token = checked_claude_config(root)
+        assert token is not None
+        available, result = reconcile_claude_cast(root, cfg, token)
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"parable: {exc}", file=sys.stderr)
+        return 1
+    cast = exact_named_cast(cfg)
+    report = {
+        "ready": True,
+        "parentModel": cfg["claude"]["brain_model"],
+        "agents": cast,
+        "catalog": {
+            "availableCount": len(available),
+            "requiredCount": len(claude_required_models(cfg)),
+        },
+        "sync": {key: len(value) for key, value in result.items()},
+        "next": "parable claude -- --effort high",
+    }
+    if args.json:
+        print(json.dumps(report, indent=2))
+        return 0
+    print(
+        f"catalog: ready ({report['catalog']['requiredCount']} required, "
+        f"{report['catalog']['availableCount']} available)"
+    )
+    print(f"parent:  {report['parentModel']}")
+    for agent in cast:
+        print(f"agent:   {agent['name']} -> {agent['model']}")
+    print(f"next:    {report['next']}")
+    return 0
+
+
 def cmd_claude(args: argparse.Namespace) -> int:
     root = git_root()
     try:
         cfg, _loaded, token = checked_claude_config(root)
         assert token is not None
         argv, launch_env = build_claude_launch(cfg, args.claude_args)
-        available = fetch_proxy_models(cfg["claude"]["base_url"], token)
-        missing = [model for model in claude_required_models(cfg) if model not in available]
-        if missing:
-            raise ValueError(f"proxy model catalog is missing: {', '.join(missing)}")
-        result = sync_claude_agents(root, cfg)
+        available, result = reconcile_claude_cast(root, cfg, token)
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"parable: {exc}", file=sys.stderr)
         return 1
@@ -1517,6 +1566,10 @@ def main() -> int:
     p.add_argument("claude_args", nargs=argparse.REMAINDER,
                    help="arguments forwarded to Claude Code (use -- before Claude flags)")
     p.set_defaults(fn=cmd_claude)
+
+    p = sub.add_parser("finalize", help="verify exact catalog ids and synchronize named agents")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(fn=cmd_finalize)
 
     p = sub.add_parser("agents", help="manage Parable's project-local Claude agents")
     agent_sub = p.add_subparsers(dest="agents_cmd", required=True)

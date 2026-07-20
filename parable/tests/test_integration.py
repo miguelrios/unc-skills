@@ -43,7 +43,9 @@ capture = {
     "argv": sys.argv[1:],
     "base_url": os.environ.get("ANTHROPIC_BASE_URL"),
     "auth_token_present": bool(os.environ.get("ANTHROPIC_AUTH_TOKEN")),
-    "source_token_present": "PARABLE_PROXY_TOKEN" in os.environ,
+    "source_token_present": any(
+        key in os.environ for key in ("PARABLE_PROXY_TOKEN", "CLIPROXY_API_KEY")
+    ),
     "inherited": {
         key: key in os.environ
         for key in (
@@ -1133,6 +1135,250 @@ raise SystemExit(int(os.environ.get("FAKE_PROXY_EXIT", "0")))
             self.assertNotEqual(missing.returncode, 0)
             self.assertIn("configured proxy binary", missing.stderr)
             self.assertEqual(self.calls(capture), [])
+
+
+class TestOnboardingFinalizeEndToEnd(unittest.TestCase):
+    def make_proxy(self, bindir: Path, capture: Path) -> Path:
+        proxy = bindir / "fake-subscription-proxy"
+        proxy.write_text("""#!/usr/bin/env python3
+import json
+import os
+import sys
+with open(os.environ["FAKE_PROXY_CAPTURE"], "a") as handle:
+    handle.write(json.dumps(sys.argv[1:]) + "\\n")
+""")
+        proxy.chmod(0o755)
+        return proxy
+
+    def make_repo(self, root: Path, name: str = "repo") -> Path:
+        repo = root / name
+        agents = repo / ".claude" / "agents"
+        agents.mkdir(parents=True)
+        (agents / "handwritten.md").write_text(
+            "---\nname: handwritten\ndescription: keep\n---\nUser-owned.\n"
+        )
+        (agents / "parable-handwritten.md").write_text(
+            "---\nname: parable-handwritten\ndescription: also keep\n---\nUser-owned.\n"
+        )
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        return repo
+
+    def environment(
+        self,
+        home: Path,
+        bindir: Path,
+        proxy_capture: Path,
+        claude_capture: Path,
+    ) -> dict[str, str]:
+        env = os.environ | {
+            "HOME": str(home),
+            "PATH": f"{bindir}:{os.environ['PATH']}",
+            "FAKE_PROXY_CAPTURE": str(proxy_capture),
+            "FAKE_CLAUDE_CAPTURE": str(claude_capture),
+        }
+        for name in (
+            "PARABLE_CONFIG",
+            "PARABLE_CLIPROXY_BIN",
+            "CLIPROXY_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+        ):
+            env.pop(name, None)
+        return env
+
+    def run_cli(
+        self,
+        repo: Path,
+        env: dict[str, str],
+        *args: str,
+    ) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [NODE, str(REPO / "bin" / "parable.js"), *args],
+            cwd=repo,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+    def setup_token(self, home: Path) -> str:
+        value = (home / ".config" / "parable" / "cliproxy.env").read_text()
+        prefix = "export CLIPROXY_API_KEY='"
+        self.assertTrue(value.startswith(prefix))
+        return value[len(prefix):-2]
+
+    def test_setup_auth_catalog_finalize_and_first_claude_launch(self):
+        exact_models = [
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "claude-sonnet-5",
+            "claude-opus-4-8",
+            "claude-haiku-4-5-20251001",
+            "grok-4.5",
+        ]
+        expected_agents = {
+            "parable-terra": "gpt-5.6-terra",
+            "parable-luna": "gpt-5.6-luna",
+            "parable-sonnet-exact": "claude-sonnet-5",
+            "parable-opus-exact": "claude-opus-4-8",
+            "parable-haiku-exact": "claude-haiku-4-5-20251001",
+            "parable-grok": "grok-4.5",
+        }
+        with tempfile.TemporaryDirectory() as tmp, model_server(
+            exact_models + ["unrelated-model"]
+        ) as (server, _base_url, _initial_token):
+            root = Path(tmp)
+            home = root / "home"
+            home.mkdir()
+            repo = self.make_repo(root)
+            bindir = fake_bin(tmp)
+            proxy_capture = root / "proxy-calls.jsonl"
+            claude_capture = root / "claude.json"
+            proxy = self.make_proxy(bindir, proxy_capture)
+            env = self.environment(home, bindir, proxy_capture, claude_capture)
+            port = str(server.server_address[1])
+
+            setup = self.run_cli(
+                repo,
+                env,
+                "setup", "--non-interactive", "--vendors", "chatgpt,claude,xai",
+                "--proxy-bin", str(proxy), "--port", port,
+            )
+            self.assertEqual(setup.returncode, 0, setup.stdout + setup.stderr)
+            token = self.setup_token(home)
+            server.expected_token = token
+            proxy_calls = [json.loads(line) for line in proxy_capture.read_text().splitlines()]
+            config_path = home / ".config" / "parable" / "cliproxy.yaml"
+            self.assertEqual(proxy_calls, [
+                ["--config", str(config_path), "--codex-login"],
+                ["--config", str(config_path), "--claude-login", "--no-browser"],
+                ["--config", str(config_path), "--xai-login", "--no-browser"],
+            ])
+
+            finalized = self.run_cli(repo, env, "setup", "finalize", "--json")
+            self.assertEqual(finalized.returncode, 0, finalized.stdout + finalized.stderr)
+            self.assertTrue(server.authorization_ok)
+            self.assertNotIn(token, finalized.stdout + finalized.stderr)
+            report = json.loads(finalized.stdout)
+            self.assertTrue(report["ready"])
+            self.assertEqual(report["parentModel"], "gpt-5.6-sol")
+            self.assertEqual(
+                {item["name"]: item["model"] for item in report["agents"]},
+                expected_agents,
+            )
+            self.assertEqual(report["catalog"]["requiredCount"], 7)
+            self.assertEqual(report["next"], "parable claude -- --effort high")
+
+            agents_dir = repo / ".claude" / "agents"
+            for name, model in expected_agents.items():
+                target = agents_dir / f"{name}.md"
+                self.assertTrue(target.is_file())
+                self.assertIn(f'model: "{model}"', target.read_text())
+                self.assertNotIn(token, target.read_text())
+            self.assertTrue((agents_dir / "handwritten.md").is_file())
+            self.assertTrue((agents_dir / "parable-handwritten.md").is_file())
+
+            before = {
+                path: (path.read_bytes(), path.stat().st_mtime_ns)
+                for path in agents_dir.glob("parable-*.md")
+            }
+            confirmed = self.run_cli(repo, env, "setup", "finalize", "--json")
+            self.assertEqual(confirmed.returncode, 0, confirmed.stdout + confirmed.stderr)
+            confirmed_report = json.loads(confirmed.stdout)
+            self.assertEqual(confirmed_report["sync"], {
+                "changed": 0,
+                "unchanged": 6,
+                "removed": 0,
+            })
+            for path, snapshot in before.items():
+                self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), snapshot)
+
+            launch = self.run_cli(repo, env, "claude", "--print", "hello")
+            self.assertEqual(launch.returncode, 0, launch.stdout + launch.stderr)
+            self.assertNotIn(token, launch.stdout + launch.stderr)
+            captured_text = claude_capture.read_text()
+            self.assertNotIn(token, captured_text)
+            captured = json.loads(captured_text)
+            self.assertEqual(
+                captured["argv"],
+                ["--model", "gpt-5.6-sol", "--print", "hello"],
+            )
+            self.assertTrue(captured["auth_token_present"])
+            self.assertFalse(captured["source_token_present"])
+
+    def test_finalize_subset_and_missing_exact_id_fail_closed_without_aliases(self):
+        with tempfile.TemporaryDirectory() as tmp, model_server([
+            "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"
+        ]) as (server, _base_url, _initial_token):
+            root = Path(tmp)
+            home = root / "subset-home"
+            home.mkdir()
+            repo = self.make_repo(root, "subset-repo")
+            bindir = fake_bin(tmp)
+            proxy_capture = root / "subset-proxy.jsonl"
+            claude_capture = root / "subset-claude.json"
+            proxy = self.make_proxy(bindir, proxy_capture)
+            env = self.environment(home, bindir, proxy_capture, claude_capture)
+            setup = self.run_cli(
+                repo,
+                env,
+                "setup", "--non-interactive", "--vendors", "chatgpt",
+                "--proxy-bin", str(proxy), "--port", str(server.server_address[1]),
+                "--no-auth",
+            )
+            self.assertEqual(setup.returncode, 0, setup.stdout + setup.stderr)
+            server.expected_token = self.setup_token(home)
+            finalized = self.run_cli(repo, env, "setup", "finalize", "--json")
+            self.assertEqual(finalized.returncode, 0, finalized.stdout + finalized.stderr)
+            report = json.loads(finalized.stdout)
+            self.assertEqual(
+                {item["name"]: item["model"] for item in report["agents"]},
+                {
+                    "parable-luna": "gpt-5.6-luna",
+                    "parable-terra": "gpt-5.6-terra",
+                },
+            )
+
+        misleading = [
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "claude-sonnet-5",
+            "claude-opus-4-8",
+            "claude-haiku-4-5-20251001",
+            "grok-4.5-latest",
+            "GROK-4.5",
+        ]
+        with tempfile.TemporaryDirectory() as tmp, model_server(
+            misleading
+        ) as (server, _base_url, _initial_token):
+            root = Path(tmp)
+            home = root / "missing-home"
+            home.mkdir()
+            repo = self.make_repo(root, "missing-repo")
+            bindir = fake_bin(tmp)
+            proxy_capture = root / "missing-proxy.jsonl"
+            claude_capture = root / "missing-claude.json"
+            proxy = self.make_proxy(bindir, proxy_capture)
+            env = self.environment(home, bindir, proxy_capture, claude_capture)
+            setup = self.run_cli(
+                repo,
+                env,
+                "setup", "--non-interactive", "--vendors", "chatgpt,claude,xai",
+                "--proxy-bin", str(proxy), "--port", str(server.server_address[1]),
+                "--no-auth",
+            )
+            self.assertEqual(setup.returncode, 0, setup.stdout + setup.stderr)
+            server.expected_token = self.setup_token(home)
+            finalized = self.run_cli(repo, env, "setup", "finalize", "--json")
+            self.assertNotEqual(finalized.returncode, 0)
+            self.assertIn("proxy model catalog is missing: grok-4.5", finalized.stderr)
+            agents = repo / ".claude" / "agents"
+            self.assertEqual(
+                sorted(path.name for path in agents.iterdir()),
+                ["handwritten.md", "parable-handwritten.md"],
+            )
+            self.assertFalse(claude_capture.exists())
 
 
 if __name__ == "__main__":
