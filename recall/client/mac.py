@@ -8,6 +8,7 @@ import os
 import platform
 import re
 import stat
+import time
 import urllib.parse
 import urllib.error
 import urllib.request
@@ -39,6 +40,7 @@ V2_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._/@+-]{1,255}\Z")
 MAX_INGEST_BYTES = 8_000_000
 MAX_INGEST_EVENTS = 500
 MAX_CANONICAL_ARCHIVE_BYTES = 8_000_000
+MAX_CANONICAL_ARCHIVE_ATTEMPTS = 5
 MAX_EXPORT_BYTES = 256_000_000
 MAX_ARCHIVE_MEMBERS = 10_000
 
@@ -488,31 +490,39 @@ class CanonicalArchiveClient(_CanonicalClient):
             raise ValueError("canonical archive payload is invalid")
         if not isinstance(native_id, str) or not V2_IDENTITY.fullmatch(native_id):
             raise ValueError("canonical archive identity is invalid")
-        try:
-            return self._request(
-                "/v2/archive/objects",
-                body={
-                    "tenant_id": self.tenant_id,
-                    "principal_id": self.principal_id,
-                    "source_id": self.source_id,
-                    "native_id": native_id,
-                    "payload_base64": base64.b64encode(payload).decode(),
-                    "media_type": media_type,
-                    "created_at": created_at,
-                },
-            )
-        except urllib.error.HTTPError as error:
-            error_code = "archive_unavailable"
+        body = {
+            "tenant_id": self.tenant_id,
+            "principal_id": self.principal_id,
+            "source_id": self.source_id,
+            "native_id": native_id,
+            "payload_base64": base64.b64encode(payload).decode(),
+            "media_type": media_type,
+            "created_at": created_at,
+        }
+        for attempt in range(MAX_CANONICAL_ARCHIVE_ATTEMPTS):
+            retryable = False
             try:
-                response = json.loads(error.read(4096))
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                response = {}
-            if (
-                error.code == 409
-                and response.get("error") == "archive_identity_forgotten"
-            ):
-                error_code = "archive_identity_forgotten"
-            raise CanonicalClientError(error_code) from None
+                return self._request("/v2/archive/objects", body=body)
+            except urllib.error.HTTPError as error:
+                if error.code == 409:
+                    try:
+                        response = json.loads(error.read(4096))
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        response = {}
+                    if response.get("error") == "archive_identity_forgotten":
+                        raise CanonicalClientError(
+                            "archive_identity_forgotten"
+                        ) from None
+                retryable = (
+                    error.code in {408, 425, 429}
+                    or 500 <= error.code <= 599
+                )
+            except (OSError, urllib.error.URLError):
+                retryable = True
+            if not retryable or attempt + 1 == MAX_CANONICAL_ARCHIVE_ATTEMPTS:
+                raise CanonicalClientError("archive_unavailable") from None
+            time.sleep(min(2**attempt, 8))
+        raise AssertionError("unreachable")
 
 
 class CanonicalBrainWriter(_CanonicalClient):
