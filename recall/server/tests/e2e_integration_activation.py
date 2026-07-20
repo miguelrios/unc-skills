@@ -10,6 +10,8 @@ import subprocess
 import sys
 import tempfile
 
+from connectors.registry import REGISTRY
+
 
 ROOT = Path(__file__).resolve().parents[2]
 PROFILES = {
@@ -61,7 +63,13 @@ def run(*arguments: str) -> dict:
 
 def main() -> None:
     catalog = run("integration-activation-catalog")
-    assert len(catalog["connectors"]) == 28
+    assert len(catalog["connectors"]) == len(REGISTRY)
+    assert {
+        "local.claude-code",
+        "local.codex",
+        "local.cowork",
+        "local.chatgpt-export",
+    }.issubset({item["connector_id"] for item in catalog["connectors"]})
     assert catalog["credential_reads"] == 0
     transitions = (
         ("enable", "enabled"),
