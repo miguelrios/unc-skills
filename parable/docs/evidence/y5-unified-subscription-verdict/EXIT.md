@@ -78,8 +78,8 @@ consumption markers. Kimi remains paused and absent.
 - Complete Parable suite: PASS, 81/81.
 - Package dry-run: PASS, 32 files.
 - Local Claudio-Michel review: 5/5.
-- Focused PR: pending.
-- Verified merged `main`: pending.
+- Focused PR: [#186](https://github.com/miguelrios/unc-skills/pull/186).
+- Verified merged `main`: `8c2eca3404ae6754faac2a53173ff56a50838304`.
 
 ## final human verdict
 
