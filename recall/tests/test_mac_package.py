@@ -455,6 +455,12 @@ class MacPackageTest(unittest.TestCase):
             "--selected-text-root", str(selected), "--no-load",
         ]
         subprocess.run(install, check=True, text=True, capture_output=True)
+        wrapper = prefix / "bin" / "recall-brain"
+        subprocess.run([
+            str(wrapper), "mac-route-apply", "--source", "selected-text",
+            "--tenant-id", "tenant:personal", "--principal-id", "owner",
+            "--launch-agents", str(agents),
+        ], check=True, text=True, capture_output=True)
         marker = prefix / "lib" / "previous-release-marker"
         marker.write_text("previous")
         plist_before = (
@@ -490,6 +496,20 @@ class MacPackageTest(unittest.TestCase):
 
         subprocess.run(install, check=True, text=True, capture_output=True)
         self.assertFalse(marker.exists())
+        with (agents / "ai.parcha.recall.selected-text.plist").open("rb") as source:
+            upgraded_plist = plistlib.load(source)
+        self.assertEqual(
+            upgraded_plist["EnvironmentVariables"]["RECALL_TENANT_ID"],
+            "tenant:personal",
+        )
+        self.assertEqual(
+            upgraded_plist["EnvironmentVariables"]["RECALL_PRINCIPAL_ID"],
+            "owner",
+        )
+        self.assertEqual(
+            upgraded_plist["EnvironmentVariables"]["RECALL_CANONICAL_V2_ENABLED"],
+            "1",
+        )
         rolled_back = subprocess.run([
             "sh", str(package / "install.sh"), "--rollback",
             "--prefix", str(prefix), "--launch-agents", str(agents), "--no-load",
