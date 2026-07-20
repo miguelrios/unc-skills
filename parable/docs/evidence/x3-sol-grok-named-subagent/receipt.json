@@ -1,0 +1,190 @@
+{
+  "schema_version": 1,
+  "loop": "X3",
+  "captured_at_utc": "2026-07-20T06:35:10Z",
+  "parable_baseline_head": "c8ace2a50262984d3b4b7d1e8968da8e2363b46d",
+  "runtime": {
+    "claude_code_version": "2.1.215",
+    "cliproxyapi_upstream_release": "v7.2.88",
+    "cliproxyapi_upstream_commit": "93d74a890a44802f656d7f39a573916b2611896e",
+    "cliproxyapi_local_fix_commit": "ad20a87efbbd41a9d4f24c83ca8bdd934bf34ab7",
+    "cliproxyapi_binary_sha256": "139e1305a878e08026dd0fb6d85a3817801f32e40a40c1954ea1973c5bb9d697",
+    "loopback_only": true,
+    "fresh_named_parent_sessions": 6,
+    "session_persistence": false,
+    "generated_agent": "parable-grok",
+    "generated_agent_model": "grok-4.5"
+  },
+  "successful_cells": [
+    {
+      "requested_parent_effort": "low",
+      "parent_inbound_effort": "low",
+      "parent_upstream_effort": "low",
+      "child_inbound_effort": "low",
+      "child_upstream_effort": "low",
+      "child_effort_classification": "inherited_exact",
+      "parent_model_requests": 3,
+      "child_model_requests": 2,
+      "parent_observed_tools": [
+        "Agent",
+        "Bash"
+      ],
+      "child_observed_tools": [
+        "Bash"
+      ],
+      "deterministic_child_artifact": true,
+      "artifact_sha256": "24f0baadcf02b507e4652578e74754cf6661eefef9a35f10b7715ef0e86e48ef",
+      "deterministic_parent_consumption": true,
+      "final_marker_sha256": "2f8def9dad12d47ffa6e8e5c090c8866428ac4d3f2d6bd5d479b1264c9498146",
+      "all_http_statuses": 200,
+      "chatgpt_oauth_route": true,
+      "xai_oauth_route": true
+    },
+    {
+      "requested_parent_effort": "medium",
+      "parent_inbound_effort": "medium",
+      "parent_upstream_effort": "medium",
+      "child_inbound_effort": "medium",
+      "child_upstream_effort": "medium",
+      "child_effort_classification": "inherited_exact",
+      "parent_model_requests": 3,
+      "child_model_requests": 2,
+      "parent_observed_tools": [
+        "Agent",
+        "Bash"
+      ],
+      "child_observed_tools": [
+        "Bash"
+      ],
+      "deterministic_child_artifact": true,
+      "artifact_sha256": "e3422ffabcfa2f25a9206b6b166ddafa3dbbda219412a1c6ec44c6cbb1c0e230",
+      "deterministic_parent_consumption": true,
+      "final_marker_sha256": "c7782a2b5e23b7cae4c8f55668e1df6cb145538cdfafcd193f9672b5e2b0f814",
+      "all_http_statuses": 200,
+      "chatgpt_oauth_route": true,
+      "xai_oauth_route": true
+    },
+    {
+      "requested_parent_effort": "high",
+      "parent_inbound_effort": "high",
+      "parent_upstream_effort": "high",
+      "child_inbound_effort": "high",
+      "child_upstream_effort": "high",
+      "child_effort_classification": "inherited_exact",
+      "parent_model_requests": 3,
+      "child_model_requests": 2,
+      "parent_observed_tools": [
+        "Agent",
+        "Bash"
+      ],
+      "child_observed_tools": [
+        "Bash"
+      ],
+      "deterministic_child_artifact": true,
+      "artifact_sha256": "7871baea8dec1706a2207748fa8c81ec16c45c3cb43292f3e6ae6c8d0b1644be",
+      "deterministic_parent_consumption": true,
+      "final_marker_sha256": "8ad2ebd2729c118b30be2022d918c4d77efd0eec9e82c164775aca862555cf35",
+      "all_http_statuses": 200,
+      "chatgpt_oauth_route": true,
+      "xai_oauth_route": true
+    },
+    {
+      "requested_parent_effort": "xhigh",
+      "parent_inbound_effort": "xhigh",
+      "parent_upstream_effort": "xhigh",
+      "child_inbound_effort": "xhigh",
+      "child_upstream_effort": "high",
+      "child_effort_classification": "inherited_then_clamped_to_high",
+      "parent_model_requests": 3,
+      "child_model_requests": 2,
+      "parent_observed_tools": [
+        "Agent",
+        "Bash"
+      ],
+      "child_observed_tools": [
+        "Bash"
+      ],
+      "deterministic_child_artifact": true,
+      "artifact_sha256": "5aa3d9bc8216c0d0fbf5637b95ddb8b24939af2716a47adb627696c491cb88fd",
+      "deterministic_parent_consumption": true,
+      "final_marker_sha256": "f33c1c76a4c970a6a4cf7e941120a2c1e905486a086526bfa7eda34b2029d566",
+      "all_http_statuses": 200,
+      "chatgpt_oauth_route": true,
+      "xai_oauth_route": true
+    },
+    {
+      "requested_parent_effort": "max",
+      "parent_inbound_effort": "max",
+      "parent_upstream_effort": "max",
+      "child_inbound_effort": "max",
+      "child_upstream_effort": "high",
+      "child_effort_classification": "inherited_then_clamped_to_high",
+      "parent_model_requests": 3,
+      "child_model_requests": 2,
+      "parent_observed_tools": [
+        "Agent",
+        "Bash"
+      ],
+      "child_observed_tools": [
+        "Bash"
+      ],
+      "deterministic_child_artifact": true,
+      "artifact_sha256": "7f54a4efd3c4775a4ceff07b50d8d68dfbd10b43e32310b3c5f5e506f30783c3",
+      "deterministic_parent_consumption": true,
+      "final_marker_sha256": "573692a45918723317ac433057222bd300a9f668200098210a5de832d6b35321",
+      "all_http_statuses": 200,
+      "chatgpt_oauth_route": true,
+      "xai_oauth_route": true
+    }
+  ],
+  "disclosed_evidence_failure": {
+    "cell": "medium",
+    "attempt": "1/2",
+    "routing_completed": true,
+    "parent_model_requests": 3,
+    "child_model_requests": 4,
+    "all_http_statuses": 200,
+    "parent_agent_tool_observed": true,
+    "child_bash_tool_observed": true,
+    "deterministic_child_artifact": false,
+    "deterministic_parent_consumption": false,
+    "classification": "child_artifact_path_mismatch",
+    "correctly_wired_retry": "passed"
+  },
+  "summary": {
+    "parent_effort_cells_passed": "5/5",
+    "exact_parent_model_cells": "5/5",
+    "exact_named_child_model_cells": "5/5",
+    "child_effort_inheritance_observed": "5/5",
+    "supported_child_efforts_exact": "3/3",
+    "unsupported_child_efforts_clamped_to_high": "2/2",
+    "deterministic_child_tool_artifacts": "5/5",
+    "deterministic_parent_consumption": "5/5",
+    "correctly_wired_attempts": "6/10",
+    "evidence_failures": 1,
+    "instrument_failures": 1
+  },
+  "routing": {
+    "parent_model": "gpt-5.6-sol",
+    "parent_provider": "openai",
+    "parent_auth_kind": "oauth",
+    "child_model": "grok-4.5",
+    "child_provider": "xai",
+    "child_auth_kind": "oauth",
+    "xai_api_key_set": false,
+    "openai_api_key_set": false,
+    "anthropic_api_key_set": false
+  },
+  "safety": {
+    "local_proxy_key_committed": false,
+    "credential_material_committed": false,
+    "oauth_state_committed": false,
+    "account_identifier_committed": false,
+    "raw_prompt_committed": false,
+    "raw_response_committed": false,
+    "raw_proxy_log_committed": false,
+    "generated_agent_committed": false,
+    "private_artifact_committed": false,
+    "private_path_committed": false
+  }
+}
