@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "loop": "X4",
+  "captured_at_utc": "2026-07-20T06:43:00Z",
+  "parable_baseline_head": "703949accbaf649b3286719a43dbffdb024e195d",
+  "delivery": {
+    "five_minute_guide": "docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md",
+    "provider_reference": "skills/parable/references/providers.md",
+    "subscription_example": "examples/parable.claude-subscriptions.toml",
+    "xai_device_login_documented": true,
+    "combined_catalog_check_documented": true,
+    "exact_grok_agent_documented": true,
+    "sol_parent_effort_table_documented": true,
+    "grok_effort_clamp_documented": true,
+    "cursor_route_distinguished": true,
+    "kimi_state": "PAUSED"
+  },
+  "proved_claims": {
+    "gpt_text_effort_cells": "15/15",
+    "gpt_tool_canaries": "3/3",
+    "grok_main_text_cells": "5/5",
+    "grok_main_tool_canaries": "3/3",
+    "sol_to_named_grok_cells": "5/5",
+    "grok_supported_efforts_exact": [
+      "low",
+      "medium",
+      "high"
+    ],
+    "grok_clamped_efforts": {
+      "xhigh": "high",
+      "max": "high"
+    }
+  },
+  "verification": {
+    "example_config_valid": true,
+    "example_generated_executors": [
+      "parable-grok",
+      "parable-luna",
+      "parable-terra"
+    ],
+    "complete_parable_tests": "81/81",
+    "package_dry_run": "PASS",
+    "diff_check": "PASS",
+    "content_boundary_scan": "PASS"
+  },
+  "safety": {
+    "local_proxy_key_committed": false,
+    "credential_material_committed": false,
+    "oauth_state_committed": false,
+    "account_identifier_committed": false,
+    "raw_prompt_committed": false,
+    "raw_response_committed": false,
+    "raw_proxy_log_committed": false,
+    "private_path_committed": false
+  }
+}

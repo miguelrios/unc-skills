@@ -1,11 +1,12 @@
-# Subscription-backed models in one stock Claude Code session through a local
-# Claude-compatible proxy. This file contains no OAuth/provider credentials:
-# only the NAME of the environment variable holding the proxy's localhost
-# client token. Configure and authenticate the local proxy separately.
+# ChatGPT- and xAI-subscription-backed models in one stock Claude Code session
+# through a local Claude-compatible proxy. This file contains no
+# OAuth/provider credentials: only the NAME of the environment variable
+# holding the proxy's localhost client token. Configure and authenticate the
+# local proxy separately.
 
 [parable]
 version = 1
-default_executor = "kimi"
+default_executor = "terra"
 default_reviewer = "opus"
 
 [claude]
@@ -16,18 +17,30 @@ brain_model = "gpt-5.6-sol"
 [providers.claude]
 type = "subagent"
 
-[executors.kimi]
+[executors.grok]
 provider = "claude"
-model = "kimi-k3"
-tags = ["implementer", "third-party", "subscription"]
-use_for = "Independent implementation through the Kimi Code subscription."
+model = "grok-4.5"
+tags = ["implementer", "third-family", "subscription"]
+use_for = "Independent implementation or adversarial review through the xAI subscription."
 avoid_for = "Reviewing its own diff."
 
+[executors.terra]
+provider = "claude"
+model = "gpt-5.6-terra"
+tags = ["implementer", "subscription"]
+use_for = "Independent GPT implementation or debugging."
+
+[executors.luna]
+provider = "claude"
+model = "gpt-5.6-luna"
+tags = ["reviewer", "subscription"]
+use_for = "Independent GPT review or a second implementation."
+
 [routing]
-mechanical    = ["kimi", "sonnet"]
-feature       = ["kimi", "sonnet"]
-refactor_wide = ["kimi", "sonnet"]
+mechanical    = ["luna", "sonnet"]
+feature       = ["terra", "sonnet", "grok"]
+refactor_wide = ["terra", "sonnet", "grok"]
 gnarly        = ["opus"]
-review        = ["opus", "sonnet"]
+review        = ["opus", "luna", "grok"]
 smoke_test    = ["opus"]
-escalation    = ["kimi", "sonnet", "opus"]
+escalation    = ["terra", "sonnet", "grok", "opus"]

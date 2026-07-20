@@ -1,13 +1,15 @@
-# GPT subscription models in stock Claude Code
+# GPT and Grok subscription models in stock Claude Code
 
 This is the reproducible OSS path for running stock Claude Code with
-`gpt-5.6-sol`, `gpt-5.6-terra`, or `gpt-5.6-luna` through a local
-CLIProxyAPI process and the user's own ChatGPT subscription OAuth.
+`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, and `grok-4.5` through a
+local CLIProxyAPI process and the user's own subscription OAuth.
 
 No broker or shared deployment is involved:
 
 ```text
-Claude Code → loopback CLIProxyAPI → ChatGPT subscription OAuth
+                                      ┌→ ChatGPT subscription OAuth
+Claude Code → loopback CLIProxyAPI ───┤
+                                      └→ xAI subscription OAuth
 ```
 
 ## Support state
@@ -20,8 +22,18 @@ all 15 combinations of:
 - model: `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`
 - effort: `low`, `medium`, `high`, `xhigh`, `max`
 
-The result was 15/15 exact effort pass-through and 3/3 tool canaries. The
-patch is **not** an upstream CLIProxyAPI release. It is pinned to:
+The result was 15/15 exact GPT effort pass-through and 3/3 tool canaries.
+The same build also completed all five Claude Code effort flags with Grok 4.5
+and 3/3 real Grok tool canaries through xAI OAuth:
+
+- Grok `low`, `medium`, and `high` are exact end to end.
+- Claude's `xhigh` and `max` reach CLIProxyAPI intact, then clamp to Grok's
+  supported `high`.
+- A Sol parent invoked exact named agent `parable-grok` at all five parent
+  efforts. Claude Code inherited each parent effort into the child; Grok
+  applied the same `xhigh|max → high` clamp.
+
+The patch is **not** an upstream CLIProxyAPI release. It is pinned to:
 
 | Item | Pin |
 |---|---|
@@ -34,8 +46,8 @@ patch is **not** an upstream CLIProxyAPI release. It is pinned to:
 ## Five-minute path
 
 Prerequisites: Git, Go `1.26.5`, Claude Code `2.1.215`, `openssl`, `curl`,
-`jq`, and a ChatGPT account with access to the target models. Install Go from
-the [official downloads](https://go.dev/dl/?mode=html).
+`jq`, and the subscription accounts whose models you intend to use. Install
+Go from the [official downloads](https://go.dev/dl/?mode=html).
 
 ### 1. Pin, patch, test, and build CLIProxyAPI
 
@@ -87,9 +99,9 @@ debug: false
 EOF
 ```
 
-### 3. Connect the user's ChatGPT subscription
+### 3. Connect the user's subscriptions
 
-Run the browser OAuth flow:
+Connect ChatGPT:
 
 ```bash
 ./cli-proxy-api \
@@ -104,6 +116,20 @@ printed device code once; stale or previously submitted codes produce
 This route uses ChatGPT subscription OAuth. Do not set `OPENAI_API_KEY` for
 this setup.
 
+To add Grok 4.5, connect the user's xAI subscription separately:
+
+```bash
+./cli-proxy-api \
+  --config "$HOME/.config/parable/cliproxy.yaml" \
+  --xai-login \
+  --no-browser
+```
+
+Complete the printed xAI device flow. CLIProxyAPI stores and refreshes each
+provider's OAuth record in its user-only auth directory. Do not set
+`XAI_API_KEY`; this recipe proves the subscription route, not metered API
+billing.
+
 ### 4. Start and verify the local proxy
 
 Start the server in one terminal:
@@ -115,7 +141,8 @@ source "$HOME/.config/parable/cliproxy.env"
   --local-model
 ```
 
-Verify the authenticated catalog from another terminal:
+Verify the combined authenticated catalog from another terminal. Remove
+`grok-4.5` from the assertion if you intentionally configured only ChatGPT:
 
 ```bash
 source "$HOME/.config/parable/cliproxy.env"
@@ -125,7 +152,12 @@ curl -fsS \
   jq -e '
     [.data[].id] as $ids |
     all(
-      ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"][];
+      [
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "grok-4.5"
+      ][];
       . as $model | $ids | index($model)
     )
   '
@@ -146,15 +178,37 @@ version = 1
 base_url = "http://127.0.0.1:8317"
 auth_token_env = "CLIPROXY_API_KEY"
 brain_model = "gpt-5.6-sol"
+
+[providers.claude]
+type = "subagent"
+
+[executors.grok]
+provider = "claude"
+model = "grok-4.5"
+use_for = "A third-family implementation or adversarial review."
+avoid_for = "Reviewing its own diff."
 EOF
 
 source "$HOME/.config/parable/cliproxy.env"
 npx @parcha/parable doctor
+npx @parcha/parable agents sync
 npx @parcha/parable claude -- --effort high
 ```
 
 That launches the installed stock `claude` binary with Sol as the session
-model. Change the final effort to any of the five verified values.
+model and materializes exact project agent `parable-grok`. Change the final
+effort to any of the five verified values. In the session, explicitly ask Sol
+to use the `parable-grok` agent when that is the intended lane.
+
+The effort rule is observable, not advisory:
+
+| Sol parent effort | Grok child inbound | Grok upstream |
+|---|---|---|
+| `low` | `low` | `low` |
+| `medium` | `medium` | `medium` |
+| `high` | `high` | `high` |
+| `xhigh` | `xhigh` | `high` |
+| `max` | `max` | `high` |
 
 ## Optional GPT named subagents
 
@@ -194,8 +248,11 @@ Kimi remains paused and is intentionally absent from this setup.
 - [Released-binary diagnosis](https://github.com/miguelrios/unc-skills/blob/main/parable/docs/evidence/g1-gpt-model-effort-live/EXIT.md)
 - [Patched source proof](https://github.com/miguelrios/unc-skills/blob/main/parable/docs/evidence/e1-cliproxy-effort-fix/EXIT.md)
 - [Patched live matrix](https://github.com/miguelrios/unc-skills/blob/main/parable/docs/evidence/e2-cliproxy-effort-live/EXIT.md)
+- [xAI OAuth and catalog proof](https://github.com/miguelrios/unc-skills/blob/main/parable/docs/evidence/x1-grok45-catalog/EXIT.md)
+- [Grok main-model matrix](https://github.com/miguelrios/unc-skills/blob/main/parable/docs/evidence/x2-grok45-main-permutations/EXIT.md)
+- [Sol to named Grok matrix](https://github.com/miguelrios/unc-skills/blob/main/parable/docs/evidence/x3-sol-grok-named-subagent/EXIT.md)
 
 This is a per-user localhost setup. CLIProxyAPI owns OAuth storage and token
 refresh; Parable stores neither provider credentials nor OAuth state. ChatGPT
-plan limits, model entitlements, and provider terms still apply. Do not expose
-the proxy port outside loopback.
+and xAI plan limits, model entitlements, and provider terms still apply. Do
+not expose the proxy port outside loopback.
