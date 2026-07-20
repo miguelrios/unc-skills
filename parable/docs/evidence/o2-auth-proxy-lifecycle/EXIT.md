@@ -72,8 +72,9 @@ added.
 - Complete Parable suite: PASS, 96/96.
 - npm pack dry-run: PASS, 33 files.
 - Local Claudio-Michel review: 5/5.
-- Focused PR: pending.
-- Verified merged `main`: pending.
+- Focused PR: [#195](https://github.com/miguelrios/unc-skills/pull/195),
+  merged 2026-07-20T22:52:25Z.
+- Verified merged `main`: `6ccb78ab673109a594918fff3e9f4cda7a450267`.
 
 ## exit → O3
 
