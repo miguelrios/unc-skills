@@ -6,13 +6,14 @@
     "parable": "bin/parable.js"
   },
   "scripts": {
-    "test": "python3 -m unittest discover -s tests -v && python3 -m py_compile skills/parable/scripts/parable.py skills/parable/scripts/parable_usage.py && python3 -m json.tool .claude-plugin/plugin.json >/dev/null && python3 -m json.tool .claude-plugin/marketplace.json >/dev/null && python3 -m json.tool .codex-plugin/plugin.json >/dev/null && node --check bin/parable.js",
+    "test": "python3 -m unittest discover -s tests -v && python3 -m py_compile skills/parable/scripts/parable.py skills/parable/scripts/parable_usage.py && python3 -m json.tool .claude-plugin/plugin.json >/dev/null && python3 -m json.tool .claude-plugin/marketplace.json >/dev/null && python3 -m json.tool .codex-plugin/plugin.json >/dev/null && node --check bin/parable.js && node --check lib/onboarding.js",
     "pack:check": "npm pack --dry-run"
   },
   "files": [
     ".claude-plugin/*.json",
     ".codex-plugin/*.json",
     "bin/parable.js",
+    "lib/*.js",
     "skills/parable/SKILL.md",
     "skills/parable/scripts/*",
     "!skills/parable/scripts/__pycache__/**",

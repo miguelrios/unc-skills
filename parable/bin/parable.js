@@ -6,6 +6,11 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { execSync, spawnSync } = require("child_process");
+const {
+  OnboardingError,
+  runProxyBuild,
+  runSetup,
+} = require("../lib/onboarding");
 
 const PKG_ROOT = path.resolve(__dirname, "..");
 const SKILL_SRC = path.join(PKG_ROOT, "skills", "parable");
@@ -53,7 +58,10 @@ function cmdInstall(args) {
     log("installed skill -> " + dest);
 
     const configPath = path.join(configDir, "parable.toml");
-    if (!fs.existsSync(configPath)) {
+    const globalInstall = !args.target && !args.project;
+    if (!fs.existsSync(configPath) && globalInstall) {
+      log("configuration not seeded — run `npx @parcha/parable setup` for a private subscription setup");
+    } else if (!fs.existsSync(configPath)) {
       fs.mkdirSync(configDir, { recursive: true });
       fs.copyFileSync(path.join(SKILL_SRC, "references", "parable.example.toml"), configPath);
       log("created config  -> " + configPath + "  (edit to add providers/executors)");
@@ -63,7 +71,7 @@ function cmdInstall(args) {
   } catch (e) {
     fail("install failed at " + dest + ": " + e.message);
   }
-  log("done. Run `npx @parcha/parable doctor` from a repo to check the setup.");
+  log("done. Run `npx @parcha/parable setup`, then `npx @parcha/parable doctor`.");
 }
 
 function cmdDoctor() {
@@ -116,19 +124,38 @@ function runPython(args) {
   process.exit(result.status === null ? 1 : result.status);
 }
 
-const raw = process.argv.slice(2);
-if (raw[0] === "claude") runPython(["claude", "--", ...raw.slice(1)]);
-if (raw[0] === "agents" && raw[1] === "sync") runPython(["agents", "sync", ...raw.slice(2)]);
+async function main() {
+  const raw = process.argv.slice(2);
+  if (raw[0] === "claude") runPython(["claude", "--", ...raw.slice(1)]);
+  if (raw[0] === "agents" && raw[1] === "sync") {
+    runPython(["agents", "sync", ...raw.slice(2)]);
+  }
+  if (raw[0] === "setup") {
+    await runSetup(raw.slice(1), log);
+    return;
+  }
+  if (raw[0] === "proxy" && raw[1] === "build") {
+    await runProxyBuild(raw.slice(2), log);
+    return;
+  }
 
-const args = parseArgs(process.argv.slice(2));
-const cmd = args._[0];
-if (cmd === "install") cmdInstall(args);
-else if (cmd === "doctor") cmdDoctor();
-else {
-  log("usage: npx @parcha/parable <install|doctor|claude|agents sync> [options]");
-  log("  install            copy the skill to ~/.claude/skills (or ./.claude/skills with --project)");
-  log("  doctor             check python/codex/config health");
-  log("  claude [ARGS...]    launch Claude Code through the configured local proxy");
-  log("  agents sync        synchronize project-local parable-* custom agents");
-  process.exit(cmd ? 1 : 0);
+  const args = parseArgs(raw);
+  const cmd = args._[0];
+  if (cmd === "install") cmdInstall(args);
+  else if (cmd === "doctor") cmdDoctor();
+  else {
+    log("usage: npx @parcha/parable <install|setup|doctor|proxy build|claude|agents sync> [options]");
+    log("  install            copy the skill to ~/.claude/skills (or ./.claude/skills with --project)");
+    log("  setup              create a private loopback subscription configuration");
+    log("  doctor             check python/codex/config health");
+    log("  proxy build        build the pinned, patched CLIProxyAPI source");
+    log("  claude [ARGS...]    launch Claude Code through the configured local proxy");
+    log("  agents sync        synchronize project-local parable-* custom agents");
+    process.exit(cmd ? 1 : 0);
+  }
 }
+
+main().catch((error) => {
+  if (error instanceof OnboardingError) fail(error.message);
+  fail(error && error.message ? error.message : String(error));
+});

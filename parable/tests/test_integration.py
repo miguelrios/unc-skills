@@ -4,6 +4,7 @@ node installer. No network, no real codex/pi."""
 import json
 import os
 import secrets
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -14,6 +15,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "skills" / "parable" / "scripts" / "parable.py"
+NODE = shutil.which("node") or "node"
+PROXY_COMMIT = "93d74a890a44802f656d7f39a573916b2611896e"
 
 FAKE_CODEX = """#!/usr/bin/env bash
 cat > /dev/null   # drain the plan from stdin like the real binary
@@ -360,6 +363,525 @@ class TestInstallerSmoke(unittest.TestCase):
                                 capture_output=True, text=True, timeout=60)
             self.assertNotEqual(p2.returncode, 0)
             self.assertIn("error", (p2.stderr + p2.stdout).lower())
+
+    def test_global_install_does_not_create_partial_onboarding_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            env = os.environ | {"HOME": str(home)}
+            proc = subprocess.run(
+                [NODE, str(REPO / "bin" / "parable.js"), "install"],
+                cwd=home,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertTrue((home / ".claude" / "skills" / "parable" / "SKILL.md").is_file())
+            self.assertFalse((home / ".config" / "parable").exists())
+            self.assertIn("parable setup", proc.stdout)
+
+
+class TestFirstRunSetup(unittest.TestCase):
+    def make_proxy(self, root: Path, name: str = "proxy") -> Path:
+        target = root / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("#!/usr/bin/env sh\nexit 0\n")
+        target.chmod(0o755)
+        return target
+
+    def run_cli(
+        self,
+        home: Path,
+        *args: str,
+        env_extra: dict[str, str] | None = None,
+        input_text: str | None = None,
+        cli: Path | None = None,
+    ) -> subprocess.CompletedProcess:
+        env = os.environ | {"HOME": str(home)}
+        env.pop("PARABLE_CLIPROXY_BIN", None)
+        env.pop("XDG_DATA_HOME", None)
+        if env_extra:
+            env.update(env_extra)
+        return subprocess.run(
+            [NODE, str(cli or (REPO / "bin" / "parable.js")), *args],
+            cwd=home,
+            env=env,
+            input=input_text,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+    def assert_private(self, target: Path, mode: int) -> None:
+        self.assertEqual(target.stat().st_mode & 0o777, mode, target)
+        self.assertFalse(target.is_symlink(), target)
+
+    def test_chatgpt_setup_is_private_token_safe_valid_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            proxy = self.make_proxy(home / "tools", "custom-proxy")
+            proc = self.run_cli(
+                home,
+                "setup",
+                "--non-interactive",
+                "--vendors", "chatgpt",
+                "--proxy-bin", str(proxy),
+                "--no-auth",
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            config_dir = home / ".config" / "parable"
+            auth_dir = home / ".cli-proxy-api"
+            self.assert_private(config_dir, 0o700)
+            self.assert_private(auth_dir, 0o700)
+            names = ("cliproxy.yaml", "cliproxy.env", "parable.toml", "setup.json")
+            files = [config_dir / name for name in names]
+            for target in files:
+                self.assert_private(target, 0o600)
+
+            env_text = (config_dir / "cliproxy.env").read_text()
+            prefix = "export CLIPROXY_API_KEY='"
+            self.assertTrue(env_text.startswith(prefix))
+            token = env_text[len(prefix):-2]
+            self.assertEqual(len(token), 64)
+            self.assertTrue(all(character in "0123456789abcdef" for character in token))
+            self.assertNotIn(token, proc.stdout + proc.stderr)
+
+            yaml = (config_dir / "cliproxy.yaml").read_text()
+            self.assertIn('host: "127.0.0.1"', yaml)
+            self.assertIn("port: 8317", yaml)
+            self.assertIn(f'auth-dir: "{auth_dir}"', yaml)
+            self.assertIn(token, yaml)
+            config = (config_dir / "parable.toml").read_text()
+            self.assertIn('brain_model = "gpt-5.6-sol"', config)
+            self.assertIn('model = "gpt-5.6-terra"', config)
+            self.assertIn('model = "gpt-5.6-luna"', config)
+            for absent in (
+                "grok-4.5",
+                "claude-sonnet-5",
+                "claude-opus-4-8",
+                "claude-haiku-4-5-20251001",
+                "kimi",
+            ):
+                self.assertNotIn(absent, config)
+            self.assertNotIn(token, config)
+            manifest_text = (config_dir / "setup.json").read_text()
+            manifest = json.loads(manifest_text)
+            self.assertEqual(manifest["vendors"], ["chatgpt"])
+            self.assertEqual(manifest["proxyBinary"], str(proxy.resolve()))
+            self.assertNotIn(token, manifest_text)
+
+            before = {
+                target: (target.read_bytes(), target.stat().st_mtime_ns)
+                for target in files
+            }
+            again = self.run_cli(
+                home,
+                "setup",
+                "--non-interactive",
+                "--vendors", "chatgpt",
+                "--no-auth",
+            )
+            self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+            self.assertIn("valid and unchanged", again.stdout)
+            self.assertNotIn(token, again.stdout + again.stderr)
+            for target in files:
+                self.assertEqual(
+                    (target.read_bytes(), target.stat().st_mtime_ns),
+                    before[target],
+                )
+
+    def test_interactive_and_all_vendor_configs_use_exact_models(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proxy = self.make_proxy(root / "tools")
+            interactive_home = root / "interactive"
+            interactive_home.mkdir()
+            interactive = self.run_cli(
+                interactive_home,
+                "setup", "--proxy-bin", str(proxy), "--no-auth",
+                input_text="y\nn\n",
+            )
+            self.assertEqual(interactive.returncode, 0, interactive.stdout + interactive.stderr)
+            interactive_manifest = json.loads(
+                (interactive_home / ".config" / "parable" / "setup.json").read_text()
+            )
+            self.assertEqual(interactive_manifest["vendors"], ["chatgpt", "claude"])
+
+            all_home = root / "all"
+            all_home.mkdir()
+            all_vendors = self.run_cli(
+                all_home,
+                "setup", "--non-interactive",
+                "--vendors", "xai,chatgpt,claude",
+                "--proxy-bin", str(proxy), "--port", "9123", "--no-auth",
+            )
+            self.assertEqual(all_vendors.returncode, 0, all_vendors.stdout + all_vendors.stderr)
+            config_dir = all_home / ".config" / "parable"
+            manifest = json.loads((config_dir / "setup.json").read_text())
+            self.assertEqual(manifest["vendors"], ["chatgpt", "claude", "xai"])
+            self.assertEqual(manifest["port"], 9123)
+            config = (config_dir / "parable.toml").read_text()
+            for model in (
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+                "claude-sonnet-5",
+                "claude-opus-4-8",
+                "claude-haiku-4-5-20251001",
+                "grok-4.5",
+            ):
+                self.assertIn(model, config)
+            self.assertNotIn("kimi", config.lower())
+
+    def test_setup_rejects_selection_binary_and_unsafe_state_without_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            empty_path = root / "empty-path"
+            empty_path.mkdir()
+            missing_home = root / "missing"
+            missing_home.mkdir()
+            missing = self.run_cli(
+                missing_home,
+                "setup", "--non-interactive", "--vendors", "chatgpt", "--no-auth",
+                env_extra={"PATH": str(empty_path)},
+            )
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn("CLIProxyAPI was not found", missing.stderr)
+            self.assertFalse((missing_home / ".config" / "parable").exists())
+            self.assertFalse((missing_home / ".cli-proxy-api").exists())
+
+            proxy = self.make_proxy(root / "tools")
+            for vendors, message in (("claude", "must include chatgpt"),
+                                     ("chatgpt,kimi", "unsupported vendor")):
+                home = root / vendors.replace(",", "-")
+                home.mkdir()
+                rejected = self.run_cli(
+                    home,
+                    "setup", "--non-interactive", "--vendors", vendors,
+                    "--proxy-bin", str(proxy), "--no-auth",
+                )
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertIn(message, rejected.stderr)
+                self.assertFalse((home / ".config" / "parable").exists())
+
+            no_vendors_home = root / "no-vendors"
+            no_vendors_home.mkdir()
+            no_vendors = self.run_cli(
+                no_vendors_home,
+                "setup", "--non-interactive", "--proxy-bin", str(proxy), "--no-auth",
+            )
+            self.assertNotEqual(no_vendors.returncode, 0)
+            self.assertIn("requires --vendors", no_vendors.stderr)
+            self.assertFalse((no_vendors_home / ".config" / "parable").exists())
+
+            partial_home = root / "partial"
+            config_dir = partial_home / ".config" / "parable"
+            config_dir.mkdir(parents=True, mode=0o700)
+            config_dir.chmod(0o700)
+            outside = partial_home / "outside"
+            outside.write_text("do not touch")
+            (config_dir / "cliproxy.yaml").symlink_to(outside)
+            partial = self.run_cli(
+                partial_home,
+                "setup", "--non-interactive", "--vendors", "chatgpt",
+                "--proxy-bin", str(proxy), "--no-auth",
+            )
+            self.assertNotEqual(partial.returncode, 0)
+            self.assertIn("partial setup state", partial.stderr)
+            self.assertEqual(outside.read_text(), "do not touch")
+
+    def test_setup_refuses_mode_content_and_selection_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            proxy = self.make_proxy(home / "tools")
+            created = self.run_cli(
+                home,
+                "setup", "--non-interactive", "--vendors", "chatgpt",
+                "--proxy-bin", str(proxy), "--no-auth",
+            )
+            self.assertEqual(created.returncode, 0, created.stdout + created.stderr)
+            config_dir = home / ".config" / "parable"
+            env_file = config_dir / "cliproxy.env"
+            original = env_file.read_bytes()
+            env_file.chmod(0o644)
+            bad_mode = self.run_cli(
+                home,
+                "setup", "--non-interactive", "--vendors", "chatgpt", "--no-auth",
+            )
+            self.assertNotEqual(bad_mode.returncode, 0)
+            self.assertIn("mode 0600", bad_mode.stderr)
+            self.assertEqual(env_file.read_bytes(), original)
+            env_file.chmod(0o600)
+
+            drift = self.run_cli(
+                home,
+                "setup", "--non-interactive", "--vendors", "chatgpt,xai",
+                "--port", "9000", "--no-auth",
+            )
+            self.assertNotEqual(drift.returncode, 0)
+            self.assertIn("does not match", drift.stderr)
+            self.assertEqual(env_file.read_bytes(), original)
+
+            env_file.write_text(f"export CLIPROXY_API_KEY='{'0' * 64}'\n")
+            env_file.chmod(0o600)
+            changed = env_file.read_bytes()
+            content_drift = self.run_cli(
+                home,
+                "setup", "--non-interactive", "--vendors", "chatgpt", "--no-auth",
+            )
+            self.assertNotEqual(content_drift.returncode, 0)
+            self.assertIn("generated setup file has changed", content_drift.stderr)
+            self.assertEqual(env_file.read_bytes(), changed)
+
+    def test_proxy_discovery_precedence_is_explicit_then_env_then_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bindir = root / "bin"
+            path_first = self.make_proxy(bindir, "parable-cliproxy-api")
+            self.make_proxy(bindir, "cli-proxy-api")
+            env_proxy = self.make_proxy(root / "env", "env-proxy")
+            explicit = self.make_proxy(root / "explicit", "explicit-proxy")
+            common_env = {
+                "PATH": f"{bindir}:{os.environ['PATH']}",
+                "PARABLE_CLIPROXY_BIN": str(env_proxy),
+            }
+
+            explicit_home = root / "explicit-home"
+            explicit_home.mkdir()
+            result = self.run_cli(
+                explicit_home,
+                "setup", "--non-interactive", "--vendors", "chatgpt",
+                "--proxy-bin", str(explicit), "--no-auth",
+                env_extra=common_env,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            manifest = json.loads(
+                (explicit_home / ".config" / "parable" / "setup.json").read_text()
+            )
+            self.assertEqual(manifest["proxyBinary"], str(explicit.resolve()))
+
+            env_home = root / "env-home"
+            env_home.mkdir()
+            result = self.run_cli(
+                env_home,
+                "setup", "--non-interactive", "--vendors", "chatgpt", "--no-auth",
+                env_extra=common_env,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            manifest = json.loads((env_home / ".config" / "parable" / "setup.json").read_text())
+            self.assertEqual(manifest["proxyBinary"], str(env_proxy.resolve()))
+
+            path_home = root / "path-home"
+            path_home.mkdir()
+            result = self.run_cli(
+                path_home,
+                "setup", "--non-interactive", "--vendors", "chatgpt", "--no-auth",
+                env_extra={"PATH": f"{bindir}:{os.environ['PATH']}"},
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            manifest = json.loads((path_home / ".config" / "parable" / "setup.json").read_text())
+            self.assertEqual(manifest["proxyBinary"], str(path_first.resolve()))
+
+
+class TestManagedProxyBuild(unittest.TestCase):
+    def make_tools(self, root: Path) -> tuple[Path, Path, Path]:
+        bindir = root / "fake-bin"
+        bindir.mkdir()
+        git_log = root / "git.jsonl"
+        go_log = root / "go.jsonl"
+        git = bindir / "git"
+        git.write_text("""#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+with open(os.environ["FAKE_GIT_LOG"], "a") as handle:
+    handle.write(json.dumps(sys.argv[1:]) + "\\n")
+args = sys.argv[1:]
+if args and args[0] == "clone":
+    Path(args[-1]).mkdir(parents=True)
+if "rev-parse" in args:
+    print(os.environ.get("FAKE_GIT_REVISION", ""))
+""")
+        git.chmod(0o755)
+        go = bindir / "go"
+        go.write_text("""#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+with open(os.environ["FAKE_GO_LOG"], "a") as handle:
+    handle.write(json.dumps(sys.argv[1:]) + "\\n")
+args = sys.argv[1:]
+if args and args[0] == "build":
+    output = Path(args[args.index("-o") + 1])
+    output.write_text("#!/usr/bin/env sh\\nexit 0\\n")
+    output.chmod(0o755)
+""")
+        go.chmod(0o755)
+        return bindir, git_log, go_log
+
+    def build_env(
+        self,
+        home: Path,
+        bindir: Path,
+        git_log: Path,
+        go_log: Path,
+        revision: str = PROXY_COMMIT,
+    ) -> dict[str, str]:
+        return os.environ | {
+            "HOME": str(home),
+            "PATH": f"{bindir}:{os.environ['PATH']}",
+            "FAKE_GIT_LOG": str(git_log),
+            "FAKE_GO_LOG": str(go_log),
+            "FAKE_GIT_REVISION": revision,
+        }
+
+    def test_proxy_build_pins_source_patch_tests_and_private_binary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bindir, git_log, go_log = self.make_tools(root)
+            destination = root / "managed" / PROXY_COMMIT
+            proc = subprocess.run(
+                [NODE, str(REPO / "bin" / "parable.js"),
+                 "proxy", "build", "--install-dir", str(destination)],
+                cwd=root,
+                env=self.build_env(root, bindir, git_log, go_log),
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            binary = destination / "parable-cliproxy-api"
+            self.assertTrue(binary.is_file())
+            self.assertEqual(binary.stat().st_mode & 0o777, 0o700)
+            git_calls = [json.loads(line) for line in git_log.read_text().splitlines()]
+            go_calls = [json.loads(line) for line in go_log.read_text().splitlines()]
+            self.assertEqual(
+                git_calls[0],
+                ["clone", "--no-checkout", "https://github.com/router-for-me/CLIProxyAPI.git",
+                 str(destination)],
+            )
+            self.assertIn(["-C", str(destination), "checkout", "--detach", PROXY_COMMIT], git_calls)
+            self.assertTrue(any("am" in call for call in git_calls))
+            self.assertEqual([call[0] for call in go_calls], ["test", "test", "build"])
+
+    def test_interactive_setup_requires_consent_before_build_work(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bindir, git_log, go_log = self.make_tools(root)
+            home = root / "home"
+            home.mkdir()
+            empty_path = root / "empty-path"
+            empty_path.mkdir()
+            env = self.build_env(home, bindir, git_log, go_log)
+            # Keep git/go discoverable while ensuring no proxy binary is on PATH.
+            python_bin = Path(shutil.which("python3") or "/usr/bin/python3").parent
+            env["PATH"] = f"{bindir}:{empty_path}:{python_bin}"
+            proc = subprocess.run(
+                [NODE, str(REPO / "bin" / "parable.js"), "setup", "--no-auth"],
+                cwd=home,
+                env=env,
+                input="n\nn\nn\n",
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("Build pinned commit", proc.stdout)
+            self.assertIn("CLIProxyAPI was not found", proc.stderr)
+            self.assertFalse(git_log.exists())
+            self.assertFalse(go_log.exists())
+            self.assertFalse((home / ".config" / "parable").exists())
+
+    def test_wrong_source_pin_and_existing_destination_stop_before_patch_or_go(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bindir, git_log, go_log = self.make_tools(root)
+            destination = root / "wrong-source"
+            proc = subprocess.run(
+                [NODE, str(REPO / "bin" / "parable.js"),
+                 "proxy", "build", "--install-dir", str(destination)],
+                cwd=root,
+                env=self.build_env(root, bindir, git_log, go_log, "0" * 40),
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("source pin mismatch", proc.stderr)
+            calls = [json.loads(line) for line in git_log.read_text().splitlines()]
+            self.assertFalse(any("am" in call for call in calls))
+            self.assertFalse(go_log.exists())
+            self.assertFalse(destination.exists())
+
+            git_log.unlink()
+            destination.mkdir()
+            marker = destination / "owned-by-user"
+            marker.write_text("keep")
+            proc = subprocess.run(
+                [NODE, str(REPO / "bin" / "parable.js"),
+                 "proxy", "build", "--install-dir", str(destination)],
+                cwd=root,
+                env=self.build_env(root, bindir, git_log, go_log),
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("already exists", proc.stderr)
+            self.assertEqual(marker.read_text(), "keep")
+            self.assertFalse(git_log.exists())
+            self.assertFalse(go_log.exists())
+
+    def test_wrong_patch_checksum_stops_before_git_and_setup_can_build_explicitly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bindir, git_log, go_log = self.make_tools(root)
+            package = root / "mutated-package"
+            for name in ("bin", "lib", "patches"):
+                shutil.copytree(REPO / name, package / name)
+            patch = package / "patches" / "cliproxyapi-v7.2.88-claude-effort.patch"
+            patch.write_text(patch.read_text() + "\n# checksum mutation\n")
+            destination = root / "checksum"
+            proc = subprocess.run(
+                [NODE, str(package / "bin" / "parable.js"),
+                 "proxy", "build", "--install-dir", str(destination)],
+                cwd=root,
+                env=self.build_env(root, bindir, git_log, go_log),
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("checksum mismatch", proc.stderr)
+            self.assertFalse(git_log.exists())
+            self.assertFalse(go_log.exists())
+            self.assertFalse(destination.exists())
+
+            setup_home = root / "setup-home"
+            setup_home.mkdir()
+            data_home = root / "data"
+            env = self.build_env(setup_home, bindir, git_log, go_log)
+            env["XDG_DATA_HOME"] = str(data_home)
+            setup = subprocess.run(
+                [NODE, str(REPO / "bin" / "parable.js"),
+                 "setup", "--non-interactive", "--vendors", "chatgpt",
+                 "--build-proxy", "--no-auth"],
+                cwd=setup_home,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertEqual(setup.returncode, 0, setup.stdout + setup.stderr)
+            manifest = json.loads(
+                (setup_home / ".config" / "parable" / "setup.json").read_text()
+            )
+            expected = data_home / "parable" / "cliproxyapi" / PROXY_COMMIT / "parable-cliproxy-api"
+            self.assertEqual(manifest["proxyBinary"], str(expected))
+            self.assertTrue(expected.is_file())
 
 
 if __name__ == "__main__":
