@@ -57,8 +57,9 @@ broker, credential adapter, callback parser, model regex, or fallback router.
 - Content boundary: PASS.
 - Complete Parable suite: PASS, 81/81.
 - Local Claudio-Michel review: 5/5.
-- Focused PR: pending.
-- Verified merged `main`: pending.
+- Focused PR: [#191](https://github.com/miguelrios/unc-skills/pull/191),
+  merged 2026-07-20T22:28:29Z.
+- Verified merged `main`: `5a401b65a5dbfb0c5c4632d383571706cbf63277`.
 
 ## exit → O1
 
