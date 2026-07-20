@@ -1,30 +1,35 @@
-# GPT and Grok subscription models in stock Claude Code
+# GPT, Claude, and Grok subscription models in stock Claude Code
 
 This is the reproducible OSS path for running stock Claude Code with
-`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, and `grok-4.5` through a
-local CLIProxyAPI process and the user's own subscription OAuth.
+`gpt-5.6-sol` as the parent and exact GPT, Claude, and Grok named subagents
+through a local CLIProxyAPI process and the user's own subscription OAuth.
 
 No broker or shared deployment is involved:
 
 ```text
                                       ┌→ ChatGPT subscription OAuth
 Claude Code → loopback CLIProxyAPI ───┤
+                                      ├→ Claude subscription OAuth
                                       └→ xAI subscription OAuth
 ```
 
 ## Support state
 
-Released CLIProxyAPI `v7.2.88` can transport all three models, but it maps
-every Claude Code effort setting to upstream `medium`. The patch shipped in
-this repository fixes that protocol translation and has been live-proved for
-all 15 combinations of:
+Released CLIProxyAPI `v7.2.88` can transport all three GPT models, but it
+maps every Claude Code effort setting to upstream `medium`. The patch shipped
+in this repository fixes that protocol translation and has been live-proved
+for all 15 combinations of:
 
 - model: `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`
 - effort: `low`, `medium`, `high`, `xhigh`, `max`
 
 The result was 15/15 exact GPT effort pass-through and 3/3 tool canaries.
-The same build also completed all five Claude Code effort flags with Grok 4.5
-and 3/3 real Grok tool canaries through xAI OAuth:
+It also completed the full 30-cell named-child matrix: five Sol parent effort
+settings times exact Terra, Luna, Grok, Sonnet, Opus, and Haiku children.
+Every cell used a real child Bash artifact followed by parent Agent/Bash
+consumption.
+
+Grok 4.5 ran through xAI OAuth:
 
 - Grok `low`, `medium`, and `high` are exact end to end.
 - Claude's `xhigh` and `max` reach CLIProxyAPI intact, then clamp to Grok's
@@ -32,6 +37,14 @@ and 3/3 real Grok tool canaries through xAI OAuth:
 - A Sol parent invoked exact named agent `parable-grok` at all five parent
   efforts. Claude Code inherited each parent effort into the child; Grok
   applied the same `xhigh|max → high` clamp.
+
+Claude children ran through Claude subscription OAuth:
+
+- `claude-sonnet-5` and `claude-opus-4-8` preserve
+  `low|medium|high|xhigh|max` exactly as Anthropic adaptive-thinking effort.
+- `claude-haiku-4-5-20251001` completes all five cells but normalizes each
+  inherited setting to `thinking.type=enabled`, `budget_tokens=31999`, and no
+  effort label.
 
 The patch is **not** an upstream CLIProxyAPI release. It is pinned to:
 
@@ -116,7 +129,22 @@ printed device code once; stale or previously submitted codes produce
 This route uses ChatGPT subscription OAuth. Do not set `OPENAI_API_KEY` for
 this setup.
 
-To add Grok 4.5, connect the user's xAI subscription separately:
+Connect the user's Claude subscription:
+
+```bash
+./cli-proxy-api \
+  --config "$HOME/.config/parable/cliproxy.yaml" \
+  --claude-login \
+  --no-browser
+```
+
+Keep this command running while you open its newly printed authorization URL
+and complete the callback. A stale URL or a callback delivered to a prior
+process cannot complete the new PKCE flow. CLIProxyAPI stores its own OAuth
+record; do not copy Claude Code's credential and do not set
+`ANTHROPIC_API_KEY`.
+
+Connect the user's xAI subscription separately:
 
 ```bash
 ./cli-proxy-api \
@@ -127,7 +155,7 @@ To add Grok 4.5, connect the user's xAI subscription separately:
 
 Complete the printed xAI device flow. CLIProxyAPI stores and refreshes each
 provider's OAuth record in its user-only auth directory. Do not set
-`XAI_API_KEY`; this recipe proves the subscription route, not metered API
+`XAI_API_KEY`; this recipe proves subscription routes, not metered API
 billing.
 
 ### 4. Start and verify the local proxy
@@ -141,8 +169,8 @@ source "$HOME/.config/parable/cliproxy.env"
   --local-model
 ```
 
-Verify the combined authenticated catalog from another terminal. Remove
-`grok-4.5` from the assertion if you intentionally configured only ChatGPT:
+Verify the combined authenticated catalog from another terminal. Remove ids
+for subscriptions you intentionally did not connect:
 
 ```bash
 source "$HOME/.config/parable/cliproxy.env"
@@ -156,7 +184,10 @@ curl -fsS \
         "gpt-5.6-sol",
         "gpt-5.6-terra",
         "gpt-5.6-luna",
-        "grok-4.5"
+        "grok-4.5",
+        "claude-sonnet-5",
+        "claude-opus-4-8",
+        "claude-haiku-4-5-20251001"
       ][];
       . as $model | $ids | index($model)
     )
@@ -187,37 +218,6 @@ provider = "claude"
 model = "grok-4.5"
 use_for = "A third-family implementation or adversarial review."
 avoid_for = "Reviewing its own diff."
-EOF
-
-source "$HOME/.config/parable/cliproxy.env"
-npx @parcha/parable doctor
-npx @parcha/parable agents sync
-npx @parcha/parable claude -- --effort high
-```
-
-That launches the installed stock `claude` binary with Sol as the session
-model and materializes exact project agent `parable-grok`. Change the final
-effort to any of the five verified values. In the session, explicitly ask Sol
-to use the `parable-grok` agent when that is the intended lane.
-
-The effort rule is observable, not advisory:
-
-| Sol parent effort | Grok child inbound | Grok upstream |
-|---|---|---|
-| `low` | `low` | `low` |
-| `medium` | `medium` | `medium` |
-| `high` | `high` | `high` |
-| `xhigh` | `xhigh` | `high` |
-| `max` | `max` | `high` |
-
-## Optional GPT named subagents
-
-Terra and Luna can be materialized as exact project-local Claude agents by
-adding:
-
-```toml
-[providers.claude]
-type = "subagent"
 
 [executors.terra]
 provider = "claude"
@@ -228,18 +228,61 @@ use_for = "Independent GPT implementation or debugging."
 provider = "claude"
 model = "gpt-5.6-luna"
 use_for = "Independent GPT review or a second implementation."
-```
 
-Then run:
+[executors.sonnet_exact]
+provider = "claude"
+model = "claude-sonnet-5"
+use_for = "Implementation through the exact entitled Sonnet model."
 
-```bash
+[executors.opus_exact]
+provider = "claude"
+model = "claude-opus-4-8"
+use_for = "Deep review through the exact entitled Opus model."
+
+[executors.haiku_exact]
+provider = "claude"
+model = "claude-haiku-4-5-20251001"
+use_for = "Fast mechanical work through the exact entitled Haiku model."
+EOF
+
+source "$HOME/.config/parable/cliproxy.env"
+npx @parcha/parable doctor
 npx @parcha/parable agents sync
+npx @parcha/parable claude -- --effort high
 ```
 
-Parable writes `parable-terra` and `parable-luna` agent definitions with exact
-`model:` fields. Live main-model transport and effort are proved for both
-models; a Sol-parent → named-GPT-subagent tool proof is the next gate and is
-not claimed by the current receipt.
+That launches the installed stock `claude` binary with Sol as the session
+model and materializes six exact project agents:
+
+```text
+parable-terra          gpt-5.6-terra
+parable-luna           gpt-5.6-luna
+parable-grok           grok-4.5
+parable-sonnet-exact   claude-sonnet-5
+parable-opus-exact     claude-opus-4-8
+parable-haiku-exact    claude-haiku-4-5-20251001
+```
+
+Change the final effort to any verified value. In the session, ask Sol to use
+the exact `parable-*` agent intended for the task.
+
+The named-child effort rule is observable, not advisory:
+
+| Child | `low` | `medium` | `high` | `xhigh` | `max` |
+|---|---|---|---|---|---|
+| Terra | exact | exact | exact | exact | exact |
+| Luna | exact | exact | exact | exact | exact |
+| Grok 4.5 | exact | exact | exact | → `high` | → `high` |
+| Sonnet 5 | adaptive exact | adaptive exact | adaptive exact | adaptive exact | adaptive exact |
+| Opus 4.8 | adaptive exact | adaptive exact | adaptive exact | adaptive exact | adaptive exact |
+| Haiku 4.5 | → enabled/31,999 | → enabled/31,999 | → enabled/31,999 | → enabled/31,999 | → enabled/31,999 |
+
+## What the 30/30 proof means
+
+The proof covers exact model selection, model-specific effort behavior, real
+child Bash use, parent Agent/Bash consumption, and distinct OAuth routes. It
+does not promise that every plan tier entitles every model forever. The
+authenticated catalog remains the fail-closed entitlement check at launch.
 
 Kimi remains paused and is intentionally absent from this setup.
 
@@ -251,8 +294,12 @@ Kimi remains paused and is intentionally absent from this setup.
 - [xAI OAuth and catalog proof](https://github.com/miguelrios/unc-skills/blob/main/parable/docs/evidence/x1-grok45-catalog/EXIT.md)
 - [Grok main-model matrix](https://github.com/miguelrios/unc-skills/blob/main/parable/docs/evidence/x2-grok45-main-permutations/EXIT.md)
 - [Sol to named Grok matrix](https://github.com/miguelrios/unc-skills/blob/main/parable/docs/evidence/x3-sol-grok-named-subagent/EXIT.md)
+- [Sol to named Terra/Luna matrix](https://github.com/miguelrios/unc-skills/blob/main/parable/docs/evidence/y1-sol-terra-luna/EXIT.md)
+- [Claude OAuth gate](https://github.com/miguelrios/unc-skills/blob/main/parable/docs/evidence/y2-claude-oauth/EXIT.md)
+- [Authenticated Claude catalog](https://github.com/miguelrios/unc-skills/blob/main/parable/docs/evidence/y3-claude-catalog/EXIT.md)
+- [Sol to named Claude-child matrix](https://github.com/miguelrios/unc-skills/blob/main/parable/docs/evidence/y4-sol-claude-children/EXIT.md)
 
 This is a per-user localhost setup. CLIProxyAPI owns OAuth storage and token
-refresh; Parable stores neither provider credentials nor OAuth state. ChatGPT
-and xAI plan limits, model entitlements, and provider terms still apply. Do
-not expose the proxy port outside loopback.
+refresh; Parable stores neither provider credentials nor OAuth state.
+ChatGPT, Claude, and xAI plan limits, model entitlements, and provider terms
+still apply. Do not expose the proxy port outside loopback.

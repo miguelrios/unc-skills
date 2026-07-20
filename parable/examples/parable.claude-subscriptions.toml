@@ -1,5 +1,5 @@
-# ChatGPT- and xAI-subscription-backed models in one stock Claude Code session
-# through a local Claude-compatible proxy. This file contains no
+# ChatGPT-, Claude-, and xAI-subscription-backed models in one stock Claude
+# Code session through a local Claude-compatible proxy. This file contains no
 # OAuth/provider credentials: only the NAME of the environment variable
 # holding the proxy's localhost client token. Configure and authenticate the
 # local proxy separately.
@@ -7,7 +7,7 @@
 [parable]
 version = 1
 default_executor = "terra"
-default_reviewer = "opus"
+default_reviewer = "opus_exact"
 
 [claude]
 base_url = "http://127.0.0.1:8317"
@@ -36,11 +36,29 @@ model = "gpt-5.6-luna"
 tags = ["reviewer", "subscription"]
 use_for = "Independent GPT review or a second implementation."
 
+[executors.sonnet_exact]
+provider = "claude"
+model = "claude-sonnet-5"
+tags = ["implementer", "subscription"]
+use_for = "Implementation through the exact entitled Sonnet model."
+
+[executors.opus_exact]
+provider = "claude"
+model = "claude-opus-4-8"
+tags = ["reviewer", "subscription"]
+use_for = "Deep review through the exact entitled Opus model."
+
+[executors.haiku_exact]
+provider = "claude"
+model = "claude-haiku-4-5-20251001"
+tags = ["mechanical", "subscription"]
+use_for = "Fast mechanical work through the exact entitled Haiku model."
+
 [routing]
-mechanical    = ["luna", "sonnet"]
-feature       = ["terra", "sonnet", "grok"]
-refactor_wide = ["terra", "sonnet", "grok"]
-gnarly        = ["opus"]
-review        = ["opus", "luna", "grok"]
-smoke_test    = ["opus"]
-escalation    = ["terra", "sonnet", "grok", "opus"]
+mechanical    = ["haiku_exact", "luna", "sonnet_exact"]
+feature       = ["terra", "sonnet_exact", "grok"]
+refactor_wide = ["terra", "sonnet_exact", "grok"]
+gnarly        = ["opus_exact"]
+review        = ["opus_exact", "luna", "grok"]
+smoke_test    = ["opus_exact"]
+escalation    = ["terra", "sonnet_exact", "grok", "opus_exact"]

@@ -158,7 +158,7 @@ owns subagent dispatch directly. If the current harness has no native agent-spaw
 provider is unavailable.
 
 When the session itself is launched with `parable claude`, this same provider can carry exact
-third-party model ids exposed by a localhost Claude-compatible proxy:
+catalog model ids exposed by a localhost Claude-compatible proxy:
 
 ```toml
 [claude]
@@ -166,18 +166,28 @@ base_url = "http://127.0.0.1:8317"
 auth_token_env = "CLIPROXY_API_KEY"
 brain_model = "gpt-5.6-sol"
 
-[executors.kimi]
+[executors.terra]
 provider = "claude"
-model = "kimi-k3"
-use_for = "Independent implementation through the Kimi Code subscription."
+model = "gpt-5.6-terra"
+use_for = "Independent GPT implementation through ChatGPT subscription OAuth."
+
+[executors.sonnet_exact]
+provider = "claude"
+model = "claude-sonnet-5"
+use_for = "Implementation through Claude subscription OAuth."
+
+[executors.grok]
+provider = "claude"
+model = "grok-4.5"
+use_for = "Third-family implementation or review through xAI subscription OAuth."
 ```
 
-`parable agents sync` materializes that executor as project agent `parable-kimi`; stock Claude
-Code sends its child requests to `kimi-k3` through the same endpoint. The launcher strips
+`parable agents sync` materializes those executors as exact project agents; stock Claude
+Code sends child requests to each full model id through the same endpoint. The launcher strips
 `CLAUDE_CODE_SUBAGENT_MODEL`, because Claude Code gives that environment variable priority over
 every agent's own `model:` field and would otherwise silently route all children to the parent.
 The proxy owns provider OAuth. Parable stores no provider credential and does not implement an
-OAuth flow.
+OAuth flow. Kimi is currently paused and is intentionally absent from the proved setup.
 
 ### Verified GPT effort support
 
@@ -232,6 +242,34 @@ separate ChatGPT/xAI OAuth routes.
 This xAI OAuth route is distinct from Parable's Cursor executor. Cursor uses a
 Cursor plan and `cursor-agent`; it is not the Grok child route inside Claude
 Code.
+
+### Verified Sol subscription-subagent matrix
+
+The exact named-child proof is complete for stock Claude Code `2.1.215`.
+With `gpt-5.6-sol` as parent, every child below created a Bash artifact and
+the parent consumed it with Agent and Bash at all five parent efforts:
+
+| Exact child | OAuth route | `low` | `medium` | `high` | `xhigh` | `max` |
+|---|---|---|---|---|---|---|
+| `gpt-5.6-terra` | ChatGPT | exact | exact | exact | exact | exact |
+| `gpt-5.6-luna` | ChatGPT | exact | exact | exact | exact | exact |
+| `grok-4.5` | xAI | exact | exact | exact | → `high` | → `high` |
+| `claude-sonnet-5` | Claude | adaptive exact | adaptive exact | adaptive exact | adaptive exact | adaptive exact |
+| `claude-opus-4-8` | Claude | adaptive exact | adaptive exact | adaptive exact | adaptive exact | adaptive exact |
+| `claude-haiku-4-5-20251001` | Claude | → enabled/31,999 | → enabled/31,999 | → enabled/31,999 | → enabled/31,999 | → enabled/31,999 |
+
+This is 30/30 live cells with exact model attribution and no provider
+fallback. Sonnet and Opus preserve the effort label under adaptive thinking.
+Haiku removes the label and consistently uses classic enabled thinking with a
+31,999-token budget. See the
+[GPT-child receipt](../../../docs/evidence/y1-sol-terra-luna/receipt.json),
+[Claude-child receipt](../../../docs/evidence/y4-sol-claude-children/receipt.json),
+and the [source-pinned setup guide](../../../docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md).
+
+Each operator must connect their own subscriptions to their own loopback
+proxy. Catalog availability is the entitlement gate; do not substitute a
+display alias when an exact id is missing. Plan limits and provider terms
+still apply.
 
 ## Reading subscription headroom (parable-usage.sh)
 
