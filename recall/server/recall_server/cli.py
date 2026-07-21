@@ -148,7 +148,7 @@ def main() -> None:
     managed_worker.add_argument(
         "--state-root",
         type=Path,
-        default=Path("/var/lib/recall"),
+        default=Path("/var/lib/recall/worker"),
     )
     managed_worker.add_argument("--once", action="store_true")
     managed_worker.add_argument(
