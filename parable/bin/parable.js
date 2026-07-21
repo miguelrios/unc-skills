@@ -79,7 +79,7 @@ function cmdInstall(args) {
   } catch (e) {
     fail("install failed at " + dest + ": " + e.message);
   }
-  log("done. Run `npx @parcha/parable setup`, then `npx @parcha/parable doctor`.");
+  log("done. Run `npx @parcha/parable setup`, then `npx @parcha/parable claude` in your project.");
 }
 
 function cmdDoctor() {
@@ -172,14 +172,14 @@ async function main() {
   else {
     log("usage: npx @parcha/parable <install|setup|doctor|auth|proxy|claude|agents sync> [options]");
     log("  install            copy the skill to ~/.claude/skills (or ./.claude/skills with --project)");
-    log("  setup              create a private loopback subscription configuration");
-    log("  setup finalize     verify exact catalog ids and synchronize named agents");
+    log("  setup              configure subscriptions and offer a pinned proxy build");
+    log("  setup finalize     diagnostic exact-catalog check and agent synchronization");
     log("  doctor             check python/codex/config health");
     log("  auth add VENDOR    authorize chatgpt, claude, or xai through CLIProxyAPI");
     log("  auth status        show credential-safe provider presence and record counts");
     log("  proxy build        build the pinned, patched CLIProxyAPI source");
-    log("  proxy start        run the configured CLIProxyAPI in the foreground");
-    log("  claude [ARGS...]    launch Claude Code through the configured local proxy");
+    log("  proxy start        diagnostic foreground CLIProxyAPI process");
+    log("  claude [ARGS...]    supervise the local proxy and launch exact-model Claude Code");
     log("  agents sync        synchronize project-local parable-* custom agents");
     process.exit(cmd ? 1 : 0);
   }

@@ -29,9 +29,12 @@ fake runtime parity. With no configured checks, `parable-verify.sh` passes vacuo
 user declares some.
 
 When the config contains `[claude]`, the session should have been entered through
-`parable claude`. A first-run subscription setup uses `parable setup`, native
-`parable auth add` commands, foreground `parable proxy start`, and then
-`parable setup finalize` in the working repository. Arbitrary-model Claude executors are
+`parable claude`. Ordinary first-run subscription onboarding is two commands:
+`parable setup`, then `parable claude` in the working repository. Setup delegates
+native vendor authorization; the launcher starts or reuses the loopback proxy,
+checks the exact catalog, synchronizes agents, and cleans up only a proxy it owns.
+`parable auth add`, `parable proxy start`, and `parable setup finalize` remain
+headless/recovery diagnostics. Arbitrary-model Claude executors are
 synchronized as project-local native agents named `parable-<normalized-executor-id>`;
 `parable-config.sh` prints the exact
 `agent=` name beside each one. Invoke that named agent through the Agent tool. Claude Code's
@@ -79,10 +82,11 @@ this tool exists to prevent. The per-pool selection detail lives in `references/
   `parable-config.sh`; for a bare Claude alias, use a general-purpose agent with the executor's
   model. If there is no native agent-spawn tool, that executor is unavailable; choose a
   CLI-backed executor.
-- `parable setup finalize` — authenticate to the loopback catalog with the private generated
-  client token, require every exact configured id, and idempotently synchronize Parable-owned
-  project agents from TOML. `parable claude [ARGS...]` repeats that exact catalog gate and sync,
-  then launches the configured brain model. These are package CLI commands, not skill scripts.
+- `parable claude [ARGS...]` — safely reuse a healthy configured loopback proxy or own its
+  start/readiness/cleanup lifecycle, require every exact configured id, idempotently synchronize
+  Parable-owned project agents, and launch the configured brain model. `parable setup finalize`
+  performs only the catalog/sync diagnostic against an already-running proxy. These are package
+  CLI commands, not skill scripts.
 - `scripts/parable-resume.sh <run-dir> "<message>"` — continue an executor's existing session
   (caching economics: facts below). Sessions do not transfer between executors.
 - `scripts/parable-status.sh <run-dir>` — live run state in ~7 lines for zero model tokens;

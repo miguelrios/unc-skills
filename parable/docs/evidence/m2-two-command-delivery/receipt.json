@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-07-21T00:05:56Z",
+  "providerTurns": 0,
+  "oauthFlows": 0,
+  "externalListenerMutations": 0,
+  "ordinaryRuntimeCommands": 2,
+  "ordinaryTerminals": 1,
+  "ordinarySequence": ["parable setup", "parable claude"],
+  "publicSurfacesAligned": 7,
+  "diagnosticCommandsPreserved": ["parable proxy start", "parable setup finalize"],
+  "lifecycleMatrix": {
+    "casesPassed": 7,
+    "signalsPassed": 3,
+    "orphanProcesses": 0
+  },
+  "delivery": {
+    "testsPassed": 107,
+    "testsFailed": 0,
+    "packageFiles": 33,
+    "packageDryRunPassed": true,
+    "relativeMarkdownLinksPassed": true,
+    "htmlParsed": true,
+    "htmlDesktopRenderPassed": true,
+    "htmlMobileRenderPassed": true,
+    "privacyCheckPassed": true
+  },
+  "release": {
+    "sourceVersion": "0.1.9",
+    "registryVersion": "0.1.7",
+    "publishAuthorized": false,
+    "publishExecuted": false
+  },
+  "bound": {
+    "evidenceFailures": 1,
+    "instrumentFailures": 0,
+    "reviewRounds": 2
+  }
+}

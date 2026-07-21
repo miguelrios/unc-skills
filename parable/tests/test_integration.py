@@ -368,6 +368,42 @@ class TestClaudeSubscriptionLauncher(unittest.TestCase):
 
 
 class TestInstallerSmoke(unittest.TestCase):
+    def test_public_onboarding_surfaces_use_the_two_command_path(self):
+        readme = (REPO / "README.md").read_text()
+        guide = (REPO / "docs" / "CLIPROXYAPI_GPT_SUBSCRIPTION.md").read_text()
+        skill = (REPO / "skills" / "parable" / "SKILL.md").read_text()
+        providers = (REPO / "skills" / "parable" / "references" / "providers.md").read_text()
+        installer = (REPO / "install.sh").read_text()
+
+        self.assertIn('"$PARABLE" setup\n', readme)
+        self.assertIn('"$PARABLE" claude -- --effort high', readme)
+        self.assertNotIn("# terminal 1: foreground local proxy", readme)
+        self.assertNotIn('"$PARABLE" setup finalize\n"$PARABLE" claude', readme)
+
+        self.assertIn('"$PARABLE" setup\n```', guide)
+        self.assertIn("That is the whole ordinary path.", guide)
+        self.assertIn("stops only the proxy process it owns", guide)
+        self.assertIn("Neither command is part of ordinary onboarding.", guide)
+
+        for surface in (skill, providers):
+            self.assertIn("parable setup", surface)
+            self.assertIn("parable claude", surface)
+            self.assertIn("setup finalize", surface)
+            self.assertIn("proxy start", surface)
+
+        self.assertIn("./bin/parable.js setup", installer)
+        self.assertIn("./bin/parable.js claude", installer)
+
+        help_proc = subprocess.run(
+            [NODE, str(REPO / "bin" / "parable.js")],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(help_proc.returncode, 0, help_proc.stdout + help_proc.stderr)
+        self.assertIn("supervise the local proxy", help_proc.stdout)
+        self.assertIn("diagnostic foreground", help_proc.stdout)
+
     def test_install_and_error_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "target"

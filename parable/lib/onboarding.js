@@ -192,6 +192,8 @@ function setupUsage() {
     "",
     "Create a private, loopback-only Parable + CLIProxyAPI configuration.",
     "ChatGPT is mandatory because the parent model is exact gpt-5.6-sol.",
+    "Interactive setup offers the pinned managed build when no proxy is installed.",
+    "Ordinary next step: run `parable claude` in the working repository.",
   ].join("\n");
 }
 
