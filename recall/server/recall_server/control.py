@@ -8,6 +8,7 @@ import json
 import os
 import re
 import secrets
+import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ from connectors.composio_workspace_rail import (
     ComposioWorkspaceRail,
     toolkit_for_connector,
 )
+from connectors.workspace_rail import WorkspaceRailError
 from connectors.registry import (
     ConnectorDefinitionV3,
     ConnectorRegistryError,
@@ -49,6 +51,10 @@ TRANSITIONS = {
     "revoke": ({"configured", "enabled", "paused"}, "revoked"),
     "uninstall": ({"configured", "enabled", "paused", "revoked"}, "uninstalled"),
 }
+COMPOSIO_PROBE_RETRY_DELAYS = (1.0, 2.0, 4.0, 8.0, 15.0, 15.0)
+COMPOSIO_TRANSIENT_PROBE_ERRORS = frozenset(
+    {"authority_forbidden", "transport_unavailable", "upstream_error"}
+)
 
 
 class ControlError(RuntimeError):
@@ -565,6 +571,34 @@ class ComposioConnectionBroker:
         except Exception:
             raise ControlError("composio_upstream_failed", 502) from None
 
+    def _probe_connection(
+        self,
+        *,
+        user_id: str,
+        connected_account_id: str,
+        connector_id: str,
+    ) -> None:
+        probe = self._PROBES.get(connector_id)
+        if probe is None:
+            raise ControlError("oauth_connector_invalid")
+        for attempt in range(len(COMPOSIO_PROBE_RETRY_DELAYS) + 1):
+            try:
+                rail = self.rail_factory(
+                    api_key=self.api_key,
+                    user_id=user_id,
+                    connected_account_id=connected_account_id,
+                    connector_id=connector_id,
+                )
+                rail.run(*probe)
+                return
+            except WorkspaceRailError as error:
+                retryable = str(error) in COMPOSIO_TRANSIENT_PROBE_ERRORS
+                if not retryable or attempt == len(COMPOSIO_PROBE_RETRY_DELAYS):
+                    raise ControlError("oauth_scope_insufficient", 403) from None
+                time.sleep(COMPOSIO_PROBE_RETRY_DELAYS[attempt])
+            except Exception:
+                raise ControlError("oauth_scope_insufficient", 403) from None
+
     def complete_connection(
         self,
         *,
@@ -609,19 +643,11 @@ class ComposioConnectionBroker:
             )
         ):
             raise ControlError("oauth_scope_insufficient", 403)
-        probe = self._PROBES.get(connector_id)
-        if probe is None:
-            raise ControlError("oauth_connector_invalid")
-        try:
-            rail = self.rail_factory(
-                api_key=self.api_key,
-                user_id=user_id,
-                connected_account_id=expected_connected_account_id,
-                connector_id=connector_id,
-            )
-            rail.run(*probe)
-        except Exception:
-            raise ControlError("oauth_scope_insufficient", 403) from None
+        self._probe_connection(
+            user_id=user_id,
+            connected_account_id=expected_connected_account_id,
+            connector_id=connector_id,
+        )
         return OAuthTokens(
             subject_id=f"{toolkit}:{expected_connected_account_id}",
             granted_scopes=tuple(sorted(required_scopes)),

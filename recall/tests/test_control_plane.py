@@ -13,6 +13,7 @@ from server.recall_server.control import (
     SecretBox,
 )
 from server.recall_server.app import validate_http_profile
+from connectors.workspace_rail import WorkspaceRailError
 
 
 class SecretBoxTests(unittest.TestCase):
@@ -278,6 +279,81 @@ class ComposioConnectionBrokerTests(unittest.TestCase):
         finally:
             FakeProbeRail.should_fail = original
         self.assertEqual(len(rails), 1)
+
+    def test_completion_retries_a_transient_post_connect_probe(self):
+        client = FakeComposioClient(self.account(requested_scopes=None))
+        calls = []
+
+        class PropagatingProbeRail:
+            def __init__(self, **_kwargs):
+                pass
+
+            def run(self, operation, params):
+                calls.append((operation, params))
+                if len(calls) == 1:
+                    raise WorkspaceRailError("authority_forbidden")
+                return {"historyId": "synthetic"}
+
+        broker = ComposioConnectionBroker(
+            api_key="synthetic-project-authority",
+            redirect_uri="https://recall.example/admin/oauth/callback/composio",
+            auth_configs={"gmail": "ac_synthetic_gmail"},
+            client_factory=lambda _key: client,
+            rail_factory=PropagatingProbeRail,
+        )
+        with patch("server.recall_server.control.time.sleep") as sleep:
+            tokens = broker.complete_connection(
+                user_id="principal:synthetic:owner",
+                connector_id="google.gmail",
+                expected_connected_account_id="ca_synthetic_account_123",
+                callback_connected_account_id="ca_synthetic_account_123",
+                callback_status="success",
+                required_scopes=(
+                    "https://www.googleapis.com/auth/gmail.readonly",
+                ),
+            )
+
+        self.assertEqual(tokens.subject_id, "gmail:ca_synthetic_account_123")
+        self.assertEqual(len(calls), 2)
+        sleep.assert_called_once_with(1.0)
+
+    def test_completion_stops_after_bounded_transient_probe_retries(self):
+        client = FakeComposioClient(self.account(requested_scopes=None))
+        calls = []
+
+        class UnreadyProbeRail:
+            def __init__(self, **_kwargs):
+                pass
+
+            def run(self, operation, params):
+                calls.append((operation, params))
+                raise WorkspaceRailError("authority_forbidden")
+
+        broker = ComposioConnectionBroker(
+            api_key="synthetic-project-authority",
+            redirect_uri="https://recall.example/admin/oauth/callback/composio",
+            auth_configs={"gmail": "ac_synthetic_gmail"},
+            client_factory=lambda _key: client,
+            rail_factory=UnreadyProbeRail,
+        )
+        with patch("server.recall_server.control.time.sleep") as sleep:
+            with self.assertRaisesRegex(ControlError, "oauth_scope_insufficient"):
+                broker.complete_connection(
+                    user_id="principal:synthetic:owner",
+                    connector_id="google.gmail",
+                    expected_connected_account_id="ca_synthetic_account_123",
+                    callback_connected_account_id="ca_synthetic_account_123",
+                    callback_status="success",
+                    required_scopes=(
+                        "https://www.googleapis.com/auth/gmail.readonly",
+                    ),
+                )
+
+        self.assertEqual(len(calls), 7)
+        self.assertEqual(
+            [call.args[0] for call in sleep.call_args_list],
+            [1.0, 2.0, 4.0, 8.0, 15.0, 15.0],
+        )
 
 
 class AdminProfileTests(unittest.TestCase):
