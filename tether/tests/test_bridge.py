@@ -1440,6 +1440,22 @@ class PluginRoutingTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"TETHER_ALLOWED_BOT_USERS": "UOTHER,UPEER"}, clear=True):
             self.assertTrue(self.plugin._allows_bot_message(adapter, event, "T12345678"))
 
+    def test_peer_bot_can_be_allowlisted_by_bot_id_when_user_is_absent(self):
+        adapter = types.SimpleNamespace(
+            _bot_user_id="ULOCAL",
+            _team_bot_user_ids={"T12345678": "ULOCAL"},
+            config=types.SimpleNamespace(extra={"allow_bots": "all"}),
+        )
+        event = {
+            "text": ":tada: New signup: person@example.com",
+            "bot_id": "BPOSTHOG",
+            "subtype": "bot_message",
+        }
+        with mock.patch.dict(
+            os.environ, {"TETHER_ALLOWED_BOT_USERS": "BPOSTHOG"}, clear=True,
+        ):
+            self.assertTrue(self.plugin._allows_bot_message(adapter, event, "T12345678"))
+
     def test_trusted_peer_bot_in_bound_thread_routes_to_bound_session(self):
         self.make_bridge()
 
