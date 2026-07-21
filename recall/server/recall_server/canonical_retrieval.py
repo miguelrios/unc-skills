@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 
 from .canonical import CanonicalPlane
 from .db import BrainStore, bounded_search_text
+from .projectors import legacy_engine
 
 
 AUTHORITY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._/@+-]{1,255}\Z")
@@ -207,16 +208,38 @@ class BoundCanonicalRetrieval:
                     "semantic_candidates": 0,
                 },
             }
+        informative = legacy_engine().informative_terms(query)[:16]
+        if not informative:
+            return {
+                "results": [],
+                "diagnostics": {
+                    "engine": "canonical-v2",
+                    "lexical_candidates": 0,
+                    "semantic_candidates": 0,
+                    "lexical_mode": "no-informative-terms",
+                },
+            }
         candidate_limit = min(100, max(20, limit * 5))
-        with self.store.connect() as connection:
-            lexical = connection.execute(
+
+        def lexical_rows(
+            connection: Any,
+            search_query: str,
+            *,
+            minimum_matches: int,
+        ) -> list[dict[str, Any]]:
+            rows = connection.execute(
                 """SELECT chunk.source_id,document.native_id,document.revision,
                           event.occurred_at,chunk.text_redacted,chunk.receipt,
                           ts_rank_cd(
                             chunk.search_vector,
                             websearch_to_tsquery('simple',%s),
                             32
-                          ) AS score
+                          ) AS score,
+                          (SELECT count(*)
+                             FROM unnest(%s::text[]) AS query_term(value)
+                            WHERE chunk.search_vector @@
+                                  plainto_tsquery('simple',query_term.value)
+                          ) AS matched_term_count
                    FROM canonical_chunks chunk
                    JOIN canonical_documents document
                      USING(tenant_id,source_id,document_id)
@@ -231,13 +254,15 @@ class BoundCanonicalRetrieval:
                          websearch_to_tsquery('simple',%s)
                      AND (%s::timestamptz IS NULL OR event.occurred_at>=%s)
                      AND (%s::timestamptz IS NULL OR event.occurred_at<=%s)
-                   ORDER BY score DESC,event.occurred_at DESC,chunk.chunk_id
+                   ORDER BY matched_term_count DESC,score DESC,
+                            event.occurred_at DESC,chunk.chunk_id
                    LIMIT %s""",
                 (
-                    query,
+                    search_query,
+                    informative,
                     self.tenant_id,
                     sources,
-                    query,
+                    search_query,
                     since,
                     since,
                     until,
@@ -245,6 +270,28 @@ class BoundCanonicalRetrieval:
                     candidate_limit,
                 ),
             ).fetchall()
+            return [
+                row
+                for row in rows
+                if int(row["matched_term_count"]) >= minimum_matches
+            ]
+
+        strict_query = " ".join(informative)
+        with self.store.connect() as connection:
+            lexical = lexical_rows(
+                connection,
+                strict_query,
+                minimum_matches=len(informative),
+            )
+            lexical_mode = "strict"
+            if not lexical and len(informative) > 1:
+                relaxed_query = " OR ".join(f'"{term}"' for term in informative)
+                lexical = lexical_rows(
+                    connection,
+                    relaxed_query,
+                    minimum_matches=2 if len(informative) >= 3 else 1,
+                )
+                lexical_mode = "relaxed" if lexical else "relaxed-empty"
         semantic: list[dict[str, Any]] = []
         runtime = self.store.semantic_runtime
         if runtime is not None:
@@ -305,6 +352,7 @@ class BoundCanonicalRetrieval:
                 "engine": "canonical-v2",
                 "lexical_candidates": len(lexical),
                 "semantic_candidates": len(semantic),
+                "lexical_mode": lexical_mode,
             },
         }
 

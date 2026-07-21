@@ -305,6 +305,31 @@ def main() -> None:
             assert PERSONAL_SOURCE not in json.dumps(company)
             assert OUTSIDER_SOURCE not in json.dumps(company)
 
+            conversational = rpc(
+                server,
+                personal_token["token"],
+                "recall_search",
+                {
+                    "query": (
+                        "Where did we discuss the shared launch marker during planning?"
+                    )
+                },
+            )["result"]["structuredContent"]
+            assert conversational["results"]
+            assert {row["source_id"] for row in conversational["results"]} == {
+                PERSONAL_SOURCE
+            }
+            assert conversational["diagnostics"]["lexical_mode"] == "relaxed"
+
+            unrelated = rpc(
+                server,
+                personal_token["token"],
+                "recall_search",
+                {"query": "Where did we discuss underwater zebras?"},
+            )["result"]["structuredContent"]
+            assert unrelated["diagnostics"]["lexical_candidates"] == 0
+            assert unrelated["diagnostics"]["lexical_mode"] == "relaxed-empty"
+
             semantic = rpc(
                 server,
                 personal_token["token"],
