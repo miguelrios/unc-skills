@@ -165,16 +165,18 @@ following reference config:
 
 ```bash
 parable install
-parable setup --build-proxy
-# terminal 1
-parable proxy start
-# terminal 2, in the working repository
-parable setup finalize
+parable setup
+# in the working repository
 parable claude -- --effort high
 ```
 
 ChatGPT is mandatory for the exact Sol parent; interactive setup asks whether
-to add Claude and xAI. Headless operators can pass `--no-auth`, then use
+to add Claude and xAI and offers the pinned build when no proxy is installed.
+`parable claude` owns proxy start, authenticated readiness, exact catalog sync,
+stock-Claude launch, signal forwarding, and cleanup. It reuses but never stops
+a healthy pre-existing endpoint. `parable proxy start` and
+`parable setup finalize` remain explicit troubleshooting commands. Headless
+operators can pass `--no-auth`, then use
 `parable auth add chatgpt --device`, `parable auth add claude`, and
 `parable auth add xai` for the vendors they selected. See the
 [complete first-run guide](../../../docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md).
@@ -203,10 +205,11 @@ model = "grok-4.5"
 use_for = "Third-family implementation or review through xAI subscription OAuth."
 ```
 
-`parable setup finalize` checks the authenticated loopback catalog and then
+`parable claude` checks the authenticated loopback catalog and then
 materializes those executors as exact project agents; stock Claude Code sends child requests to
-each full model id through the same endpoint. Finalize and launch obtain the private generated
-localhost client token without requiring a shell export, and never print it. The launcher strips
+each full model id through the same endpoint. Diagnostic `parable setup finalize` and ordinary
+launch obtain the private generated localhost client token without requiring a shell export,
+and never print it. The launcher strips
 `CLAUDE_CODE_SUBAGENT_MODEL`, because Claude Code gives that environment variable priority over
 every agent's own `model:` field and would otherwise silently route all children to the parent.
 The proxy owns provider OAuth. Parable stores no provider credential and does not implement an

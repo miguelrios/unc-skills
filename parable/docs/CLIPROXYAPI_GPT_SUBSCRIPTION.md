@@ -28,24 +28,47 @@ cd unc-skills/parable
 PARABLE="$PWD/bin/parable.js"
 
 "$PARABLE" install
-"$PARABLE" setup --build-proxy
+"$PARABLE" setup
 ```
 
 Setup always selects ChatGPT because Sol is the parent. In interactive mode it
 asks whether to add Claude and xAI, then starts each selected provider's native
-authorization flow. `--build-proxy` explicitly authorizes the pinned source
-download and build; without it Parable discovers an existing proxy from
-`--proxy-bin`, `PARABLE_CLIPROXY_BIN`, or `PATH`.
+authorization flow. Parable first discovers an existing proxy from
+`--proxy-bin`, `PARABLE_CLIPROXY_BIN`, or `PATH`; when none exists, setup asks
+once for permission to download and build the pinned source. Answering no
+performs no network or build work.
+
+Then enter the repository where Claude should work and launch it:
+
+```bash
+cd /path/to/your/project
+"$PARABLE" claude -- --effort high
+```
+
+That is the whole ordinary path. `parable claude` authenticates a readiness
+probe to the configured loopback `/v1/models`. It reuses a healthy endpoint
+without owning or stopping it; otherwise it starts the configured proxy,
+waits for readiness, requires the exact Sol parent and every selected child,
+writes or confirms only Parable-owned project agents, launches stock Claude,
+and stops only the proxy process it owns when Claude exits. When it owns both
+children, signals reach both and the meaningful Claude or proxy exit status is
+preserved.
 
 For a headless ChatGPT device flow, create configuration without starting auth
 and connect each selected vendor explicitly:
 
 ```bash
-"$PARABLE" setup --build-proxy --no-auth
+"$PARABLE" setup \
+  --non-interactive \
+  --vendors chatgpt,claude,xai \
+  --build-proxy \
+  --no-auth
 "$PARABLE" auth add chatgpt --device
 "$PARABLE" auth add claude
 "$PARABLE" auth add xai
 "$PARABLE" auth status
+cd /path/to/your/project
+"$PARABLE" claude -- --effort high
 ```
 
 Only run the Claude/xAI commands if you selected those vendors. Claude auth
@@ -53,25 +76,16 @@ prints an SSH-forward reminder for callback port `54545`; keep that same
 command alive until its newly issued callback completes. Old authorization
 URLs cannot complete a new PKCE process.
 
-Start the proxy in one terminal:
+The explicit lifecycle commands remain available as diagnostic escape hatches:
 
 ```bash
 "$PARABLE" proxy start
-```
-
-Leave it in the foreground. In a second terminal, enter the repository where
-you want Claude Code to work:
-
-```bash
-cd /path/to/your/project
 "$PARABLE" setup finalize
-"$PARABLE" claude -- --effort high
 ```
 
-`setup finalize` performs a read-only `GET /v1/models`, requires the exact Sol
-parent and every exact selected child, writes or confirms only Parable-owned
-project agents, and prints the launch command. `parable claude` repeats the
-same fail-closed catalog gate before stock Claude starts.
+`proxy start` exposes foreground logs for troubleshooting and is never required
+beside the normal launcher. `setup finalize` checks the already-running proxy
+without launching Claude. Neither command is part of ordinary onboarding.
 
 You do not need to source `cliproxy.env`: the CLI passes the generated local
 client token only to the catalog/Claude child process, converts it to
@@ -128,15 +142,19 @@ Parable adds no OAuth implementation. Its commands become exactly:
 | `auth add claude` | `--config … --claude-login --no-browser` |
 | `auth add xai` | `--config … --xai-login --no-browser` |
 | `proxy start` | `--config … --local-model` |
+| `claude` when the endpoint is absent | `--config … --local-model`, supervised |
 
-Auth subprocesses inherit the terminal. Proxy startup inherits stdio, stays
-foreground, forwards `SIGINT`, `SIGTERM`, and `SIGHUP`, and preserves the
-proxy's exit status.
+Auth subprocesses inherit the terminal. Diagnostic `proxy start` inherits
+stdio and stays foreground. The ordinary `claude` command keeps owned proxy
+output away from the Claude TUI, waits for its authenticated catalog, forwards
+`SIGINT`, `SIGTERM`, and `SIGHUP`, preserves meaningful child exits, and leaves
+no owned proxy behind. It never stops a reused listener.
 
 ## Managed proxy build
 
-`parable proxy build` and `setup --build-proxy` create a new private managed
-directory. They never patch an existing checkout. The build stops before
+Interactive `parable setup` after consent, `parable proxy build`, and
+`setup --build-proxy` create a new private managed directory. They never patch
+an existing checkout. The build stops before
 `git am` or Go if either source or patch pin differs:
 
 | Item | Pin |
@@ -194,6 +212,8 @@ After publication, `npx @parcha/parable@0.1.9 …` can replace the source
 - [Secure setup and pinned builder](evidence/o1-secure-bootstrap/EXIT.md)
 - [Native auth, safe status, and proxy lifecycle](evidence/o2-auth-proxy-lifecycle/EXIT.md)
 - [Exact finalize and hermetic first launch](evidence/o3-finalize-first-launch/EXIT.md)
+- [Two-command contract and baseline](evidence/m0-two-command-contract/EXIT.md)
+- [Owned-or-reused Claude supervisor](evidence/m1-supervised-claude/EXIT.md)
 - [Unified 30/30 live subscription verdict](evidence/y5-unified-subscription-verdict/EXIT.md)
 - [GPT effort patch live proof](evidence/e2-cliproxy-effort-live/EXIT.md)
 - [Grok subscription proof](evidence/x5-grok45-verdict/EXIT.md)

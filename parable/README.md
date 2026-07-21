@@ -134,10 +134,10 @@ provider sends the same `plan.md` through [Cursor CLI](https://cursor.com/docs/c
 
 There is also a single-harness, subscription-only path. `parable setup` builds or discovers a
 loopback CLIProxyAPI, delegates each selected user's native ChatGPT/Claude/xAI OAuth, and writes
-an exact Sol/Terra/Luna/Sonnet/Opus/Haiku/Grok cast. `parable setup finalize` checks exact
-authenticated catalog ids before it creates project-local agents; `parable claude` repeats the
-same fail-closed gate before stock Claude Code starts. No broker, shared deployment, provider API
-key, or copied OAuth credential is involved. See the
+an exact Sol/Terra/Luna/Sonnet/Opus/Haiku/Grok cast. `parable claude` starts or safely reuses the
+configured loopback proxy, waits for its authenticated catalog, requires every exact id, creates
+the project-local agents, launches stock Claude Code, and stops only the proxy process it owns.
+No broker, shared deployment, provider API key, or copied OAuth credential is involved. See the
 [end-to-end setup guide](docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md) and the generated-config
 [reference](examples/parable.claude-subscriptions.toml).
 
@@ -227,21 +227,19 @@ git clone https://github.com/miguelrios/unc-skills.git
 cd unc-skills/parable
 PARABLE="$PWD/bin/parable.js"
 "$PARABLE" install
-"$PARABLE" setup --build-proxy
+"$PARABLE" setup
 
-# terminal 1: foreground local proxy
-"$PARABLE" proxy start
-
-# terminal 2, from the project Claude should work on
+# from the project Claude should work on
 cd /path/to/your/project
-"$PARABLE" setup finalize
 "$PARABLE" claude -- --effort high
 
 # manual
 git clone https://github.com/miguelrios/unc-skills && cd unc-skills/parable && ./install.sh
 ```
 
-For a headless ChatGPT device flow, pass `--no-auth` to setup, then run
+Interactive setup offers the pinned proxy build when no executable is installed. For a headless
+ChatGPT device flow, use
+`--non-interactive --vendors chatgpt,claude,xai --build-proxy --no-auth`, then run
 `"$PARABLE" auth add chatgpt --device` plus the selected Claude/xAI auth commands. The
 [subscription guide](docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md) covers every command, generated file,
 exact model, and failure rule.
@@ -261,8 +259,8 @@ runtime difference.
 - `skills/parable/SKILL.md`: what the brain reads — the strategy, the house rules, and the
   environment facts it can't derive on its own. Deliberately small; the method is the model's.
 - `bin/parable.js` and `lib/onboarding.js`: the dependency-free installer, private subscription
-  setup, native auth delegation, aggregate auth status, pinned proxy builder, foreground proxy
-  lifecycle, exact catalog finalizer, and stock-Claude launcher.
+  setup, native auth delegation, aggregate auth status, pinned proxy builder, diagnostic
+  foreground proxy, exact catalog finalizer, and owned-or-reused stock-Claude supervisor.
 - `skills/parable/scripts/parable.py`: the dispatcher, stdlib only, with `config`, `list`,
   `finalize`, `claude`, `agents sync`, `run`, `resume`, `status`, `verify`, and `review`
   subcommands. It

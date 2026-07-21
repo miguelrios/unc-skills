@@ -18,5 +18,5 @@ if [ "$PROJECT" -eq 1 ] && [ ! -f "$CONF" ]; then
   cp "$SRC/references/parable.example.toml" "$CONF"
   echo "created config  -> $CONF (edit to add providers/executors)"
 elif [ "$PROJECT" -eq 0 ]; then
-  echo "configuration not seeded — run ./bin/parable.js setup for a private subscription setup"
+  echo "next: run ./bin/parable.js setup, then ./bin/parable.js claude in your project"
 fi
