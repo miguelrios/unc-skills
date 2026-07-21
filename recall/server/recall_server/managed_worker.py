@@ -145,6 +145,7 @@ class ManagedConnectorWorker:
         remote_rails: Mapping[str, Any] | None = None,
         interval_seconds: int = DEFAULT_INTERVAL_SECONDS,
         lease_seconds: int = DEFAULT_LEASE_SECONDS,
+        embedding_max_batches: int = 1,
     ):
         if (
             type(interval_seconds) is not int
@@ -153,6 +154,13 @@ class ManagedConnectorWorker:
             or not 30 <= lease_seconds <= 3600
         ):
             raise ValueError("managed worker timing is invalid")
+        if (
+            type(embedding_max_batches) is not int
+            or not 1 <= embedding_max_batches <= 100
+        ):
+            raise ValueError(
+                "managed worker embedding batch configuration is invalid"
+            )
         self.store = store
         self.archive = archive
         self.secret_box = secret_box
@@ -164,6 +172,7 @@ class ManagedConnectorWorker:
         self.remote_rails = dict(remote_rails or {})
         self.interval_seconds = interval_seconds
         self.lease_seconds = lease_seconds
+        self.embedding_max_batches = embedding_max_batches
         self.plane = CanonicalPlane(store, archive)
         self.retrieval = CanonicalRetrieval(store, archive)
 
@@ -444,7 +453,7 @@ class ManagedConnectorWorker:
             embedding = self.retrieval.embed_pending(
                 tenant_id=row["tenant_id"],
                 batch_size=100,
-                max_batches=1,
+                max_batches=self.embedding_max_batches,
             )
             has_more = bool(result.get("has_more", False))
             self._finish(
@@ -504,6 +513,9 @@ def run_managed_worker(
         SecretBox.from_env(),
         state_root=state_root,
         interval_seconds=interval_seconds,
+        embedding_max_batches=int(
+            os.environ.get("RECALL_CANONICAL_EMBED_MAX_BATCHES", "1")
+        ),
     )
     cycles = committed = failed = 0
     while True:

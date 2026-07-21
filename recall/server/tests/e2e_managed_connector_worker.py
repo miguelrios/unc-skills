@@ -236,7 +236,16 @@ def main():
             worker_id="worker:managed-e2e",
             remote_rails={"google.gmail": GmailRail()},
             interval_seconds=60,
+            embedding_max_batches=3,
         )
+        embedding_calls = []
+        embed_pending = worker.retrieval.embed_pending
+
+        def observed_embed_pending(**kwargs):
+            embedding_calls.append(dict(kwargs))
+            return embed_pending(**kwargs)
+
+        worker.retrieval.embed_pending = observed_embed_pending
         first = worker.run_once()
         assert first == {
             "schema_version": 1,
@@ -249,6 +258,7 @@ def main():
             "embedded": 1,
             "has_more": True,
         }
+        assert embedding_calls[0]["max_batches"] == 3
         assert SECRET not in json.dumps(first)
 
         with store.connect() as database:
