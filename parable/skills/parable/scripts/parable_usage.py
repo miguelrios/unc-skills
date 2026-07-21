@@ -51,7 +51,10 @@ HTTP_TIMEOUT = 6.0  # seconds; a probe is a pre-flight, never a bottleneck
 # the endpoint, so the brain can poll freely without ever tripping the limit. Headroom
 # does not move meaningfully second-to-second, so a stale-by-seconds read is fine.
 CACHE_TTL_SECONDS = 45
-_CACHE_PATH = Path(tempfile.gettempdir()) / f"parable-usage-cache-{os.getuid() if hasattr(os, 'getuid') else 'u'}.json"
+_CACHE_PATH = Path(os.environ.get(
+    "PARABLE_USAGE_CACHE",
+    str(Path(tempfile.gettempdir()) / f"parable-usage-cache-{os.getuid() if hasattr(os, 'getuid') else 'u'}.json"),
+))
 
 
 def _get_json(url: str, headers: dict, data: bytes | None = None) -> dict:

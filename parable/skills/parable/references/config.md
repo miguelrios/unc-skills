@@ -52,7 +52,14 @@ configured arbitrary-model Claude executor to be present. It then synchronizes p
 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`; it does not write global Claude settings.
 The source token variable, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and
 `CLAUDE_CODE_SUBAGENT_MODEL` are removed from the child environment. A forwarded `--model`
-is rejected because `brain_model` is the declarative source of truth.
+is rejected so parent selection stays inside Parable's declared policy.
+
+The launcher-level `--brain` policy can be `config`, `fable`, `sol`, or `auto`. `config` uses
+`brain_model` verbatim. `auto` prefers configured Fable while its live Claude usage is below
+80%, probes ChatGPT only when that pool is tight, and then selects Sol when it has more or
+unknown headroom. Explicit `fable` or `sol` fails unless that exact model is configured and
+present in the authenticated catalog. Put the option before the Claude argument separator:
+`parable claude --brain auto -- --effort high`.
 
 For a custom executor id such as `kimi`, `parable agents sync` creates the native Claude agent
 name `parable-kimi` with the exact configured model id. Only files carrying Parable's generated

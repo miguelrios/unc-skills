@@ -1,6 +1,7 @@
 """Subprocess-level tests: cmd_run against fake harness binaries, and the
 node installer. No network, no real codex/pi."""
 
+import hashlib
 import json
 import os
 import secrets
@@ -20,6 +21,7 @@ REPO = Path(__file__).resolve().parent.parent
 SCRIPT = REPO / "skills" / "parable" / "scripts" / "parable.py"
 NODE = shutil.which("node") or "node"
 PROXY_COMMIT = "93d74a890a44802f656d7f39a573916b2611896e"
+PROXY_PATCH_SHA256 = "d35b422da321265150fe393da80a686862ef642ee45c65a3e2fb908d689d5d1f"
 
 FAKE_CODEX = """#!/usr/bin/env bash
 cat > /dev/null   # drain the plan from stdin like the real binary
@@ -368,31 +370,32 @@ class TestClaudeSubscriptionLauncher(unittest.TestCase):
 
 
 class TestInstallerSmoke(unittest.TestCase):
-    def test_public_onboarding_surfaces_use_the_two_command_path(self):
+    def test_public_onboarding_surfaces_use_skill_bootstrap_and_auto_handoff(self):
         readme = (REPO / "README.md").read_text()
         guide = (REPO / "docs" / "CLIPROXYAPI_GPT_SUBSCRIPTION.md").read_text()
         skill = (REPO / "skills" / "parable" / "SKILL.md").read_text()
         providers = (REPO / "skills" / "parable" / "references" / "providers.md").read_text()
         installer = (REPO / "install.sh").read_text()
 
-        self.assertIn('"$PARABLE" setup\n', readme)
-        self.assertIn('"$PARABLE" claude -- --effort high', readme)
+        self.assertIn("./install.sh", readme)
+        self.assertIn("parable claude --brain auto -- --effort high", readme)
         self.assertNotIn("# terminal 1: foreground local proxy", readme)
         self.assertNotIn('"$PARABLE" setup finalize\n"$PARABLE" claude', readme)
 
-        self.assertIn('"$PARABLE" setup\n```', guide)
+        self.assertIn("./install.sh", guide)
+        self.assertIn("parable claude --brain auto -- --effort high", guide)
         self.assertIn("That is the whole ordinary path.", guide)
         self.assertIn("stops only the proxy process it owns", guide)
         self.assertIn("Neither command is part of ordinary onboarding.", guide)
 
         for surface in (skill, providers):
-            self.assertIn("parable setup", surface)
-            self.assertIn("parable claude", surface)
+            self.assertIn("parable.sh", surface)
+            self.assertIn("parable claude --brain auto", surface)
             self.assertIn("setup finalize", surface)
             self.assertIn("proxy start", surface)
 
-        self.assertIn("./bin/parable.js setup", installer)
-        self.assertIn("./bin/parable.js claude", installer)
+        self.assertIn('chmod +x "$DEST"/parable.sh', installer)
+        self.assertIn('exec "$DEST/parable.sh" "$@"', installer)
 
         help_proc = subprocess.run(
             [NODE, str(REPO / "bin" / "parable.js")],
@@ -401,7 +404,7 @@ class TestInstallerSmoke(unittest.TestCase):
             timeout=60,
         )
         self.assertEqual(help_proc.returncode, 0, help_proc.stdout + help_proc.stderr)
-        self.assertIn("supervise the local proxy", help_proc.stdout)
+        self.assertIn("supervise the proxy", help_proc.stdout)
         self.assertIn("diagnostic foreground", help_proc.stdout)
 
     def test_install_and_error_path(self):
@@ -422,6 +425,164 @@ class TestInstallerSmoke(unittest.TestCase):
             self.assertNotEqual(p2.returncode, 0)
             self.assertIn("error", (p2.stderr + p2.stdout).lower())
 
+    def test_skill_only_bootstrap_installs_reruns_and_hands_off_auto(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            home.mkdir()
+            (home / ".bashrc").write_text("# user config\n")
+            standalone = root / "installed-skill"
+            shutil.copytree(REPO / "skills" / "parable", standalone)
+            proxy = root / "fake-proxy"
+            proxy.write_text("#!/usr/bin/env sh\nexit 0\n")
+            proxy.chmod(0o755)
+            env = os.environ | {"HOME": str(home), "SHELL": "/bin/bash"}
+            for name in ("PARABLE_CONFIG", "PARABLE_CLIPROXY_BIN", "CLIPROXY_API_KEY"):
+                env.pop(name, None)
+            command = [
+                "bash", str(standalone / "parable.sh"),
+                "--non-interactive", "--vendors", "chatgpt",
+                "--proxy-bin", str(proxy),
+            ]
+
+            first = subprocess.run(
+                command, cwd=root, env=env, capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            handoff = "In a new terminal, open your project and run:"
+            launch = "parable claude --brain auto -- --effort high"
+            self.assertEqual(first.stdout.count(handoff), 1)
+            self.assertIn(launch, first.stdout)
+
+            installed = home / ".local" / "share" / "parable" / "0.1.10"
+            durable = home / ".local" / "bin" / "parable"
+            self.assertTrue((installed / "bin" / "parable.js").is_file())
+            self.assertTrue((installed / "lib" / "onboarding.js").is_file())
+            self.assertTrue((installed / "skills" / "parable" / "SKILL.md").is_file())
+            self.assertTrue(durable.is_symlink())
+            self.assertEqual(durable.resolve(), (installed / "bin" / "parable.js").resolve())
+            self.assertEqual((home / ".config" / "parable").stat().st_mode & 0o777, 0o700)
+            self.assertEqual(
+                (home / ".config" / "parable" / "parable.toml").stat().st_mode & 0o777,
+                0o600,
+            )
+            bashrc = home / ".bashrc"
+            self.assertTrue(bashrc.read_text().startswith("# user config\n"))
+            self.assertIn("# Added by Parable: user commands", bashrc.read_text())
+            fresh = subprocess.run(
+                ["bash", "--noprofile", "--rcfile", str(bashrc), "-i", "-c", "command -v parable"],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertEqual(fresh.returncode, 0, fresh.stdout + fresh.stderr)
+            self.assertIn(str(durable), fresh.stdout)
+
+            second = subprocess.run(
+                command, cwd=root, env=env, capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+            self.assertIn("runtime: already installed", second.stdout)
+            self.assertEqual(second.stdout.count(handoff), 1)
+            self.assertEqual(bashrc.read_text().count("# Added by Parable: user commands"), 1)
+
+            config = home / ".config" / "parable" / "parable.toml"
+            config.write_text(config.read_text() + "\n# user edit\n")
+            edited = subprocess.run(
+                command, cwd=root, env=env, capture_output=True, text=True, timeout=60,
+            )
+            self.assertNotEqual(edited.returncode, 0)
+            self.assertNotIn(handoff, edited.stdout)
+            self.assertTrue(config.read_text().endswith("# user edit\n"))
+
+    def test_skill_bootstrap_refuses_unrelated_command_and_missing_node(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            home.mkdir()
+            standalone = root / "installed-skill"
+            shutil.copytree(REPO / "skills" / "parable", standalone)
+            local_bin = home / ".local" / "bin"
+            local_bin.mkdir(parents=True)
+            unrelated = local_bin / "parable"
+            unrelated.write_text("user-owned\n")
+            env = os.environ | {
+                "HOME": str(home),
+                "SHELL": "/bin/bash",
+                "PATH": f"{local_bin}:{os.environ['PATH']}",
+            }
+            blocked = subprocess.run(
+                ["bash", str(standalone / "parable.sh"), "--non-interactive"],
+                cwd=root,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertNotEqual(blocked.returncode, 0)
+            self.assertIn("not managed by Parable", blocked.stderr)
+            self.assertNotIn("In a new terminal", blocked.stdout)
+            self.assertEqual(unrelated.read_text(), "user-owned\n")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            home.mkdir()
+            standalone = root / "installed-skill"
+            shutil.copytree(REPO / "skills" / "parable", standalone)
+            tools = root / "tools"
+            tools.mkdir()
+            for name in ("dirname", "tr"):
+                os.symlink(shutil.which(name), tools / name)
+            missing = subprocess.run(
+                ["/bin/bash", str(standalone / "parable.sh")],
+                cwd=root,
+                env={"HOME": str(home), "SHELL": "/bin/bash", "PATH": str(tools)},
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn("node is required", missing.stderr)
+            self.assertFalse((home / ".local" / "share" / "parable").exists())
+
+    def test_skill_bootstrap_no_auth_never_prints_ready_handoff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            home.mkdir()
+            standalone = root / "installed-skill"
+            shutil.copytree(REPO / "skills" / "parable", standalone)
+            proxy = root / "fake-proxy"
+            proxy.write_text("#!/usr/bin/env sh\nexit 0\n")
+            proxy.chmod(0o755)
+            proc = subprocess.run(
+                [
+                    "bash", str(standalone / "parable.sh"),
+                    "--non-interactive", "--vendors", "chatgpt",
+                    "--proxy-bin", str(proxy), "--no-auth",
+                ],
+                cwd=root,
+                env=os.environ | {"HOME": str(home), "SHELL": "/bin/bash"},
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("subscriptions are not authorized", proc.stdout)
+            self.assertNotIn("In a new terminal", proc.stdout)
+
+    def test_bundled_runtime_version_and_patch_match_package(self):
+        package = json.loads((REPO / "package.json").read_text())
+        version = (REPO / "skills" / "parable" / "runtime" / "VERSION").read_text().strip()
+        self.assertEqual(version, package["version"])
+        patch = (
+            REPO / "skills" / "parable" / "runtime" / "patches"
+            / "cliproxyapi-v7.2.88-claude-effort.patch"
+        )
+        self.assertEqual(hashlib.sha256(patch.read_bytes()).hexdigest(), PROXY_PATCH_SHA256)
+
     def test_global_install_does_not_create_partial_onboarding_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -439,21 +600,29 @@ class TestInstallerSmoke(unittest.TestCase):
             self.assertFalse((home / ".config" / "parable").exists())
             self.assertIn("parable setup", proc.stdout)
 
-    def test_legacy_global_install_script_does_not_create_partial_state(self):
+    def test_source_installer_enters_the_same_skill_bootstrap(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
+            proxy = home / "fake-proxy"
+            proxy.write_text("#!/usr/bin/env sh\nexit 0\n")
+            proxy.chmod(0o755)
             proc = subprocess.run(
-                ["bash", str(REPO / "install.sh")],
+                [
+                    "bash", str(REPO / "install.sh"),
+                    "--non-interactive", "--vendors", "chatgpt",
+                    "--proxy-bin", str(proxy),
+                ],
                 cwd=home,
-                env=os.environ | {"HOME": str(home)},
+                env=os.environ | {"HOME": str(home), "SHELL": "/bin/bash"},
                 capture_output=True,
                 text=True,
                 timeout=60,
             )
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             self.assertTrue((home / ".claude" / "skills" / "parable" / "SKILL.md").is_file())
-            self.assertFalse((home / ".config" / "parable").exists())
-            self.assertIn("bin/parable.js setup", proc.stdout)
+            self.assertTrue((home / ".config" / "parable" / "parable.toml").is_file())
+            self.assertTrue((home / ".local" / "bin" / "parable").is_symlink())
+            self.assertIn("In a new terminal", proc.stdout)
 
 
 class TestFirstRunSetup(unittest.TestCase):
@@ -955,9 +1124,13 @@ if args and args[0] == "build":
             root = Path(tmp)
             bindir, git_log, go_log = self.make_tools(root)
             package = root / "mutated-package"
-            for name in ("bin", "lib", "patches"):
+            for name in ("bin", "lib"):
                 shutil.copytree(REPO / name, package / name)
-            patch = package / "patches" / "cliproxyapi-v7.2.88-claude-effort.patch"
+            shutil.copytree(REPO / "skills", package / "skills")
+            patch = (
+                package / "skills" / "parable" / "runtime" / "patches"
+                / "cliproxyapi-v7.2.88-claude-effort.patch"
+            )
             patch.write_text(patch.read_text() + "\n# checksum mutation\n")
             destination = root / "checksum"
             proc = subprocess.run(
@@ -1288,6 +1461,9 @@ with open(os.environ["FAKE_PROXY_CAPTURE"], "a") as handle:
             "PATH": f"{bindir}:{os.environ['PATH']}",
             "FAKE_PROXY_CAPTURE": str(proxy_capture),
             "FAKE_CLAUDE_CAPTURE": str(claude_capture),
+            "CLAUDE_CONFIG_DIR": str(home / ".claude-native"),
+            "CODEX_HOME": str(home / ".codex-native"),
+            "PARABLE_USAGE_CACHE": str(home / "usage-cache.json"),
         }
         for name in (
             "PARABLE_CONFIG",
@@ -1383,7 +1559,10 @@ with open(os.environ["FAKE_PROXY_CAPTURE"], "a") as handle:
                 expected_agents,
             )
             self.assertEqual(report["catalog"]["requiredCount"], 8)
-            self.assertEqual(report["next"], "parable claude -- --effort high")
+            self.assertEqual(
+                report["next"],
+                "parable claude --brain auto -- --effort high",
+            )
 
             agents_dir = repo / ".claude" / "agents"
             for name, model in expected_agents.items():
@@ -1425,6 +1604,17 @@ with open(os.environ["FAKE_PROXY_CAPTURE"], "a") as handle:
             )
             self.assertTrue(captured["auth_token_present"])
             self.assertFalse(captured["source_token_present"])
+
+            auto = self.run_cli(
+                repo, env, "claude", "--brain", "auto", "--", "--print", "auto"
+            )
+            self.assertEqual(auto.returncode, 0, auto.stdout + auto.stderr)
+            self.assertIn("brain: claude-fable-5", auto.stdout)
+            captured = json.loads(claude_capture.read_text())
+            self.assertEqual(
+                captured["argv"],
+                ["--model", "claude-fable-5", "--print", "auto"],
+            )
 
     def test_finalize_subset_and_missing_exact_id_fail_closed_without_aliases(self):
         with tempfile.TemporaryDirectory() as tmp, model_server([

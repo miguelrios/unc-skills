@@ -184,10 +184,76 @@ class TestClaudeLaunch(unittest.TestCase):
         self.assertIn("CLAUDE_CODE_SUBAGENT_MODEL", source)
 
     def test_forwarded_model_override_is_rejected(self):
-        with self.assertRaisesRegex(ValueError, "parable.toml owns"):
+        with self.assertRaisesRegex(ValueError, "Parable owns"):
             parable.build_claude_launch(
                 self.cfg(), ["--model", "opus"], {"CLIPROXY_API_KEY": "x"}
             )
+
+    def auto_cfg(self):
+        cfg = self.cfg()
+        cfg["executors"]["fable_exact"] = {
+            "provider": "claude",
+            "model": "claude-fable-5",
+            "effort": "high",
+        }
+        return cfg
+
+    def test_brain_wrapper_args_are_separate_from_claude_args(self):
+        self.assertEqual(
+            parable.parse_claude_brain_args(
+                ["--", "--brain", "auto", "--", "--effort", "high"]
+            ),
+            ("auto", ["--effort", "high"]),
+        )
+        self.assertEqual(
+            parable.parse_claude_brain_args(["--", "--print", "hello"]),
+            ("config", ["--print", "hello"]),
+        )
+        with self.assertRaisesRegex(ValueError, "before the `--`"):
+            parable.parse_claude_brain_args(
+                ["--", "--print", "hello", "--brain", "fable"]
+            )
+
+    def test_auto_brain_is_fable_first_then_falls_back_on_usage(self):
+        cfg = self.auto_cfg()
+        available = {"gpt-5.6-sol", "claude-fable-5", "kimi-k3"}
+
+        def reports(claude, codex):
+            def item(pool, used):
+                if used is None:
+                    return {"pool": pool, "status": "unknown", "windows": []}
+                return {
+                    "pool": pool,
+                    "status": "ok",
+                    "windows": [{"window": "7d", "used_pct": used}],
+                }
+            return [item("claude", claude), item("codex", codex)]
+
+        model, _ = parable.resolve_claude_brain(cfg, "auto", available, reports(20, 5))
+        self.assertEqual(model, "claude-fable-5")
+        model, _ = parable.resolve_claude_brain(cfg, "auto", available, reports(None, 5))
+        self.assertEqual(model, "claude-fable-5")
+        model, _ = parable.resolve_claude_brain(cfg, "auto", available, reports(85, None))
+        self.assertEqual(model, "gpt-5.6-sol")
+        model, _ = parable.resolve_claude_brain(cfg, "auto", available, reports(90, 30))
+        self.assertEqual(model, "gpt-5.6-sol")
+        model, _ = parable.resolve_claude_brain(cfg, "auto", available, reports(90, 95))
+        self.assertEqual(model, "claude-fable-5")
+
+    def test_explicit_and_unconfigured_brains_fail_or_fall_back_cleanly(self):
+        cfg = self.auto_cfg()
+        available = {"gpt-5.6-sol", "claude-fable-5", "kimi-k3"}
+        self.assertEqual(
+            parable.resolve_claude_brain(cfg, "fable", available)[0],
+            "claude-fable-5",
+        )
+        del cfg["executors"]["fable_exact"]
+        self.assertEqual(
+            parable.resolve_claude_brain(cfg, "auto", available, [])[0],
+            "gpt-5.6-sol",
+        )
+        with self.assertRaisesRegex(ValueError, "rerun setup"):
+            parable.resolve_claude_brain(cfg, "fable", available)
 
     def test_custom_model_agent_is_namespaced_and_exact(self):
         cfg = self.cfg()
