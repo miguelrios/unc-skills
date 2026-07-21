@@ -1,6 +1,8 @@
 # autoqa
 
-Point it at a repo; it QAs the running app like an engineer would.
+Point it at a repo; it QAs the running app like an engineer would. It works in Claude Code, Codex, and pi.
+
+[![skills.sh](https://skills.sh/b/miguelrios/unc-skills)](https://skills.sh/miguelrios/unc-skills/autoqa)
 
 1. **RESOLVE** — target repo, target instance, and the repo's `AUTOQA.md` config if it
    ships one (pre-answered discovery).
@@ -14,3 +16,18 @@ Point it at a repo; it QAs the running app like an engineer would.
 
 The invariant: **no witness, no verdict.** An `AUTOQA.md` in the repo makes repeat runs
 instant — the skill writes one from its first discovery pass and skips Phase 1 forever after.
+
+## Install
+
+skills.sh:
+
+```bash
+npx skills add miguelrios/unc-skills --skill autoqa
+```
+
+Claude Code:
+
+```bash
+claude plugin marketplace add miguelrios/unc-skills
+claude plugin install autoqa@unc-skills
+```
