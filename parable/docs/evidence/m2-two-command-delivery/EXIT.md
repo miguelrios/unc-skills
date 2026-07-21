@@ -72,8 +72,9 @@ credential adapter was introduced.
 - Complete Parable suite: PASS, 107/107.
 - npm pack dry-run: PASS, 33 files.
 - Desktop/mobile companion renders: PASS.
-- Focused PR: pending.
-- Verified merged `main`: pending.
+- Focused PR: [#206](https://github.com/miguelrios/unc-skills/pull/206),
+  merged 2026-07-21T00:08:26Z.
+- Verified merged `main`: `c4151dc273cbc081c9e4a2d9137d945e85fd8a0e`.
 
 ## exit → human release verdict
 
