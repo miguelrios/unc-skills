@@ -208,6 +208,22 @@ class ComposioConnectionBrokerTests(unittest.TestCase):
         )
         self.assertEqual(rails[0].calls, [("gmail.users.getProfile", {"userId": "me"})])
 
+    def test_full_mail_scope_covers_readonly_without_hiding_observed_authority(self):
+        broker, _client, rails = self.broker(
+            self.account(requested_scopes=["https://mail.google.com/"])
+        )
+        tokens = broker.complete_connection(
+            user_id="principal:synthetic:owner",
+            connector_id="google.gmail",
+            expected_connected_account_id="ca_synthetic_account_123",
+            callback_connected_account_id="ca_synthetic_account_123",
+            callback_status="success",
+            required_scopes=("https://www.googleapis.com/auth/gmail.readonly",),
+        )
+
+        self.assertEqual(tokens.granted_scopes, ("https://mail.google.com/",))
+        self.assertEqual(rails[0].calls, [("gmail.users.getProfile", {"userId": "me"})])
+
     def test_callback_replay_or_cross_user_account_fails_before_probe(self):
         cases = [
             ({}, "ca_different_account_456", "oauth_connection_mismatch"),

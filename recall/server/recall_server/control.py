@@ -41,6 +41,23 @@ DEVICE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{2,63}\Z")
 GOOGLE_CONNECTORS = frozenset(
     {"google.gmail", "google.calendar", "google.contacts", "google.drive"}
 )
+GOOGLE_SCOPE_SUPERSETS = {
+    "https://www.googleapis.com/auth/gmail.readonly": frozenset(
+        {
+            "https://mail.google.com/",
+            "https://www.googleapis.com/auth/gmail.modify",
+        }
+    ),
+    "https://www.googleapis.com/auth/calendar.readonly": frozenset(
+        {"https://www.googleapis.com/auth/calendar"}
+    ),
+    "https://www.googleapis.com/auth/contacts.readonly": frozenset(
+        {"https://www.googleapis.com/auth/contacts"}
+    ),
+    "https://www.googleapis.com/auth/drive.readonly": frozenset(
+        {"https://www.googleapis.com/auth/drive"}
+    ),
+}
 INSTALLATION_STATES = frozenset(
     {"configured", "enabled", "paused", "revoked", "uninstalled"}
 )
@@ -68,6 +85,17 @@ class ControlError(RuntimeError):
 
 def _digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _scopes_cover(
+    required: set[str] | tuple[str, ...],
+    granted: set[str] | tuple[str, ...],
+) -> bool:
+    observed = set(granted)
+    return all(
+        scope in observed or bool(GOOGLE_SCOPE_SUPERSETS.get(scope, ()) & observed)
+        for scope in required
+    )
 
 
 def _now() -> datetime:
@@ -638,8 +666,13 @@ class ComposioConnectionBroker:
         observed_scopes = self._field(account, "requested_scopes")
         if observed_scopes is not None and (
             not isinstance(observed_scopes, list)
-            or not set(required_scopes).issubset(
-                {value for value in observed_scopes if isinstance(value, str)}
+            or not _scopes_cover(
+                required_scopes,
+                {
+                    value
+                    for value in observed_scopes
+                    if isinstance(value, str)
+                },
             )
         ):
             raise ControlError("oauth_scope_insufficient", 403)
@@ -650,7 +683,7 @@ class ComposioConnectionBroker:
         )
         return OAuthTokens(
             subject_id=f"{toolkit}:{expected_connected_account_id}",
-            granted_scopes=tuple(sorted(required_scopes)),
+            granted_scopes=tuple(sorted(observed_scopes or required_scopes)),
             credentials={
                 "user_id": user_id,
                 "connected_account_id": expected_connected_account_id,
@@ -1278,7 +1311,7 @@ class ControlPlane:
             tokens = provider.exchange(
                 code=code, code_verifier=context.get("code_verifier", "")
             )
-        if not required_scopes.issubset(set(tokens.granted_scopes)):
+        if not _scopes_cover(required_scopes, tokens.granted_scopes):
             raise ControlError("oauth_scope_insufficient", 403)
         connection_id = uuid.uuid4()
         encrypted = self.secret_box.seal(
