@@ -1,5 +1,24 @@
 #!/bin/sh
 set -eu
-HERE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+
+# Resolve the installed entrypoint before deriving the bundle root. The normal
+# installation exposes this file through ~/.local/bin/recall-brain; using $0
+# directly would otherwise select ~/.local as the runtime and library root.
+SOURCE=$0
+LINKS=0
+while [ -L "$SOURCE" ]; do
+  LINKS=$((LINKS + 1))
+  [ "$LINKS" -le 40 ] || {
+    echo "recall-brain symlink chain is too deep" >&2
+    exit 1
+  }
+  SOURCE_DIR=$(CDPATH= cd -P -- "$(dirname -- "$SOURCE")" && pwd)
+  TARGET=$(readlink "$SOURCE")
+  case "$TARGET" in
+    /*) SOURCE=$TARGET ;;
+    *) SOURCE=$SOURCE_DIR/$TARGET ;;
+  esac
+done
+HERE=$(CDPATH= cd -P -- "$(dirname -- "$SOURCE")/.." && pwd)
 export PYTHONPATH="$HERE/lib${PYTHONPATH:+:$PYTHONPATH}"
 exec "$HERE/runtime/bin/python3" -m client.cli "$@"

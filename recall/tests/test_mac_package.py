@@ -433,6 +433,28 @@ class MacPackageTest(unittest.TestCase):
         self.assertFalse(json.loads(deleted.stdout)["state_retained"])
         self.assertFalse(prefix.exists())
 
+    def test_packaged_cli_resolves_the_installed_root_through_a_symlink(self) -> None:
+        archive = self.build("symlink-entrypoint.tar.gz")
+        extracted = self.root / "symlink-entrypoint-package"
+        extracted.mkdir()
+        with tarfile.open(archive, "r:gz") as package_archive:
+            package_archive.extractall(extracted, filter="data")
+        package = extracted / "recall-brain-macos"
+        self._use_host_runtime(package)
+
+        user_bin = self.root / "user-bin"
+        user_bin.mkdir()
+        entrypoint = user_bin / "recall-brain"
+        os.symlink(package / "bin" / "recall-brain", entrypoint)
+
+        result = subprocess.run(
+            [str(entrypoint), "mac-route-info", "--help"],
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--source", result.stdout)
+
     def test_install_verifies_bundle_restores_failed_upgrade_and_supports_rollback(self) -> None:
         archive = self.build("upgrade.tar.gz")
         extracted = self.root / "upgrade-package"
