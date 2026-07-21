@@ -133,3 +133,12 @@ mechanical and prompt/agentic changes, not a deterministic model-name router.
 9. npm publication is a human-authorized external state change.
 10. ZEN: declarative cast, prose specialization, one skill entrypoint, one
     durable command, and one honest fresh-terminal handoff.
+
+## Execution log
+
+- **R0 — complete (2026-07-21):** exact Fable/Sol peers, model-specific stage
+  directions, task-fit routing menus, and supported agent effort landed through
+  [PR #211](https://github.com/miguelrios/unc-skills/pull/211). Evidence:
+  `docs/evidence/r0-evidence-informed-cast/EXIT.md`. Parable improves by
+  keeping selection agentic while giving the parent much better priors. Next:
+  R1 skill-first magical install and automatic brain choice.
