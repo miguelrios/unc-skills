@@ -5,7 +5,7 @@
   "parable_baseline_head": "d7754a73039d0305ffb8305255c72e9961d6b761",
   "delivery": {
     "guide": "docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md",
-    "patch": "patches/cliproxyapi-v7.2.88-claude-effort.patch",
+    "patch": "skills/parable/runtime/patches/cliproxyapi-v7.2.88-claude-effort.patch",
     "npm_package_includes_guide_and_patch": true,
     "patch_sha256": "d35b422da321265150fe393da80a686862ef642ee45c65a3e2fb908d689d5d1f",
     "format_patch_stream_sha256": "2d6c5371b79ffabc027f93cdedd817d83f9554c81c6df294f064395134163582",

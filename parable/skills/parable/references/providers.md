@@ -157,22 +157,23 @@ tool — no API keys and no CLI subprocess. `parable.py run` refuses them by des
 owns subagent dispatch directly. If the current harness has no native agent-spawn tool, this
 provider is unavailable.
 
-When the session itself is launched with `parable claude`, this same provider can carry exact
+When the session itself is launched with `parable claude --brain auto`, this same provider can carry exact
 catalog model ids exposed by a localhost Claude-compatible proxy:
 
 For a new subscription-only setup, use the CLI rather than hand-writing the
 following reference config:
 
 ```bash
-parable install
-parable setup
+# Run the parable.sh bundled beside SKILL.md; it installs the CLI and enters setup.
+bash /path/to/installed/parable/parable.sh
 # in the working repository
-parable claude -- --effort high
+parable claude --brain auto -- --effort high
 ```
 
-ChatGPT is mandatory for the exact Sol parent; interactive setup asks whether
+ChatGPT is mandatory for the Sol fallback parent; interactive setup asks whether
 to add Claude and xAI and offers the pinned build when no proxy is installed.
-`parable claude` owns proxy start, authenticated readiness, exact catalog sync,
+`parable claude --brain auto` prefers Fable while its pool has room and moves to
+Sol when it is tight. The launcher owns proxy start, authenticated readiness, exact catalog sync,
 stock-Claude launch, signal forwarding, and cleanup. It reuses but never stops
 a healthy pre-existing endpoint. `parable proxy start` and
 `parable setup finalize` remain explicit troubleshooting commands. Headless

@@ -142,3 +142,10 @@ mechanical and prompt/agentic changes, not a deterministic model-name router.
   `docs/evidence/r0-evidence-informed-cast/EXIT.md`. Parable improves by
   keeping selection agentic while giving the parent much better priors. Next:
   R1 skill-first magical install and automatic brain choice.
+- **R1 — complete (2026-07-21):** the installed skill now carries its pinned
+  runtime and one `parable.sh` bootstrap; it installs a durable command, enters
+  setup/auth, and hands off to real Fable-first `--brain auto` selection through
+  [PR #213](https://github.com/miguelrios/unc-skills/pull/213). Evidence:
+  `docs/evidence/r1-skill-first-install/EXIT.md`. Parable improves by collapsing
+  plugin, standalone-skill, and source onboarding into one honest journey.
+  Next: R2 merged-main audit and release verdict.

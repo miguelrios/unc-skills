@@ -1,6 +1,6 @@
 # GPT, Claude, and Grok subscriptions in one Claude Code session
 
-Parable can run stock Claude Code with exact `gpt-5.6-sol` as the parent and
+Parable can run stock Claude Code with exact Fable or `gpt-5.6-sol` as the parent and
 exact GPT, Claude, and Grok named agents through one user-owned, loopback-only
 CLIProxyAPI process.
 
@@ -19,33 +19,54 @@ Kimi is paused and is not a setup option.
 
 ## Start here
 
-Until the verified `0.1.9` package is explicitly published to npm, run the CLI
-from source:
+Install the Parable skill with skills.sh or the Claude Code plugin marketplace:
+
+```bash
+npx skills add miguelrios/unc-skills --skill parable
+
+# or
+claude plugin marketplace add miguelrios/unc-skills
+claude plugin install parable@unc-skills
+```
+
+Then ask Claude Code to **Set up Parable**. For a plugin install, the explicit
+skill invocation is `/parable:parable install`; for a standalone skill it is
+`/parable install`. The skill runs its bundled `parable.sh`, which installs an
+immutable versioned runtime, creates `~/.local/bin/parable`, adds that directory
+to the appropriate shell startup file when necessary, and enters setup/auth.
+It does not download CLI code.
+
+Until the verified `0.1.10` package is explicitly published to npm, a source
+checkout uses the exact same entrypoint:
 
 ```bash
 git clone https://github.com/miguelrios/unc-skills.git
 cd unc-skills/parable
-PARABLE="$PWD/bin/parable.js"
-
-"$PARABLE" install
-"$PARABLE" setup
+./install.sh
 ```
 
-Setup always selects ChatGPT because Sol is the parent. In interactive mode it
+Setup always selects ChatGPT because Sol is the fallback parent. In interactive mode it
 asks whether to add Claude and xAI, then starts each selected provider's native
 authorization flow. Parable first discovers an existing proxy from
 `--proxy-bin`, `PARABLE_CLIPROXY_BIN`, or `PATH`; when none exists, setup asks
 once for permission to download and build the pinned source. Answering no
 performs no network or build work.
 
-Then enter the repository where Claude should work and launch it:
+After successful setup, enter the repository where Claude should work in a new
+terminal and launch it:
 
 ```bash
 cd /path/to/your/project
-"$PARABLE" claude -- --effort high
+parable claude --brain auto -- --effort high
 ```
 
-That is the whole ordinary path. `parable claude` authenticates a readiness
+That is the whole ordinary path. `auto` prefers Fable when it is configured and
+its Claude usage is below 80%. When that pool is tight it selects Sol if the
+ChatGPT pool has more or unknown headroom; if both are tight, it takes the less
+used pool. Unknown Claude usage keeps the preferred Fable parent. Use
+`--brain fable` or `--brain sol` to pin one explicitly.
+
+`parable claude` authenticates a readiness
 probe to the configured loopback `/v1/models`. It reuses a healthy endpoint
 without owning or stopping it; otherwise it starts the configured proxy,
 waits for readiness, requires the exact Sol parent and every selected child,
@@ -58,17 +79,17 @@ For a headless ChatGPT device flow, create configuration without starting auth
 and connect each selected vendor explicitly:
 
 ```bash
-"$PARABLE" setup \
+bash /path/to/installed/parable/parable.sh \
   --non-interactive \
   --vendors chatgpt,claude,xai \
   --build-proxy \
   --no-auth
-"$PARABLE" auth add chatgpt --device
-"$PARABLE" auth add claude
-"$PARABLE" auth add xai
-"$PARABLE" auth status
+parable auth add chatgpt --device
+parable auth add claude
+parable auth add xai
+parable auth status
 cd /path/to/your/project
-"$PARABLE" claude -- --effort high
+parable claude --brain auto -- --effort high
 ```
 
 Only run the Claude/xAI commands if you selected those vendors. Claude auth
@@ -79,8 +100,8 @@ URLs cannot complete a new PKCE process.
 The explicit lifecycle commands remain available as diagnostic escape hatches:
 
 ```bash
-"$PARABLE" proxy start
-"$PARABLE" setup finalize
+parable proxy start
+parable setup finalize
 ```
 
 `proxy start` exposes foreground logs for troubleshooting and is never required
@@ -96,7 +117,7 @@ client token only to the catalog/Claude child process, converts it to
 Automation must state its vendor selection and include ChatGPT:
 
 ```bash
-"$PARABLE" setup \
+bash /path/to/installed/parable/parable.sh \
   --non-interactive \
   --vendors chatgpt,claude,xai \
   --build-proxy \
@@ -107,8 +128,8 @@ Supported selections are:
 
 | Selection | Parent and named children |
 |---|---|
-| `chatgpt` | parent Sol; Terra and Luna agents |
-| `claude` | exact Sonnet 5, Opus 4.8, and Haiku 4.5 agents |
+| `chatgpt` | exact Sol, Terra, and Luna (Sol is fallback parent and a peer under Fable) |
+| `claude` | exact Fable 5, Sonnet 5, Opus 4.8, and Haiku 4.5 agents |
 | `xai` | exact Grok 4.5 agent |
 
 Unknown vendors, a selection without ChatGPT, missing executables, partial
@@ -191,7 +212,7 @@ exact id. Subscription plan limits and provider terms still apply.
 
 ## npm release boundary
 
-GitHub source is currently `0.1.9`; the npm registry is still `0.1.7`. The
+GitHub source is currently `0.1.10`; the npm registry is still `0.1.7`. The
 source package passes its complete suite and `npm pack --dry-run`, but this
 repository work does not authorize publication.
 
@@ -204,8 +225,8 @@ npm run pack:check
 npm publish --access public
 ```
 
-After publication, `npx @parcha/parable@0.1.9 …` can replace the source
-`"$PARABLE" …` commands above.
+After publication, `npx @parcha/parable@0.1.10 …` can replace the source
+installer above.
 
 ## Evidence
 

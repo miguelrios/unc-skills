@@ -1,9 +1,31 @@
 ---
 name: parable
-description: Orchestrator for multi-task implementation batches. The session model plans each task, routes it to the cheapest capable executor (native subagents when available; configured Codex, pi, or Cursor executors everywhere), and verifies and reviews the results. Invoke when the user names Parable, hands over a list of tasks to implement, says "work through my backlog," "knock out these issues," or "use cheap/fast models for this." Not for a single isolated bugfix or a standalone code review.
+description: Orchestrator and installer for multi-model implementation batches. Invoke when the user asks to install, set up, onboard, or connect subscriptions to Parable; names Parable; hands over a backlog; or asks to route work across models. For first-time install intent, run the bundled parable.sh before ordinary session guidance. Not for a single isolated bugfix or a standalone code review.
 ---
 
 # parable — divide and conquer
+
+## First-time install and subscription onboarding
+
+When the user asks to install, set up, or onboard Parable, run `parable.sh` from the directory
+that contains this `SKILL.md`. Resolve that installed skill directory directly; plugin caches
+and standalone skill installs live in different roots. Do not replace this with `curl`, `npx`,
+or a repository clone: the skill carries the pinned runtime it needs.
+
+The script installs an immutable versioned runtime, creates the durable user command
+`parable`, ensures its user bin directory loads in a new terminal, and enters the existing
+interactive setup and native vendor authorization flow. Run it in the foreground. Forward
+setup flags only when the user supplied them; for example, a headless selection can use
+`parable.sh --non-interactive --vendors chatgpt,claude,xai --no-auth`. That staged mode stops
+before the ready handoff and tells the user to run `parable auth add` for each vendor. Never
+print the final handoff yourself after a failed or unauthenticated script—the script prints it
+only after ordinary setup and authorization succeed:
+
+```text
+In a new terminal, open your project and run:
+
+  parable claude --brain auto -- --effort high
+```
 
 You are the **brain**: the most capable model in the room, and the most expensive. The strategy
 is division of labor: carve the work into the smallest clusters that can proceed independently —
@@ -29,8 +51,8 @@ fake runtime parity. With no configured checks, `parable-verify.sh` passes vacuo
 user declares some.
 
 When the config contains `[claude]`, the session should have been entered through
-`parable claude`. Ordinary first-run subscription onboarding is two commands:
-`parable setup`, then `parable claude` in the working repository. Setup delegates
+`parable claude --brain auto`. Ordinary skill-first subscription onboarding is one
+`parable.sh` run followed by that fresh-terminal launch command. Setup delegates
 native vendor authorization; the launcher starts or reuses the loopback proxy,
 checks the exact catalog, synchronizes agents, and cleans up only a proxy it owns.
 `parable auth add`, `parable proxy start`, and `parable setup finalize` remain
@@ -84,9 +106,11 @@ this tool exists to prevent. The per-pool selection detail lives in `references/
   `parable-config.sh`; for a bare Claude alias, use a general-purpose agent with the executor's
   model. If there is no native agent-spawn tool, that executor is unavailable; choose a
   CLI-backed executor.
-- `parable claude [ARGS...]` — safely reuse a healthy configured loopback proxy or own its
+- `parable claude [--brain auto|fable|sol|config] [-- ARGS...]` — safely reuse a healthy configured loopback proxy or own its
   start/readiness/cleanup lifecycle, require every exact configured id, idempotently synchronize
-  Parable-owned project agents, and launch the configured brain model. `parable setup finalize`
+  Parable-owned project agents, and launch the selected brain model. `auto` prefers Fable while
+  its pool is below the tight threshold, then falls back to Sol by live usage; `fable` and `sol`
+  pin either parent, and `config` uses `brain_model`. `parable setup finalize`
   performs only the catalog/sync diagnostic against an already-running proxy. These are package
   CLI commands, not skill scripts.
 - `scripts/parable-resume.sh <run-dir> "<message>"` — continue an executor's existing session

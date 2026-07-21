@@ -141,6 +141,9 @@ No broker, shared deployment, provider API key, or copied OAuth credential is in
 [end-to-end setup guide](docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md) and the generated-config
 [reference](examples/parable.claude-subscriptions.toml).
 
+`parable claude --brain auto` prefers Fable while the Claude pool has room and moves the parent
+to Sol when that pool becomes tight. `--brain fable` and `--brain sol` pin either parent.
+
 The generated cast gives the parent evidence-informed stage directions: Fable for ambiguous
 planning and architecture; Sol for long implementation, difficult debugging, and high-recall
 review; Terra for React and frontend work; Luna for data transforms and mechanical work; Sonnet
@@ -212,12 +215,14 @@ skills.sh:
 
 ```bash
 npx skills add miguelrios/unc-skills --skill parable
+# Then, in Claude Code: ask "Set up Parable" (or invoke `/parable install`).
 ```
 
 ```bash
 # Claude Code plugin marketplace
 claude plugin marketplace add miguelrios/unc-skills
 claude plugin install parable@unc-skills
+# Then, in Claude Code: `/parable:parable install`
 
 # Codex plugin marketplace
 codex plugin marketplace add miguelrios/unc-skills
@@ -230,25 +235,23 @@ pi install git:github.com/miguelrios/unc-skills
 curl https://cursor.com/install -fsS | bash
 export CURSOR_API_KEY="..."
 
-# standalone CLI from source (npm remains 0.1.7 until the 0.1.9 release gate)
+# standalone skill/runtime from source (npm remains 0.1.7 until the 0.1.10 release gate)
 git clone https://github.com/miguelrios/unc-skills.git
 cd unc-skills/parable
-PARABLE="$PWD/bin/parable.js"
-"$PARABLE" install
-"$PARABLE" setup
+./install.sh
 
-# from the project Claude should work on
+# after setup succeeds, in a new terminal and from the project Claude should work on
 cd /path/to/your/project
-"$PARABLE" claude -- --effort high
+parable claude --brain auto -- --effort high
 
-# manual
-git clone https://github.com/miguelrios/unc-skills && cd unc-skills/parable && ./install.sh
+# project-local skill copy without global subscription onboarding
+./install.sh --project
 ```
 
 Interactive setup offers the pinned proxy build when no executable is installed. For a headless
 ChatGPT device flow, use
-`--non-interactive --vendors chatgpt,claude,xai --build-proxy --no-auth`, then run
-`"$PARABLE" auth add chatgpt --device` plus the selected Claude/xAI auth commands. The
+`parable.sh --non-interactive --vendors chatgpt,claude,xai --build-proxy --no-auth`, then run
+`parable auth add chatgpt --device` plus the selected Claude/xAI auth commands. The
 [subscription guide](docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md) covers every command, generated file,
 exact model, and failure rule.
 
@@ -266,8 +269,10 @@ runtime difference.
 
 - `skills/parable/SKILL.md`: what the brain reads — the strategy, the house rules, and the
   environment facts it can't derive on its own. Deliberately small; the method is the model's.
-- `bin/parable.js` and `lib/onboarding.js`: the dependency-free installer, private subscription
-  setup, native auth delegation, aggregate auth status, pinned proxy builder, diagnostic
+- `skills/parable/parable.sh` and `skills/parable/runtime/`: the portable, pinned bootstrap and
+  dependency-free CLI runtime. The package-level `bin/parable.js` / `lib/onboarding.js` are thin
+  compatibility entrypoints. The runtime provides private subscription setup, native auth delegation,
+  aggregate auth status, pinned proxy builder, diagnostic
   foreground proxy, exact catalog finalizer, and owned-or-reused stock-Claude supervisor.
 - `skills/parable/scripts/parable.py`: the dispatcher, stdlib only, with `config`, `list`,
   `finalize`, `claude`, `agents sync`, `run`, `resume`, `status`, `verify`, and `review`
