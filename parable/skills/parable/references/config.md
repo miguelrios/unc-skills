@@ -80,7 +80,7 @@ Unknown `type` values fail validation loudly (future harnesses will extend this 
 |---|---|---|
 | `provider` | required | a `[providers.*]` id |
 | `model` | required | provider-form model id |
-| `effort` | `high` | `minimal`–`ultra` (`max`/`ultra` exist on GPT-5.6-class models; `ultra` flips codex into proactive multi-agent delegation — the executor spawns its own subagent threads, highest per-turn burn, so reserve it for deliberately dispatched batch clusters); ALWAYS set it explicitly — parable pins it on dispatch precisely so runs never inherit the local user's harness config, which would make cost non-reproducible across machines. pi executors map it to `--thinking`, additionally accept `off`, and cap at `max` (no `ultra`). `parable-run.sh --effort <level>` overrides it for one dispatch |
+| `effort` | `high` | `minimal`–`ultra` for Codex (`max`/`ultra` exist on GPT-5.6-class models; `ultra` flips codex into proactive multi-agent delegation). pi maps this to `--thinking`, additionally accepts `off`, and caps at `max`. Claude `subagent` accepts `low`, `medium`, `high`, `xhigh`, or `max`; Parable writes it into generated agent frontmatter. ALWAYS set it explicitly so runs never inherit a user's local harness default. `parable-run.sh --effort <level>` overrides CLI-backed executors for one dispatch. |
 | `reasoning` | true | pi only: the generated model entry's reasoning flag |
 | `model_overrides` | `{}` | pi only: raw fields merged into the generated model entry last (`maxTokens`, model-level `compat`, …) — pi's analog of `extra_config` |
 | `cost` | — | `{ in, out, cache_in }` $/Mtok; informational + tie-breaks |
@@ -110,9 +110,11 @@ Unknown `type` values fail validation loudly (future harnesses will extend this 
 
 ## `[routing]`
 
-Keys are task classes (`mechanical`, `feature`, `refactor_wide`, `gnarly`, `review`,
-`smoke_test`, `escalation`), values are ordered executor-id lists. `notes` is prose for the
-brain. Chains referencing unknown executors fail validation.
+Keys are task classes such as `mechanical`, `data_transform`, `frontend`, `feature`,
+`refactor_wide`, `gnarly`, `review`, `smoke_test`, and `architecture`. Their executor-id lists
+are capable-peer menus selected by task fit and live subscription headroom, not priority
+ladders. `escalation` is the exception: it is ordered. `notes` is prose for the brain. Lists
+referencing unknown executors fail validation.
 
 ## Runtime artifacts
 

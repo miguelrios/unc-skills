@@ -94,6 +94,17 @@ class TestValidation(unittest.TestCase):
         problems = parable.validate_config(cfg)
         self.assertTrue(any("effort='ultra'" in p for p in problems))
 
+    def test_claude_subagent_effort_matches_agent_frontmatter(self):
+        cfg = self.cfg(providers={"claude": {"type": "subagent"}})
+        cfg["executors"]["peer"] = {
+            "provider": "claude", "model": "gpt-5.6-terra", "effort": "xhigh",
+        }
+        self.assertEqual([p for p in parable.validate_config(cfg) if "effort" in p], [])
+        for unsupported in ("minimal", "ultra"):
+            cfg["executors"]["peer"]["effort"] = unsupported
+            problems = parable.validate_config(cfg)
+            self.assertTrue(any(f"effort='{unsupported}'" in p for p in problems))
+
     def test_codex_provider_requires_responses(self):
         cfg = self.cfg(providers={"fw": {"type": "codex", "base_url": "https://x", "env_key": "K", "wire_api": "chat"}})
         problems = parable.validate_config(cfg)
@@ -184,6 +195,7 @@ class TestClaudeLaunch(unittest.TestCase):
         rendered = parable.render_claude_agent("kimi", cfg["executors"]["kimi"])
         self.assertIn("name: parable-kimi", rendered)
         self.assertIn('model: "kimi-k3"', rendered)
+        self.assertIn('effort: "high"', rendered)
         self.assertNotIn("CLIPROXY_API_KEY", rendered)
         self.assertEqual(
             parable.claude_required_models(cfg), ["gpt-5.6-sol", "kimi-k3"]

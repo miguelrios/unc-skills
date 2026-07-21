@@ -532,6 +532,7 @@ class TestFirstRunSetup(unittest.TestCase):
             self.assertIn('model = "gpt-5.6-luna"', config)
             for absent in (
                 "grok-4.5",
+                "claude-fable-5",
                 "claude-sonnet-5",
                 "claude-opus-4-8",
                 "claude-haiku-4-5-20251001",
@@ -600,12 +601,24 @@ class TestFirstRunSetup(unittest.TestCase):
                 "gpt-5.6-sol",
                 "gpt-5.6-terra",
                 "gpt-5.6-luna",
+                "claude-fable-5",
                 "claude-sonnet-5",
                 "claude-opus-4-8",
                 "claude-haiku-4-5-20251001",
                 "grok-4.5",
             ):
                 self.assertIn(model, config)
+            self.assertIn('effort = "xhigh"', config)
+            self.assertIn('effort = "medium"', config)
+            self.assertIn('effort = "low"', config)
+            self.assertIn(
+                'frontend=["terra","sol_exact","sonnet_exact"]',
+                config.replace(" ", ""),
+            )
+            self.assertIn(
+                'architecture=["fable_exact","opus_exact","sol_exact"]',
+                config.replace(" ", ""),
+            )
             self.assertNotIn("kimi", config.lower())
 
     def test_setup_rejects_selection_binary_and_unsafe_state_without_writes(self):
@@ -1311,14 +1324,17 @@ with open(os.environ["FAKE_PROXY_CAPTURE"], "a") as handle:
             "gpt-5.6-sol",
             "gpt-5.6-terra",
             "gpt-5.6-luna",
+            "claude-fable-5",
             "claude-sonnet-5",
             "claude-opus-4-8",
             "claude-haiku-4-5-20251001",
             "grok-4.5",
         ]
         expected_agents = {
+            "parable-sol-exact": "gpt-5.6-sol",
             "parable-terra": "gpt-5.6-terra",
             "parable-luna": "gpt-5.6-luna",
+            "parable-fable-exact": "claude-fable-5",
             "parable-sonnet-exact": "claude-sonnet-5",
             "parable-opus-exact": "claude-opus-4-8",
             "parable-haiku-exact": "claude-haiku-4-5-20251001",
@@ -1366,7 +1382,7 @@ with open(os.environ["FAKE_PROXY_CAPTURE"], "a") as handle:
                 {item["name"]: item["model"] for item in report["agents"]},
                 expected_agents,
             )
-            self.assertEqual(report["catalog"]["requiredCount"], 7)
+            self.assertEqual(report["catalog"]["requiredCount"], 8)
             self.assertEqual(report["next"], "parable claude -- --effort high")
 
             agents_dir = repo / ".claude" / "agents"
@@ -1374,6 +1390,10 @@ with open(os.environ["FAKE_PROXY_CAPTURE"], "a") as handle:
                 target = agents_dir / f"{name}.md"
                 self.assertTrue(target.is_file())
                 self.assertIn(f'model: "{model}"', target.read_text())
+                self.assertRegex(
+                    target.read_text(),
+                    r'(?m)^effort: "(?:low|medium|high|xhigh|max)"$',
+                )
                 self.assertNotIn(token, target.read_text())
             self.assertTrue((agents_dir / "handwritten.md").is_file())
             self.assertTrue((agents_dir / "parable-handwritten.md").is_file())
@@ -1387,7 +1407,7 @@ with open(os.environ["FAKE_PROXY_CAPTURE"], "a") as handle:
             confirmed_report = json.loads(confirmed.stdout)
             self.assertEqual(confirmed_report["sync"], {
                 "changed": 0,
-                "unchanged": 6,
+                "unchanged": 8,
                 "removed": 0,
             })
             for path, snapshot in before.items():
@@ -1435,6 +1455,7 @@ with open(os.environ["FAKE_PROXY_CAPTURE"], "a") as handle:
                 {item["name"]: item["model"] for item in report["agents"]},
                 {
                     "parable-luna": "gpt-5.6-luna",
+                    "parable-sol-exact": "gpt-5.6-sol",
                     "parable-terra": "gpt-5.6-terra",
                 },
             )
@@ -1443,6 +1464,7 @@ with open(os.environ["FAKE_PROXY_CAPTURE"], "a") as handle:
             "gpt-5.6-sol",
             "gpt-5.6-terra",
             "gpt-5.6-luna",
+            "claude-fable-5",
             "claude-sonnet-5",
             "claude-opus-4-8",
             "claude-haiku-4-5-20251001",
@@ -1486,6 +1508,7 @@ class TestMagicalClaudeSupervisor(unittest.TestCase):
         "gpt-5.6-sol",
         "gpt-5.6-terra",
         "gpt-5.6-luna",
+        "claude-fable-5",
         "claude-sonnet-5",
         "claude-opus-4-8",
         "claude-haiku-4-5-20251001",

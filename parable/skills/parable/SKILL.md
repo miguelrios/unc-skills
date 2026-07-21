@@ -17,7 +17,7 @@ those. This file tells you what's available and the house rules; the method is y
 ## Session start
 
 Run `scripts/parable-config.sh` once. It prints the executor cast (credential status, costs,
-`use_for`/`avoid_for` stage directions), the routing chains per task class, the configured
+`use_for`/`avoid_for` stage directions), the routing menus per task class, the configured
 checks, the research provider, and `repo_notes` — repo conventions that belong in every plan.
 That output plus this file covers the common case; the full selection algorithm and escalation
 ladder live in `references/routing.md`. First detect whether this harness exposes a native
@@ -57,9 +57,11 @@ usage endpoint — Claude's 5h/7d window % and current-period usage-credit meter
 window % and credit/overage state, Cursor's dollars left this cycle — for zero model tokens and
 no turn. Read it before a batch and whenever a pool feels
 tight, and route the next dispatch to the pool with the most room among the executors capable of
-the task. The routing chains in the config are **menus of capable peers, not priority ladders**:
+the task. The routing menus in the config are **menus of capable peers, not priority ladders**:
 the config author writes which executors can do each task class; you pick among them by live
-headroom. A Claude `extra=` value is the endpoint's cumulative current-period meter, not a
+headroom. Never dispatch an executor whose `model` is the current parent model: the parent
+already owns that lane and delegating back to it only burns the same pool. During review, also
+exclude the model that authored the diff. A Claude `extra=` value is the endpoint's cumulative current-period meter, not a
 weekly total; `daily`/`weekly` remain explicit nulls in JSON when Anthropic does not provide
 history. Don't wait for a throttle error to learn a pool is empty — that error is the failure
 this tool exists to prevent. The per-pool selection detail lives in `references/routing.md`.
@@ -103,6 +105,7 @@ this tool exists to prevent. The per-pool selection detail lives in `references/
 ## House rules
 
 - The reviewer never shares the author's model — `--author` enforces it.
+- A subagent never shares the current parent model; select another capable model from the menu.
 - A feature split across concurrent plans is reviewed once, as one integrated diff against the
   whole feature intent — the union of the changed paths plus the full spec. Reviews scoped per
   plan cannot see integration seams and misread sibling work as scope violations.
