@@ -54,12 +54,22 @@ def _worker_identity(value: str | None = None) -> str:
 def _private_root(path: Path) -> Path:
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    metadata = path.lstat()
-    if (
-        stat.S_ISLNK(metadata.st_mode)
-        or not stat.S_ISDIR(metadata.st_mode)
-        or stat.S_IMODE(metadata.st_mode) != 0o700
-    ):
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise ValueError("managed worker state root is not private") from error
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError("managed worker state root is not private")
+        os.fchmod(descriptor, 0o700)
+        metadata = os.fstat(descriptor)
+    except OSError as error:
+        raise ValueError("managed worker state root is not private") from error
+    finally:
+        os.close(descriptor)
+    if stat.S_IMODE(metadata.st_mode) != 0o700:
         raise ValueError("managed worker state root is not private")
     return path
 

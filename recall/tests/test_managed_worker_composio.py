@@ -2,16 +2,38 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import stat
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from connectors.composio_workspace_rail import ComposioWorkspaceRail
 from server.recall_server.control import ControlError
-from server.recall_server.managed_worker import ManagedConnectorWorker
+from server.recall_server.managed_worker import ManagedConnectorWorker, _private_root
 
 
 class ManagedWorkerComposioTests(unittest.TestCase):
+    def test_private_root_normalizes_provider_mount_mode_without_following_links(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            provider_mount = root / "worker"
+            provider_mount.mkdir(mode=0o755)
+
+            self.assertEqual(_private_root(provider_mount), provider_mount)
+            self.assertEqual(stat.S_IMODE(provider_mount.stat().st_mode), 0o700)
+
+            target = root / "target"
+            target.mkdir(mode=0o700)
+            linked = root / "linked"
+            linked.symlink_to(target, target_is_directory=True)
+            with self.assertRaisesRegex(
+                ValueError,
+                "managed worker state root is not private",
+            ):
+                _private_root(linked)
+
     def worker(self, root: Path) -> ManagedConnectorWorker:
         worker = object.__new__(ManagedConnectorWorker)
         worker.spool_root = root / "spools"
