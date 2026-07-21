@@ -390,9 +390,7 @@ class Handler(BaseHTTPRequestHandler):
     def hide_non_public_route(self, method: str, path: str) -> bool:
         if not (self.public_mcp_profile() or self.public_edge_profile()):
             return False
-        allowed = (
-            method == "POST" and path == "/mcp"
-        ) or (
+        allowed = (method == "POST" and path == "/mcp") or (
             method == "GET" and path in {"/mcp", "/healthz", "/readyz"}
         )
         if self.public_edge_profile():
@@ -416,10 +414,7 @@ class Handler(BaseHTTPRequestHandler):
         browser = admin_cookies(self.headers.get("Cookie"))
         session = browser.get(SESSION_COOKIE, "")
         csrf_value = self.headers.get("X-Recall-CSRF") if csrf else None
-        if csrf and (
-            not csrf_value
-            or csrf_value != browser.get(CSRF_COOKIE)
-        ):
+        if csrf and (not csrf_value or csrf_value != browser.get(CSRF_COOKIE)):
             self.send_json(403, {"error": "admin_csrf_invalid"})
             return None
         try:
@@ -487,6 +482,27 @@ class Handler(BaseHTTPRequestHandler):
                         provider_id="google",
                         state=state,
                         code=code,
+                    )
+                    self.send_redirect("/admin?oauth=connected")
+                except ControlError as error:
+                    self.send_json(error.status, {"error": error.code})
+                return
+            if parsed.path == "/admin/oauth/callback/composio":
+                if self.control_plane is None:
+                    self.send_json(503, {"error": "control_plane_unavailable"})
+                    return
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                if set(query) != {"state", "status", "connected_account_id"} or any(
+                    len(query.get(key, [])) != 1 for key in query
+                ):
+                    self.send_json(400, {"error": "oauth_callback_invalid"})
+                    return
+                try:
+                    self.control_plane.complete_oauth(
+                        provider_id="composio",
+                        state=query["state"][0],
+                        status=query["status"][0],
+                        connected_account_id=query["connected_account_id"][0],
                     )
                     self.send_redirect("/admin?oauth=connected")
                 except ControlError as error:
@@ -592,10 +608,7 @@ class Handler(BaseHTTPRequestHandler):
             except ControlError as error:
                 self.send_json(error.status, {"error": error.code})
             return
-        if (
-            self.admin_web_enabled()
-            and path == "/admin/api/v1/device/installations"
-        ):
+        if self.admin_web_enabled() and path == "/admin/api/v1/device/installations":
             principal = self.admin_principal(csrf=True)
             if principal is None:
                 return
@@ -755,13 +768,9 @@ class Handler(BaseHTTPRequestHandler):
                         self.send_json(413, {"error": "request body too large"})
                         return
                     events = json.loads(decoded_events)
-                if (
-                    not isinstance(events, list)
-                    or any(
-                        not isinstance(event, dict)
-                        or event.get("source_id") != source_id
-                        for event in events
-                    )
+                if not isinstance(events, list) or any(
+                    not isinstance(event, dict) or event.get("source_id") != source_id
+                    for event in events
                 ):
                     self.send_json(403, {"error": "canonical authority forbidden"})
                     return
@@ -1070,16 +1079,12 @@ def validate_http_profile() -> None:
         os.environ.get("RECALL_AUTH_REQUIRED", "0") != "1"
         or os.environ.get("RECALL_CANONICAL_V2_ENABLED") != "1"
     ):
-        raise RuntimeError(
-            "canonical MCP requires authentication and canonical v2"
-        )
+        raise RuntimeError("canonical MCP requires authentication and canonical v2")
     if os.environ.get("RECALL_ADMIN_WEB_ENABLED") == "1" and (
         os.environ.get("RECALL_AUTH_REQUIRED", "0") != "1"
         or not os.environ.get("RECALL_CONTROL_ENCRYPTION_KEY")
     ):
-        raise RuntimeError(
-            "admin web requires auth and encryption configuration"
-        )
+        raise RuntimeError("admin web requires auth and encryption configuration")
     google_values = (
         os.environ.get("RECALL_GOOGLE_CLIENT_ID", ""),
         os.environ.get("RECALL_GOOGLE_CLIENT_SECRET", ""),
@@ -1087,6 +1092,12 @@ def validate_http_profile() -> None:
     )
     if any(google_values) and not all(google_values):
         raise RuntimeError("Google OAuth configuration must be complete")
+    composio_values = (
+        os.environ.get("RECALL_COMPOSIO_API_KEY", ""),
+        os.environ.get("RECALL_COMPOSIO_REDIRECT_URI", ""),
+    )
+    if any(composio_values) and not all(composio_values):
+        raise RuntimeError("Composio configuration must be complete")
     if profile in {"public-edge", "public-mcp"}:
         if os.environ.get("RECALL_AUTH_REQUIRED", "0") != "1":
             raise RuntimeError("public HTTP profile requires authentication")

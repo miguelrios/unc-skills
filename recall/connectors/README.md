@@ -144,6 +144,15 @@ Document attachments remain off. A Google Docs body can be exported as bounded
 plain text through the rail when explicitly enabled; other file types remain
 metadata-only. Preview and registration do not read credentials or sources.
 
+Hosted operators may instead use `ComposioWorkspaceRail` as the authenticated
+transport. It creates a current Composio session for one stable Recall principal,
+one connector toolkit, and one explicitly pinned connected-account ID. Only the
+same immutable Workspace read-operation map can reach Composio proxy execution;
+the Google connectors continue to own normalization, incremental cursors,
+reconciliation, privacy, acknowledgements, and tombstones. Recall never exposes
+Composio tools or a generic proxy to an answering agent. Direct Google OAuth and
+the pinned CLI remain available for self-hosted deployments.
+
 Connectors are explicit Python objects. Recall does not discover or execute
 plugins, recipes, entry points, or code from the current directory.
 

@@ -16,11 +16,13 @@ from connectors.host import (
     HOSTED_FACTORIES,
     RemoteOptions,
 )
+from connectors.composio_workspace_rail import ComposioWorkspaceRail
 from connectors.registry import (
     ConnectorDefinitionV3,
     RUNTIME_ERROR_CODES,
     definition,
 )
+from connectors.workspace_rail import WorkspaceRailError
 from connectors.sdk import (
     ConnectorContractError,
     ConnectorRunner,
@@ -252,18 +254,53 @@ class ManagedConnectorWorker:
             or connector_definition.execution_placement != "remote_worker"
         ):
             raise ControlError("connector_schema_drift")
-        authority_path = private_directory / "source-authority"
-        descriptor = os.open(
-            authority_path,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-            0o600,
-        )
-        try:
-            payload = self._credential_payload(connector_id, credentials)
-            os.write(descriptor, payload)
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        rails = self.remote_rails
+        if row.get("provider") == "composio":
+            if not connector_id.startswith("google."):
+                raise ControlError("connector_schema_drift")
+            api_key = os.environ.get("RECALL_COMPOSIO_API_KEY", "")
+            user_id = credentials.get("user_id")
+            connected_account_id = credentials.get("connected_account_id")
+            toolkit = credentials.get("toolkit")
+            if not all(
+                isinstance(value, str) and value
+                for value in (api_key, user_id, connected_account_id, toolkit)
+            ):
+                raise ControlError("connector_authority_revoked")
+            binary_hosts = tuple(
+                value.strip()
+                for value in os.environ.get(
+                    "RECALL_COMPOSIO_BINARY_HOSTS", ""
+                ).split(",")
+                if value.strip()
+            )
+            try:
+                composio_rail = ComposioWorkspaceRail(
+                    api_key=api_key,
+                    user_id=user_id,
+                    connected_account_id=connected_account_id,
+                    connector_id=connector_id,
+                    binary_hosts=binary_hosts,
+                )
+            except WorkspaceRailError:
+                raise ControlError("connector_authority_revoked") from None
+            if composio_rail.toolkit != toolkit:
+                raise ControlError("connector_authority_revoked")
+            rails = {**self.remote_rails, connector_id: composio_rail}
+            authority_path = private_directory / "composio-reference"
+        else:
+            authority_path = private_directory / "source-authority"
+            descriptor = os.open(
+                authority_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+            try:
+                payload = self._credential_payload(connector_id, credentials)
+                os.write(descriptor, payload)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
         options = RemoteOptions.from_mapping(
             connector_id,
             {
@@ -285,7 +322,7 @@ class ManagedConnectorWorker:
             options,
             row["source_id"],
             row["privacy_mode"],
-            self.remote_rails,
+            rails,
         )
         return connector, spool
 

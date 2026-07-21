@@ -2,7 +2,8 @@ FROM python:3.12-slim-bookworm@sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/opt/recall:/opt
+    PYTHONPATH=/opt/recall:/opt \
+    COMPOSIO_CACHE_DIR=/tmp/recall-composio-cache
 
 WORKDIR /opt/recall
 
@@ -10,7 +11,8 @@ COPY server/requirements.txt /opt/recall/requirements.txt
 RUN python -m pip install --no-cache-dir --disable-pip-version-check --no-compile -r requirements.txt \
     && groupadd --gid 10001 recall \
     && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin recall \
-    && install -d -m 0700 -o 10001 -g 10001 /var/lib/recall
+    && install -d -m 0700 -o 10001 -g 10001 \
+         /var/lib/recall /tmp/recall-composio-cache
 
 COPY --chown=10001:10001 server/recall_server /opt/recall/recall_server
 COPY --chown=10001:10001 server/schema /opt/recall/schema

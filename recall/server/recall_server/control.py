@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
@@ -18,6 +19,10 @@ import urllib.request
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from connectors.composio_workspace_rail import (
+    ComposioWorkspaceRail,
+    toolkit_for_connector,
+)
 from connectors.registry import (
     ConnectorDefinitionV3,
     ConnectorRegistryError,
@@ -121,9 +126,7 @@ class SecretBox:
         if len(plaintext) > 64 * 1024:
             raise ControlError("control_secret_too_large")
         nonce = os.urandom(12)
-        ciphertext = AESGCM(self._key).encrypt(
-            nonce, plaintext, purpose.encode()
-        )
+        ciphertext = AESGCM(self._key).encrypt(nonce, plaintext, purpose.encode())
         return b"\x01" + nonce + ciphertext
 
     def open(self, envelope: bytes, *, purpose: str) -> dict[str, Any]:
@@ -151,6 +154,12 @@ class OAuthTokens:
     granted_scopes: tuple[str, ...]
     credentials: dict[str, Any]
     expires_at: datetime | None
+
+
+@dataclass(frozen=True)
+class ManagedOAuthStart:
+    authorization_url: str
+    connected_account_id: str
 
 
 class OAuthProvider(Protocol):
@@ -205,15 +214,11 @@ class GoogleOAuthProvider:
             raise ControlError("google_oauth_configuration_invalid", 500)
         self.client_id = client_id
         self.client_secret = client_secret
-        self.redirect_uri = _https_url(
-            redirect_uri, label="google_redirect_uri"
-        )
+        self.redirect_uri = _https_url(redirect_uri, label="google_redirect_uri")
         self.authorization_endpoint = _https_url(
             authorization_endpoint, label="google_authorization_endpoint"
         )
-        self.token_endpoint = _https_url(
-            token_endpoint, label="google_token_endpoint"
-        )
+        self.token_endpoint = _https_url(token_endpoint, label="google_token_endpoint")
         self.userinfo_endpoint = _https_url(
             userinfo_endpoint, label="google_userinfo_endpoint"
         )
@@ -262,9 +267,7 @@ class GoogleOAuthProvider:
             },
         )
         try:
-            with GoogleOAuthProvider._opener().open(
-                request, timeout=20
-            ) as response:
+            with GoogleOAuthProvider._opener().open(request, timeout=20) as response:
                 value = GoogleOAuthProvider._json(response)
         except (
             OSError,
@@ -392,6 +395,276 @@ class GoogleOAuthProvider:
             raise ControlError("google_oauth_revoke_failed", 502) from None
 
 
+class ComposioConnectionBroker:
+    """Hosted connect-link broker; provider credentials never enter Recall."""
+
+    provider_id = "composio"
+    managed_connection = True
+    _PROBES = {
+        "google.gmail": ("gmail.users.getProfile", {"userId": "me"}),
+        "google.calendar": (
+            "calendar.calendarList.list",
+            {"maxResults": 1},
+        ),
+        "google.contacts": (
+            "people.people.connections.list",
+            {
+                "resourceName": "people/me",
+                "pageSize": 1,
+                "personFields": "metadata",
+            },
+        ),
+        "google.drive": (
+            "drive.changes.getStartPageToken",
+            {"supportsAllDrives": True},
+        ),
+    }
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        redirect_uri: str,
+        auth_configs: Mapping[str, str] | None = None,
+        client_factory: Any | None = None,
+        rail_factory: Any | None = None,
+    ):
+        if (
+            not isinstance(api_key, str)
+            or not 10 <= len(api_key) <= 4096
+            or any(character.isspace() or ord(character) < 33 for character in api_key)
+        ):
+            raise ControlError("composio_configuration_invalid", 500)
+        redirect_uri = _https_url(redirect_uri, label="composio_redirect_uri")
+        parsed = urlsplit(redirect_uri)
+        if parsed.query or parsed.path != "/admin/oauth/callback/composio":
+            raise ControlError("composio_redirect_uri_invalid", 500)
+        normalized_configs = dict(auth_configs or {})
+        if any(
+            toolkit
+            not in {
+                "gmail",
+                "googlecalendar",
+                "googlecontacts",
+                "googledrive",
+            }
+            or not isinstance(config_id, str)
+            or not re.fullmatch(r"ac_[A-Za-z0-9_-]{3,252}", config_id)
+            for toolkit, config_id in normalized_configs.items()
+        ):
+            raise ControlError("composio_configuration_invalid", 500)
+        self.api_key = api_key
+        self.redirect_uri = redirect_uri
+        self.auth_configs = normalized_configs
+        self.client_factory = client_factory
+        self.rail_factory = rail_factory or ComposioWorkspaceRail
+        self._client_value = None
+
+    @classmethod
+    def from_env(cls) -> "ComposioConnectionBroker":
+        configs = {}
+        for toolkit, variable in {
+            "gmail": "RECALL_COMPOSIO_AUTH_CONFIG_GMAIL",
+            "googlecalendar": "RECALL_COMPOSIO_AUTH_CONFIG_GOOGLECALENDAR",
+            "googlecontacts": "RECALL_COMPOSIO_AUTH_CONFIG_GOOGLECONTACTS",
+            "googledrive": "RECALL_COMPOSIO_AUTH_CONFIG_GOOGLEDRIVE",
+        }.items():
+            value = os.environ.get(variable, "")
+            if value:
+                configs[toolkit] = value
+        return cls(
+            api_key=os.environ.get("RECALL_COMPOSIO_API_KEY", ""),
+            redirect_uri=os.environ.get("RECALL_COMPOSIO_REDIRECT_URI", ""),
+            auth_configs=configs,
+        )
+
+    def _client(self):
+        if self._client_value is None:
+            try:
+                if self.client_factory is not None:
+                    self._client_value = self.client_factory(self.api_key)
+                else:
+                    from composio import Composio
+
+                    self._client_value = Composio(api_key=self.api_key, timeout=60.0)
+            except Exception:
+                raise ControlError("composio_upstream_failed", 502) from None
+        return self._client_value
+
+    @staticmethod
+    def _field(value: Any, name: str) -> Any:
+        if isinstance(value, Mapping):
+            return value.get(name)
+        return getattr(value, name, None)
+
+    def start_connection(
+        self,
+        *,
+        user_id: str,
+        connector_id: str,
+        state: str,
+    ) -> ManagedOAuthStart:
+        if (
+            not isinstance(user_id, str)
+            or not AUTHORITY_RE.fullmatch(user_id)
+            or not isinstance(state, str)
+            or not STATE_RE.fullmatch(state)
+        ):
+            raise ControlError("oauth_state_invalid", 403)
+        try:
+            toolkit = toolkit_for_connector(connector_id)
+        except Exception:
+            raise ControlError("oauth_connector_invalid") from None
+        callback_url = self.redirect_uri + "?" + urlencode({"state": state})
+        options: dict[str, Any] = {
+            "user_id": user_id,
+            "toolkits": [toolkit],
+            "manage_connections": False,
+            "multi_account": {
+                "enable": True,
+                "require_explicit_selection": True,
+            },
+        }
+        auth_config = self.auth_configs.get(toolkit)
+        if auth_config:
+            options["auth_configs"] = {toolkit: auth_config}
+        try:
+            session = self._client().create(**options)
+            request = session.authorize(toolkit, callback_url=callback_url)
+        except ControlError:
+            raise
+        except Exception:
+            raise ControlError("composio_upstream_failed", 502) from None
+        connected_account_id = self._field(request, "id")
+        authorization_url = self._field(request, "redirect_url")
+        parsed = (
+            urlsplit(authorization_url) if isinstance(authorization_url, str) else None
+        )
+        if (
+            not isinstance(connected_account_id, str)
+            or not re.fullmatch(r"ca_[A-Za-z0-9_-]{3,252}", connected_account_id)
+            or parsed is None
+            or parsed.scheme != "https"
+            or parsed.hostname != "connect.composio.dev"
+            or parsed.username
+            or parsed.password
+            or parsed.fragment
+            or not parsed.path.startswith("/link/")
+        ):
+            raise ControlError("composio_upstream_invalid", 502)
+        return ManagedOAuthStart(
+            authorization_url=authorization_url,
+            connected_account_id=connected_account_id,
+        )
+
+    def _account(self, connected_account_id: str) -> Any:
+        try:
+            return self._client().connected_accounts.get(connected_account_id)
+        except ControlError:
+            raise
+        except Exception:
+            raise ControlError("composio_upstream_failed", 502) from None
+
+    def complete_connection(
+        self,
+        *,
+        user_id: str,
+        connector_id: str,
+        expected_connected_account_id: str,
+        callback_connected_account_id: str,
+        callback_status: str,
+        required_scopes: tuple[str, ...],
+    ) -> OAuthTokens:
+        if not isinstance(user_id, str) or not AUTHORITY_RE.fullmatch(user_id):
+            raise ControlError("oauth_connection_forbidden", 403)
+        if callback_status != "success":
+            raise ControlError("oauth_connection_inactive", 403)
+        if (
+            callback_connected_account_id != expected_connected_account_id
+            or not re.fullmatch(
+                r"ca_[A-Za-z0-9_-]{3,252}",
+                callback_connected_account_id or "",
+            )
+        ):
+            raise ControlError("oauth_connection_mismatch", 403)
+        try:
+            toolkit = toolkit_for_connector(connector_id)
+        except Exception:
+            raise ControlError("oauth_connector_invalid") from None
+        account = self._account(expected_connected_account_id)
+        account_toolkit = self._field(self._field(account, "toolkit"), "slug")
+        if self._field(account, "id") != expected_connected_account_id:
+            raise ControlError("oauth_connection_mismatch", 403)
+        if self._field(account, "user_id") != user_id:
+            raise ControlError("oauth_connection_forbidden", 403)
+        if self._field(account, "status") != "ACTIVE":
+            raise ControlError("oauth_connection_inactive", 403)
+        if account_toolkit != toolkit:
+            raise ControlError("oauth_connection_mismatch", 403)
+        observed_scopes = self._field(account, "requested_scopes")
+        if observed_scopes is not None and (
+            not isinstance(observed_scopes, list)
+            or not set(required_scopes).issubset(
+                {value for value in observed_scopes if isinstance(value, str)}
+            )
+        ):
+            raise ControlError("oauth_scope_insufficient", 403)
+        probe = self._PROBES.get(connector_id)
+        if probe is None:
+            raise ControlError("oauth_connector_invalid")
+        try:
+            rail = self.rail_factory(
+                api_key=self.api_key,
+                user_id=user_id,
+                connected_account_id=expected_connected_account_id,
+                connector_id=connector_id,
+            )
+            rail.run(*probe)
+        except Exception:
+            raise ControlError("oauth_scope_insufficient", 403) from None
+        return OAuthTokens(
+            subject_id=f"{toolkit}:{expected_connected_account_id}",
+            granted_scopes=tuple(sorted(required_scopes)),
+            credentials={
+                "user_id": user_id,
+                "connected_account_id": expected_connected_account_id,
+                "toolkit": toolkit,
+            },
+            expires_at=None,
+        )
+
+    def revoke(self, credentials: dict[str, Any]) -> None:
+        if not isinstance(credentials, dict) or set(credentials) != {
+            "user_id",
+            "connected_account_id",
+            "toolkit",
+        }:
+            raise ControlError("oauth_connection_invalid", 500)
+        user_id = credentials["user_id"]
+        connected_account_id = credentials["connected_account_id"]
+        toolkit = credentials["toolkit"]
+        if (
+            not isinstance(user_id, str)
+            or not AUTHORITY_RE.fullmatch(user_id)
+            or not isinstance(connected_account_id, str)
+            or not re.fullmatch(r"ca_[A-Za-z0-9_-]{3,252}", connected_account_id)
+            or toolkit
+            not in {"gmail", "googlecalendar", "googlecontacts", "googledrive"}
+        ):
+            raise ControlError("oauth_connection_invalid", 500)
+        account = self._account(connected_account_id)
+        account_toolkit = self._field(self._field(account, "toolkit"), "slug")
+        if self._field(account, "user_id") != user_id or account_toolkit != toolkit:
+            raise ControlError("oauth_connection_forbidden", 403)
+        try:
+            self._client().connected_accounts.delete(
+                connected_account_id,
+                revoke_on_delete=True,
+            )
+        except Exception:
+            raise ControlError("composio_revoke_failed", 502) from None
+
+
 class ControlPlane:
     """One control contract for browser, remote worker, and macOS clients."""
 
@@ -414,9 +687,17 @@ class ControlPlane:
         )
         if any(google_values) and not all(google_values):
             raise ControlError("google_oauth_configuration_invalid", 500)
+        composio_values = (
+            os.environ.get("RECALL_COMPOSIO_API_KEY", ""),
+            os.environ.get("RECALL_COMPOSIO_REDIRECT_URI", ""),
+        )
+        if any(composio_values) and not all(composio_values):
+            raise ControlError("composio_configuration_invalid", 500)
         providers: dict[str, OAuthProvider] = {}
         if all(google_values):
             providers["google"] = GoogleOAuthProvider.from_env()
+        if all(composio_values):
+            providers["composio"] = ComposioConnectionBroker.from_env()
         return cls(store, SecretBox.from_env(), providers)
 
     def create_admin_token(
@@ -604,9 +885,7 @@ class ControlPlane:
                     "placement": public["placement"],
                     "auth": public["auth"],
                     "privacy_modes": public["policy"]["privacy_modes"],
-                    "default_privacy_mode": public["policy"][
-                        "default_privacy_mode"
-                    ],
+                    "default_privacy_mode": public["policy"]["default_privacy_mode"],
                     "selection_fields": public["selection_fields"],
                 }
             )
@@ -791,7 +1070,10 @@ class ControlPlane:
                 raise ControlError("oauth_route_invalid")
             connector_id = route["connector_id"]
             tenant_id = route["tenant_id"]
-            if provider_id == "google" and connector_id not in GOOGLE_CONNECTORS:
+            if (
+                provider_id in {"google", "composio"}
+                and connector_id not in GOOGLE_CONNECTORS
+            ):
                 raise ControlError("oauth_connector_invalid")
             if tenant_id not in brains:
                 raise ControlError("oauth_brain_forbidden", 403)
@@ -813,14 +1095,12 @@ class ControlPlane:
             if privacy_mode not in item.privacy_modes:
                 raise ControlError("oauth_privacy_invalid")
             selectors = route["selectors"]
-            if (
-                not isinstance(selectors, dict)
-                or set(selectors) - set(item.selection_fields)
+            if not isinstance(selectors, dict) or set(selectors) - set(
+                item.selection_fields
             ):
                 raise ControlError("oauth_selectors_invalid")
             selectors = {
-                key: _selector(value)
-                for key, value in sorted(selectors.items())
+                key: _selector(value) for key, value in sorted(selectors.items())
             }
             encoded = json.dumps(
                 selectors,
@@ -839,17 +1119,33 @@ class ControlPlane:
                     "selectors": selectors,
                 }
             )
+        managed_connection = bool(getattr(provider, "managed_connection", False))
+        if managed_connection and len(normalized) != 1:
+            raise ControlError("oauth_routes_invalid")
         code_verifier = secrets.token_urlsafe(64)
-        challenge = base64.urlsafe_b64encode(
-            hashlib.sha256(code_verifier.encode()).digest()
-        ).rstrip(b"=").decode()
+        challenge = (
+            base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode()).digest())
+            .rstrip(b"=")
+            .decode()
+        )
         state = secrets.token_urlsafe(48)
+        connected_account_id = None
+        authorization_url = None
+        if managed_connection:
+            started = provider.start_connection(
+                user_id=principal_id,
+                connector_id=normalized[0]["connector_id"],
+                state=state,
+            )
+            connected_account_id = started.connected_account_id
+            authorization_url = started.authorization_url
         context = self.secret_box.seal(
             {
                 "provider": provider_id,
                 "principal_id": principal_id,
                 "routes": normalized,
                 "code_verifier": code_verifier,
+                "expected_connected_account_id": connected_account_id,
             },
             purpose="oauth-session",
         )
@@ -870,7 +1166,8 @@ class ControlPlane:
             )
         return {
             "provider": provider_id,
-            "authorization_url": provider.authorization_url(
+            "authorization_url": authorization_url
+            or provider.authorization_url(
                 state=state,
                 code_challenge=challenge,
                 scopes=tuple(sorted(scopes)),
@@ -882,7 +1179,9 @@ class ControlPlane:
         *,
         provider_id: str,
         state: str,
-        code: str,
+        code: str | None = None,
+        connected_account_id: str | None = None,
+        status: str | None = None,
     ) -> dict[str, Any]:
         if not isinstance(state, str) or not STATE_RE.fullmatch(state):
             raise ControlError("oauth_state_invalid", 403)
@@ -929,13 +1228,30 @@ class ControlPlane:
             for route in context.get("routes", [])
         ):
             raise ControlError("oauth_brain_forbidden", 403)
-        tokens = provider.exchange(
-            code=code, code_verifier=context.get("code_verifier", "")
-        )
         required_scopes: set[str] = set()
         for route in context.get("routes", []):
             item = definition(route["connector_id"])
             required_scopes.update(item.auth.minimum_scopes)
+        if getattr(provider, "managed_connection", False):
+            routes = context.get("routes", [])
+            if len(routes) != 1:
+                raise ControlError("oauth_state_invalid", 403)
+            tokens = provider.complete_connection(
+                user_id=row["principal_id"],
+                connector_id=routes[0]["connector_id"],
+                expected_connected_account_id=context.get(
+                    "expected_connected_account_id", ""
+                ),
+                callback_connected_account_id=connected_account_id or "",
+                callback_status=status or "",
+                required_scopes=tuple(sorted(required_scopes)),
+            )
+        else:
+            if not isinstance(code, str) or not code:
+                raise ControlError("oauth_callback_invalid")
+            tokens = provider.exchange(
+                code=code, code_verifier=context.get("code_verifier", "")
+            )
         if not required_scopes.issubset(set(tokens.granted_scopes)):
             raise ControlError("oauth_scope_insufficient", 403)
         connection_id = uuid.uuid4()
@@ -990,9 +1306,7 @@ class ControlPlane:
                     )
                 for route in context["routes"]:
                     installation_id = uuid.uuid4()
-                    source_id = (
-                        f"source:{route['connector_id']}:{uuid.uuid4().hex}"
-                    )
+                    source_id = f"source:{route['connector_id']}:{uuid.uuid4().hex}"
                     connection.execute(
                         """INSERT INTO connector_installations(
                                id,tenant_id,principal_id,connector_id,source_id,
@@ -1126,9 +1440,7 @@ class ControlPlane:
         if provider is None:
             raise ControlError("oauth_provider_unsupported", 500)
         provider.revoke(credentials)
-        empty = self.secret_box.seal(
-            {}, purpose=f"provider-connection:{target_id}"
-        )
+        empty = self.secret_box.seal({}, purpose=f"provider-connection:{target_id}")
         with self.store.connect() as connection:
             with connection.transaction():
                 connection.execute(
@@ -1155,9 +1467,11 @@ class ControlPlane:
 
 
 __all__ = [
+    "ComposioConnectionBroker",
     "ControlError",
     "ControlPlane",
     "GoogleOAuthProvider",
+    "ManagedOAuthStart",
     "OAuthTokens",
     "SecretBox",
 ]
