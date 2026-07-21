@@ -134,12 +134,20 @@ provider sends the same `plan.md` through [Cursor CLI](https://cursor.com/docs/c
 
 There is also a single-harness, subscription-only path. `parable setup` builds or discovers a
 loopback CLIProxyAPI, delegates each selected user's native ChatGPT/Claude/xAI OAuth, and writes
-an exact Sol/Terra/Luna/Sonnet/Opus/Haiku/Grok cast. `parable claude` starts or safely reuses the
+an exact Sol/Terra/Luna/Fable/Sonnet/Opus/Haiku/Grok cast. `parable claude` starts or safely reuses the
 configured loopback proxy, waits for its authenticated catalog, requires every exact id, creates
 the project-local agents, launches stock Claude Code, and stops only the proxy process it owns.
 No broker, shared deployment, provider API key, or copied OAuth credential is involved. See the
 [end-to-end setup guide](docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md) and the generated-config
 [reference](examples/parable.claude-subscriptions.toml).
+
+The generated cast gives the parent evidence-informed stage directions: Fable for ambiguous
+planning and architecture; Sol for long implementation, difficult debugging, and high-recall
+review; Terra for React and frontend work; Luna for data transforms and mechanical work; Sonnet
+for brownfield implementation and test repair; Opus for high-blast-radius review; Haiku for fast
+exploration; and Grok for bounded terminal-heavy or systems work. These are starting hypotheses,
+not a universal leaderboard. Task-class arrays are capable-model menus; the parent excludes its
+own model and the diff author, then chooses by task fit and live subscription headroom.
 
 Minimal Cursor configuration:
 

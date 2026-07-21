@@ -53,6 +53,7 @@ EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 # proactive multi-agent delegation (the model spawns its own subagent threads) — a
 # deliberate batch-dispatch setting, not an escalation rung.
 PI_THINKING_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")  # pi: "off" extra, no "ultra"
+CLAUDE_SUBAGENT_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 PI_API_VALUES = ("openai-completions", "openai-responses", "anthropic-messages")
 PI_INSTALL_HINT = ("'pi' not found on PATH — npm i -g @earendil-works/pi-coding-agent "
                    "(requires node >= 22; pi crashes on node 20)")
@@ -232,6 +233,8 @@ def validate_config(cfg: dict) -> list[str]:
                 allowed = None
             elif ptype == "pi":
                 allowed = PI_THINKING_LEVELS
+            elif ptype == "subagent":
+                allowed = CLAUDE_SUBAGENT_EFFORT_LEVELS
             else:
                 allowed = EFFORT_LEVELS
             if allowed is not None and effort not in allowed:
@@ -334,6 +337,7 @@ def render_claude_agent(executor_id: str, executor: dict) -> str:
     """Render safe YAML-frontmatter Markdown accepted by stock Claude Code."""
     name = agent_slug(executor_id)
     model = executor["model"]
+    effort = executor.get("effort", "high")
     use_for = str(executor.get("use_for") or f"Tasks routed to the {executor_id} executor.")
     avoid_for = str(executor.get("avoid_for") or "").strip()
     description = use_for.replace("\n", " ").strip()
@@ -352,6 +356,7 @@ def render_claude_agent(executor_id: str, executor: dict) -> str:
         f"name: {name}\n"
         f"description: {json.dumps(description)}\n"
         f"model: {json.dumps(model)}\n"
+        f"effort: {json.dumps(effort)}\n"
         "---\n"
         + "\n".join(body)
         + "\n"

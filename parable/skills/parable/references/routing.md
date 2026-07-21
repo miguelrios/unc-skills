@@ -5,26 +5,33 @@
 | Class | Signature | Typical executor traits |
 |---|---|---|
 | `mechanical` | Precise spec, zero judgment: renames, boilerplate, config churn, test scaffolds, applying a known pattern N times | cheapest available; literal instruction-following is an asset |
+| `data_transform` | Structured extraction, normalization, migrations, and deterministic data reshaping | strong data-transformation model at modest effort |
+| `frontend` | React, visual UI, interaction polish, and browser-visible fixes | frontend-specialized coding model |
 | `feature` | Bounded new behavior with clear acceptance criteria | mid-tier coding-tuned model |
 | `refactor_wide` | Many files, needs large working context, mechanical-per-site but global consistency matters | large-context model |
 | `gnarly` | Ambiguous scope, deep debugging, cross-cutting design tension | frontier model |
 | `review` | Judge a diff for defects | different model than the author. Routine diffs: cheap first pass. High-blast-radius diffs — money movement, destructive data paths, auth, security, dispatch/timeout behavior a green suite can pass while wrong — skip the cheap pass and go straight to a frontier adversarial reviewer |
 | `smoke_test` | Exercise the running app and gather evidence | tool-heavy model with explicit execute-instructions |
+| `architecture` | Decompose ambiguous work or make high-blast-radius system decisions | strongest planning and architectural reasoning model |
 
 When genuinely unsure between two classes, take the cheaper one. Escalation after a cheap
 failure costs one run; over-provisioning costs every run.
 
 ## Selection
 
-1. Take the routing chain for the class.
-2. Skip ineligible executors: if a provider's `env_key` names an env var that is unset, or the
-   executor has `enabled = false`, treat it as if it were not in the chain and take the next
-   entry (`parable-config.sh` shows each executor's status — `ready`, `missing <ENV_VAR>`, or
-   `disabled`). This applies to reviewers too (house rule: the reviewer never shares the
-   author's model).
-3. Read the candidate's `use_for`/`avoid_for` — the config author's prose overrides tag
-   heuristics.
-4. Tie-break on lower `cost.in`; an executor with no `cost` field loses every cost tie-break.
+1. Classify the work, then take that class's routing menu. The list is a capable-peer menu,
+   not a priority ladder; `routing.escalation` is the only ordered list.
+2. Skip unavailable or disabled executors (`parable-config.sh` prints `ready`,
+   `missing <ENV_VAR>`, or `disabled`). Also skip any executor whose exact model is the current
+   parent model. For review, skip the diff author's model too.
+3. Apply each candidate's `use_for`/`avoid_for`; this prose overrides tag heuristics. If the
+   task does not fit, remove the candidate even when its tag looks plausible.
+4. Read `parable-usage.sh --all`. A pool at 80% or more used is not a default. Among the
+   remaining capable candidates, choose the pool with the most headroom while preserving the
+   pool funding the parent session. An unreadable pool reports `unknown`; keep it eligible
+   rather than inventing scarcity.
+5. Use lower `cost.in` only to break a remaining tie between metered executors. Subscription
+   headroom and task fit come first; an executor without `cost` loses a true cost tie-break.
 
 ## Escalation ladder
 

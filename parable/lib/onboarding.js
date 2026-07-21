@@ -37,6 +37,7 @@ const VENDORS = Object.freeze({
   }),
   claude: Object.freeze({
     models: Object.freeze([
+      "claude-fable-5",
       "claude-sonnet-5",
       "claude-opus-4-8",
       "claude-haiku-4-5-20251001",
@@ -325,11 +326,12 @@ function renderProxyEnv(token) {
   return `export CLIPROXY_API_KEY='${token}'\n`;
 }
 
-function executorBlock(id, model, tags, useFor, avoidFor = "Reviewing its own diff.") {
+function executorBlock(id, model, effort, tags, useFor, avoidFor = "Reviewing its own diff.") {
   return [
     `[executors.${id}]`,
     'provider = "claude"',
     `model = ${JSON.stringify(model)}`,
+    `effort = ${JSON.stringify(effort)}`,
     `tags = [${tags.map((tag) => JSON.stringify(tag)).join(", ")}]`,
     `use_for = ${JSON.stringify(useFor)}`,
     `avoid_for = ${JSON.stringify(avoidFor)}`,
@@ -363,57 +365,91 @@ function renderParableToml(port, vendors) {
     "enabled = false",
     "",
     ...executorBlock(
-      "terra", "gpt-5.6-terra", ["implementer", "subscription"],
-      "Independent GPT implementation or debugging.",
+      "sol_exact", "gpt-5.6-sol", "xhigh", ["implementer", "reviewer", "subscription"],
+      "Long implementation, difficult debugging, or high-recall review when Sol is not the parent model.",
+      "Delegation from a Sol parent, routine work, or sole ownership of ambiguous product architecture.",
     ),
     ...executorBlock(
-      "luna", "gpt-5.6-luna", ["reviewer", "subscription"],
-      "Independent GPT review or a second implementation.",
+      "terra", "gpt-5.6-terra", "xhigh", ["frontend", "implementer", "subscription"],
+      "React and frontend implementation, visual UI work, or a tightly scoped code fix.",
+      "Wide architecture, long autonomous refactors, or reviewing its own diff.",
+    ),
+    ...executorBlock(
+      "luna", "gpt-5.6-luna", "medium", ["data", "mechanical", "subscription"],
+      "Data transforms, scaffolding, test generation, or other bounded mechanical work.",
+      "Complex symbolic constraints, architecture, long-context refactors, or final high-risk review.",
     ),
   ];
 
   if (selected.has("claude")) {
     lines.push(
       ...executorBlock(
-        "sonnet_exact", "claude-sonnet-5", ["implementer", "subscription"],
-        "Implementation through the exact entitled Sonnet model.",
+        "fable_exact", "claude-fable-5", "high", ["architect", "implementer", "subscription"],
+        "Ambiguous planning, architecture, and long autonomous implementation when Fable is not the parent model.",
+        "Delegation from a Fable parent or routine work that should preserve the parent model's quota.",
       ),
       ...executorBlock(
-        "opus_exact", "claude-opus-4-8", ["reviewer", "subscription"],
-        "Deep review through the exact entitled Opus model.",
+        "sonnet_exact", "claude-sonnet-5", "high", ["debugger", "implementer", "subscription"],
+        "Brownfield feature implementation, debugging, and test repair.",
+        "Mechanical work or reviewing its own diff.",
       ),
       ...executorBlock(
-        "haiku_exact", "claude-haiku-4-5-20251001", ["mechanical", "subscription"],
-        "Fast mechanical work through the exact entitled Haiku model.",
+        "opus_exact", "claude-opus-4-8", "xhigh", ["architect", "reviewer", "subscription"],
+        "High-blast-radius review, architecture critique, or difficult debugging.",
+        "Routine edits, primary frontend implementation, or reviewing its own diff.",
+      ),
+      ...executorBlock(
+        "haiku_exact", "claude-haiku-4-5-20251001", "low", ["explorer", "mechanical", "subscription"],
+        "Fast repository exploration, lookup, and simple mechanical edits.",
+        "Architecture, difficult debugging, or final high-risk review.",
       ),
     );
   }
   if (selected.has("xai")) {
     lines.push(
       ...executorBlock(
-        "grok", "grok-4.5", ["implementer", "third-family", "subscription"],
-        "Independent implementation or adversarial review through the xAI subscription.",
+        "grok", "grok-4.5", "high", ["implementer", "systems", "third-family", "subscription"],
+        "Bounded terminal-heavy or systems implementation, especially Rust or C++, plus cross-family smoke testing.",
+        "Sole final factual review, orchestration, ambiguous product architecture, or reviewing its own diff.",
       ),
     );
   }
 
-  const mechanical = selected.has("claude")
-    ? ["haiku_exact", "luna", "sonnet_exact"] : ["luna", "terra"];
-  const feature = ["terra"];
+  const mechanical = ["luna"];
+  if (selected.has("claude")) mechanical.push("haiku_exact");
+  const dataTransform = ["luna", "terra"];
+  if (selected.has("claude")) dataTransform.push("sonnet_exact");
+  const frontend = ["terra", "sol_exact"];
+  if (selected.has("claude")) frontend.push("sonnet_exact");
+  const feature = ["terra", "sol_exact"];
   if (selected.has("claude")) feature.push("sonnet_exact");
   if (selected.has("xai")) feature.push("grok");
-  const review = [reviewer, "luna"];
+  const refactorWide = ["sol_exact"];
+  if (selected.has("claude")) refactorWide.push("sonnet_exact", "opus_exact", "fable_exact");
+  if (selected.has("xai")) refactorWide.push("grok");
+  const gnarly = ["sol_exact"];
+  if (selected.has("claude")) gnarly.push("opus_exact", "fable_exact");
+  if (selected.has("xai")) gnarly.push("grok");
+  const review = [reviewer, "sol_exact", "terra"];
+  if (selected.has("claude")) review.push("sonnet_exact");
   if (selected.has("xai")) review.push("grok");
-  const gnarly = selected.has("claude") ? ["opus_exact"] : ["luna"];
+  const smoke = ["sol_exact", "luna"];
+  if (selected.has("claude")) smoke.push("sonnet_exact");
+  if (selected.has("xai")) smoke.unshift("grok");
+  const architecture = ["sol_exact"];
+  if (selected.has("claude")) architecture.unshift("fable_exact", "opus_exact");
   lines.push(
     "[routing]",
     `mechanical = ${JSON.stringify(mechanical)}`,
+    `data_transform = ${JSON.stringify(dataTransform)}`,
+    `frontend = ${JSON.stringify(frontend)}`,
     `feature = ${JSON.stringify(feature)}`,
-    `refactor_wide = ${JSON.stringify(feature)}`,
+    `refactor_wide = ${JSON.stringify(refactorWide)}`,
     `gnarly = ${JSON.stringify(gnarly)}`,
     `review = ${JSON.stringify(review)}`,
-    `smoke_test = ${JSON.stringify(gnarly)}`,
-    `escalation = ${JSON.stringify([...new Set([...feature, ...gnarly])])}`,
+    `smoke_test = ${JSON.stringify(smoke)}`,
+    `architecture = ${JSON.stringify(architecture)}`,
+    `escalation = ${JSON.stringify([...new Set([...architecture, ...gnarly, ...feature])])}`,
     "",
   );
   return lines.join("\n");
