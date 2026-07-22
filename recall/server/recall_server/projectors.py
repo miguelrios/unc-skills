@@ -9,8 +9,6 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from connectors.record_contract import validate_content_fidelity
-
 from . import PROJECTOR_VERSION
 
 SOURCE_ID_RE = re.compile(r"[A-Za-z0-9_.:@-]{3,160}\Z")
@@ -22,6 +20,37 @@ ENVELOPE_FIELDS = {
     "occurred_at", "observed_at", "principal_id", "visibility", "content_type",
     "content", "provenance", "content_sha256",
 }
+OMISSION_CODE_RE = re.compile(r"[a-z][a-z0-9_]{2,63}\Z")
+
+
+def _validate_content_fidelity(content: dict[str, Any]) -> None:
+    """Enforce the cross-field fidelity rules at the server trust boundary.
+
+    Recall Core is packaged without connector runtime code, so this small
+    boundary check intentionally mirrors the SDK rule while the JSON contract
+    remains the shared field/type source of truth.
+    """
+    fidelity = content.get("content_fidelity")
+    omissions = content.get("content_omissions")
+    valid_omissions = (
+        isinstance(omissions, list)
+        and bool(omissions)
+        and omissions == sorted(set(omissions))
+        and all(
+            isinstance(item, str) and OMISSION_CODE_RE.fullmatch(item)
+            for item in omissions
+        )
+    )
+    if (
+        (fidelity == "complete" and omissions is not None)
+        or (fidelity == "partial" and not valid_omissions)
+        or fidelity not in {"complete", "partial"}
+    ):
+        raise ValueError("content fidelity is invalid")
+    if content.get("format") == "snippet" and (
+        fidelity != "partial" or "snippet_fallback" not in omissions
+    ):
+        raise ValueError("content fidelity is invalid")
 
 
 def _load_typed_record_fields() -> dict[str, dict[str, Any]]:
@@ -104,7 +133,8 @@ def validate_typed_connector_content(
     ):
         raise ValueError("invalid typed connector record")
     try:
-        validate_content_fidelity(content, deleted=deleted)
+        if not deleted:
+            _validate_content_fidelity(content)
     except ValueError:
         raise ValueError("invalid typed connector record") from None
     return content
