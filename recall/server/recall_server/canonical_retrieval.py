@@ -3,13 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 import urllib.error
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit
 
 from .canonical import CanonicalPlane
-from .db import BrainStore, bounded_search_text
+from .db import BrainStore, SearchDeadlineExceeded, bounded_search_text
 from .federation import SOURCE_FAMILIES
 from .projectors import legacy_engine
 
@@ -271,6 +272,9 @@ class BoundCanonicalRetrieval:
                 },
             }
         candidate_limit = min(100, max(20, limit * 5))
+        lexical_deadline_at = (
+            time.monotonic() + self.store.search_deadline_ms / 1000
+        )
 
         def lexical_rows(
             connection: Any,
@@ -278,7 +282,8 @@ class BoundCanonicalRetrieval:
             *,
             minimum_matches: int,
         ) -> list[dict[str, Any]]:
-            rows = connection.execute(
+            rows = self.store._execute_bounded(
+                connection,
                 """SELECT chunk.source_id,document.native_id,document.revision,
                           event.occurred_at,chunk.text_redacted,chunk.receipt,
                           ts_rank_cd(
@@ -320,6 +325,7 @@ class BoundCanonicalRetrieval:
                     until,
                     candidate_limit,
                 ),
+                lexical_deadline_at,
             ).fetchall()
             return [
                 row
@@ -328,21 +334,27 @@ class BoundCanonicalRetrieval:
             ]
 
         strict_query = " ".join(informative)
-        with self.store.connect() as connection:
-            lexical = lexical_rows(
-                connection,
-                strict_query,
-                minimum_matches=len(informative),
-            )
-            lexical_mode = "strict"
-            if not lexical and len(informative) > 1:
-                relaxed_query = " OR ".join(f'"{term}"' for term in informative)
+        try:
+            with self.store.connect() as connection:
                 lexical = lexical_rows(
                     connection,
-                    relaxed_query,
-                    minimum_matches=2 if len(informative) >= 3 else 1,
+                    strict_query,
+                    minimum_matches=len(informative),
                 )
-                lexical_mode = "relaxed" if lexical else "relaxed-empty"
+                lexical_mode = "strict"
+                if not lexical and len(informative) > 1:
+                    relaxed_query = " OR ".join(
+                        f'"{term}"' for term in informative
+                    )
+                    lexical = lexical_rows(
+                        connection,
+                        relaxed_query,
+                        minimum_matches=2 if len(informative) >= 3 else 1,
+                    )
+                    lexical_mode = "relaxed" if lexical else "relaxed-empty"
+        except SearchDeadlineExceeded:
+            lexical = []
+            lexical_mode = "deadline-exceeded"
         semantic: list[dict[str, Any]] = []
         runtime = self.store.semantic_runtime
         semantic_status = "disabled" if runtime is None else "ok"
