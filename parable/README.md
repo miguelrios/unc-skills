@@ -22,14 +22,15 @@ npx skills add miguelrios/unc-skills --skill parable --global --agent claude-cod
 > native structured-question UI (`AskUserQuestion` in Claude Code) before running shell commands.
 > Do not run `install.sh` as a generic skill copier, seed an example `parable.toml`, or stop after
 > reporting that the skill exists. First-run succeeds only after the selected native OAuth flows
-> complete and the bundled `parable.sh` prints the new-terminal `parable claude` command.
+> complete and Parable prints the new-terminal `parable claude` command.
 
 Claude is always the baseline subscription. The onboarding questions make ChatGPT
 (Sol/Terra/Luna and optional Sol fallback) and xAI (Grok 4.5) opt-in. If no compatible proxy is
 installed, onboarding separately asks permission to build Parable's pinned patched proxy.
-Claude Code then asks for one interactive shell handoff—`! parable auth login`—because its Bash
-tool cannot inject later OAuth callbacks into a running process. That single command connects every
-selected missing provider; users should never be handed three separate provider commands.
+Claude Code then tells the user to open a new terminal and run `parable auth login`, because its
+Bash tool cannot inject later OAuth callbacks into a running process and its command view may clip
+long authorization URLs. That single command connects every selected missing provider; users
+should never be handed three separate provider commands.
 
 It is Tuesday. You ask Fable to extract a helper and add a test. Three hundred lines later, the
 helper has its own module and two new dependencies. The model is pleased with itself. You open

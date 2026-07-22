@@ -45,17 +45,18 @@ available, it asks once for consent to install missing build prerequisites and b
 patched proxy. It then passes those decisions to one non-interactive `parable.sh` invocation, so
 the user never answers the same question again in a terminal prompt.
 
-Claude Code's Bash tool cannot write a later callback into a running command's stdin. In that
-harness only, the skill stages setup with `--no-auth`, then asks the user for one interactive shell
-handoff:
+Claude Code's Bash tool cannot write a later callback into a running command's stdin, and its
+command view may clip long authorization URLs. In that harness only, the skill stages setup with
+`--no-auth`, then tells the user to open a new terminal and run:
 
 ```text
-! parable auth login
+parable auth login
 ```
 
 That command authorizes every selected missing provider in order and prints the final launch
-command. It replaces, rather than precedes, three separate `auth add` commands. Harnesses with a
-controllable foreground PTY run the bundled bootstrap and authorization as one process instead.
+command. Keep it running until the selected flows complete. It replaces, rather than precedes,
+three separate `auth add` commands. Harnesses with a controllable foreground PTY run the bundled
+bootstrap and authorization as one process instead.
 
 A published npm install can seed the same standalone skill:
 
