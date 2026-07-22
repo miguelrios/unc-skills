@@ -155,7 +155,8 @@ def main() -> None:
         "forget_tombstones,receipt_redirects,canonical_audit_events,"
         "canonical_chunks,canonical_documents,canonical_events,"
         "canonical_ingest_jobs,raw_artifacts,canonical_sources,"
-        "brain_principals,brain_tenants,collector_credentials"
+        "brain_principals,brain_tenants,collector_credentials,"
+        "source_aliases,source_profiles,sources"
     )
     with store.connect() as connection:
         connection.execute(f"TRUNCATE {tables} RESTART IDENTITY CASCADE")
@@ -219,6 +220,29 @@ def main() -> None:
             text="synthetic forgettable personal note",
         )
         with store.connect() as connection:
+            for source_id, principal_id in (
+                (PERSONAL_SOURCE, OWNER),
+                (COMPANY_SOURCE, OWNER),
+                (OUTSIDER_SOURCE, OUTSIDER),
+            ):
+                connection.execute(
+                    """INSERT INTO sources(id,principal_id) VALUES (%s,%s)
+                       ON CONFLICT(id) DO NOTHING""",
+                    (source_id, principal_id),
+                )
+                connection.execute(
+                    """INSERT INTO source_profiles(
+                           source_id,family,quality,freshness_half_life_days
+                       ) VALUES (%s,'coding_history','trusted',30)
+                       ON CONFLICT(source_id) DO UPDATE SET family=excluded.family""",
+                    (source_id,),
+                )
+            connection.execute(
+                """INSERT INTO source_aliases(alias,source_id)
+                   VALUES ('company-code',%s)
+                   ON CONFLICT(alias) DO UPDATE SET source_id=excluded.source_id""",
+                (COMPANY_SOURCE,),
+            )
             connection.execute(
                 """INSERT INTO brain_principals(tenant_id,principal_id)
                    VALUES (%s,%s) ON CONFLICT DO NOTHING""",
@@ -329,6 +353,42 @@ def main() -> None:
             )["result"]["structuredContent"]
             assert unrelated["diagnostics"]["lexical_candidates"] == 0
             assert unrelated["diagnostics"]["lexical_mode"] == "relaxed-empty"
+
+            family_routed = rpc(
+                server,
+                company_token["token"],
+                "recall_search",
+                {
+                    "query": "shared launch marker",
+                    "filters": {"source_family": "coding_history"},
+                },
+            )["result"]["structuredContent"]
+            assert {row["source_id"] for row in family_routed["results"]} == {
+                COMPANY_SOURCE
+            }
+
+            alias_routed = rpc(
+                server,
+                company_token["token"],
+                "recall_search",
+                {
+                    "query": "shared launch marker",
+                    "filters": {"source_alias": "company-code"},
+                },
+            )["result"]["structuredContent"]
+            assert {row["source_id"] for row in alias_routed["results"]} == {
+                COMPANY_SOURCE
+            }
+            denied_alias = rpc(
+                server,
+                personal_token["token"],
+                "recall_search",
+                {
+                    "query": "shared launch marker",
+                    "filters": {"source_alias": "company-code"},
+                },
+            )["result"]["structuredContent"]
+            assert denied_alias["results"] == []
 
             semantic = rpc(
                 server,
