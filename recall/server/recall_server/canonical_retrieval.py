@@ -348,7 +348,12 @@ class BoundCanonicalRetrieval:
         semantic_status = "disabled" if runtime is None else "ok"
         if runtime is not None:
             try:
-                vector = runtime.embed_query(query)
+                bounded_embed = getattr(runtime, "embed_query_bounded", None)
+                vector = (
+                    bounded_embed(query)
+                    if bounded_embed is not None
+                    else runtime.embed_query(query)
+                )
             except (json.JSONDecodeError, TimeoutError, urllib.error.URLError):
                 semantic_status = "unavailable"
             else:
