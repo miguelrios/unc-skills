@@ -929,6 +929,11 @@ class Collector:
                     "UPDATE active_records SET receipt=? WHERE path=? AND native_id=?",
                     [(receipt, row["path"], row["native_id"]) for row, receipt in acknowledgements],
                 )
+                self.db.executemany(
+                    "DELETE FROM dead_letters "
+                    "WHERE path=? AND byte_offset=? AND error_code='RecoveryError'",
+                    [(row["path"], row["start_offset"]) for row in rows],
+                )
                 for path in {row["path"] for row in rows}:
                     pending = self.db.execute("SELECT 1 FROM outbox WHERE path=? AND state='pending' LIMIT 1", (path,)).fetchone()
                     if not pending:

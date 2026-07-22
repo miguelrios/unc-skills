@@ -132,6 +132,31 @@ class CollectorTest(unittest.TestCase):
         self.assertGreater(located["end_offset"], located["start_offset"])
         collector.close()
 
+    def test_successful_ack_clears_resolved_recovery_dead_letter(self) -> None:
+        (self.root / "session.jsonl").write_text(claude_line("recovered"))
+        collector = self.collector()
+        collector.scan()
+        row = collector.db.execute(
+            "SELECT path,start_offset FROM outbox WHERE state='pending'"
+        ).fetchone()
+        collector.db.execute(
+            "INSERT INTO dead_letters(path,byte_offset,error_code,error_summary,created_at) "
+            "VALUES (?,?,?,?,?)",
+            (
+                row["path"],
+                row["start_offset"],
+                "RecoveryError",
+                "record recovery rejected",
+                time.time(),
+            ),
+        )
+        collector.db.commit()
+
+        self.assertEqual(collector.doctor()["dead_letter_count"], 1)
+        self.assertEqual(collector.flush()["acked"], 1)
+        self.assertEqual(collector.doctor()["dead_letter_count"], 0)
+        collector.close()
+
     def test_process_death_after_remote_commit_before_local_ack_replays_exactly_once(self) -> None:
         (self.root / "session.jsonl").write_text(claude_line("committed before local ack"))
         collector = self.collector()
