@@ -481,9 +481,14 @@ class SemanticRuntime:
                 }
             )
         try:
-            response = self._post(
-                self._managed_embedding_endpoint, payload, headers
-            )
+            try:
+                response = self._post(
+                    self._managed_embedding_endpoint, payload, headers
+                )
+            except json.JSONDecodeError:
+                response = self._post(
+                    self._managed_embedding_endpoint, payload, headers
+                )
         except urllib.error.HTTPError as error:
             splittable = error.code == 413 or 500 <= error.code <= 504
             if not splittable or len(batch) == 1:
