@@ -421,10 +421,11 @@ exit 0
         self.assertIn("--vendors claude[,chatgpt][,xai]", skill)
         self.assertIn("--build-proxy", skill)
         self.assertIn("Claude Code's `Bash` tool is the exception", skill)
-        self.assertIn("! parable auth login", skill)
-        self.assertIn("one intentional interactive handoff", skill)
+        self.assertIn("open a new terminal and run exactly", skill)
+        self.assertIn("parable auth login", skill)
+        self.assertIn("Do not run it through", skill)
         self.assertIn("Do not give the user three separate `auth add` commands", skill)
-        self.assertIn("users should never be handed three separate provider commands", readme)
+        self.assertIn("should never be handed three separate provider commands", readme)
 
         self.assertIn('chmod +x "$DEST"/parable.sh', installer)
         self.assertIn('exec "$DEST/parable.sh" "$@"', installer)
@@ -485,7 +486,7 @@ exit 0
             self.assertEqual(first.stdout.count(handoff), 1)
             self.assertIn(launch, first.stdout)
 
-            installed = home / ".local" / "share" / "parable" / "0.1.12"
+            installed = home / ".local" / "share" / "parable" / "0.1.13"
             durable = home / ".local" / "bin" / "parable"
             self.assertTrue((installed / "bin" / "parable.js").is_file())
             self.assertTrue((installed / "lib" / "onboarding.js").is_file())
@@ -602,7 +603,9 @@ exit 0
             )
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             self.assertIn("subscriptions are not authorized", proc.stdout)
-            self.assertIn("! parable auth login", proc.stdout)
+            self.assertIn("Open a new terminal and run:", proc.stdout)
+            self.assertIn("parable auth login", proc.stdout)
+            self.assertNotIn("! parable auth login", proc.stdout)
             self.assertNotIn("Run `parable auth add` for each selected vendor", proc.stdout)
             self.assertNotIn("In a new terminal", proc.stdout)
 

@@ -45,23 +45,24 @@ bash /resolved/skill/directory/parable.sh \
 ```
 
 Claude Code's `Bash` tool is the exception: it cannot send a pasted OAuth callback to a command's
-stdin after that command starts. In Claude Code, stage setup through `Bash` with the same command
-plus `--no-auth`. After staging succeeds, tell the user to type exactly this into Claude Code's
-input so its interactive shell owns the terminal:
+stdin after that command starts, and its command view may clip long authorization URLs. In Claude
+Code, stage setup through `Bash` with the same command plus `--no-auth`. After staging succeeds,
+tell the user to open a new terminal and run exactly:
 
 ```text
-! parable auth login
+parable auth login
 ```
 
-This is one intentional interactive handoff, not a blocker. `auth login` walks every selected
-missing provider in order, skips providers already connected, and prints the final launch command.
-Do not give the user three separate `auth add` commands, do not ask them to run `setup finalize`,
-and do not claim onboarding is complete before `auth login` succeeds. Outside this Claude Code
-exception, do not pass `--no-auth` during ordinary onboarding; reserve it for explicit staged setup.
+Tell them to keep that command running until the selected flows complete. Do not run it through
+Claude Code's `Bash` tool or `!` shell command. `auth login` walks every selected missing provider
+in order, skips providers already connected, and prints the final launch command.
+Do not give the user three separate `auth add` commands or ask them to run `setup finalize`. Do not
+claim onboarding is complete before `auth login` succeeds. Outside this Claude Code exception, do
+not pass `--no-auth` during ordinary onboarding; reserve it for explicit staged setup.
 
 The bootstrap installs an immutable versioned runtime, creates the durable `parable` command,
 updates the new-terminal PATH when necessary, and either runs authorization or prepares the one
-Claude Code interactive handoff above.
+new-terminal authorization command above.
 
 Never print the final handoff yourself after a failed or unauthenticated script. The script prints
 it only after setup and all selected authorization flows succeed:

@@ -184,9 +184,10 @@ operators can pass `--no-auth`, then use
 [complete first-run guide](../../../docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md).
 
 Claude Code first-run uses `--no-auth` only because its Bash tool cannot write a later OAuth
-callback to child stdin. It hands the user's terminal to one `! parable auth login` command, which
-authorizes every selected missing provider. Do not expand that ordinary flow into per-provider
-commands; those remain troubleshooting and headless-operator escape hatches.
+callback to child stdin and its command view may clip long authorization URLs. Tell the user to
+open a new terminal and run one `parable auth login` command there. Do not run it through Claude
+Code, and do not expand that ordinary flow into per-provider commands; those remain troubleshooting
+and headless-operator escape hatches.
 
 The generated TOML has this shape:
 
