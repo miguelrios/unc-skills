@@ -193,6 +193,25 @@ class CollectorTest(unittest.TestCase):
         self.assertEqual(codes, ["JSONDecodeError"])
         migrated.close()
 
+    def test_startup_backfills_legacy_last_success_from_acked_outbox(self) -> None:
+        (self.root / "session.jsonl").write_text(claude_line("legacy acknowledgement"))
+        collector = self.collector()
+        collector.scan()
+        collector.flush()
+        acked_at = collector.db.execute(
+            "SELECT acked_at FROM outbox WHERE state='acked'"
+        ).fetchone()[0]
+        collector.db.execute("DELETE FROM meta WHERE key='last_success_epoch'")
+        collector.db.commit()
+        collector.close()
+
+        migrated = self.collector()
+        self.assertEqual(
+            migrated.doctor(include_dead_letters=False)["last_success_epoch"],
+            int(acked_at),
+        )
+        migrated.close()
+
     def test_process_death_after_remote_commit_before_local_ack_replays_exactly_once(self) -> None:
         (self.root / "session.jsonl").write_text(claude_line("committed before local ack"))
         collector = self.collector()
