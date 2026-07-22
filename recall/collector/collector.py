@@ -189,6 +189,14 @@ class Collector:
             for row in self.db.execute("SELECT DISTINCT path FROM outbox"):
                 self.db.execute("UPDATE outbox SET shard_key=? WHERE path=?", (self._path_shard(row["path"]), row["path"]))
         self.db.execute("CREATE INDEX IF NOT EXISTS outbox_shard_state_id ON outbox(shard_key,state,id)")
+        self.db.execute(
+            "DELETE FROM dead_letters "
+            "WHERE error_code='RecoveryError' AND EXISTS ("
+            "SELECT 1 FROM outbox "
+            "WHERE outbox.path=dead_letters.path "
+            "AND outbox.start_offset=dead_letters.byte_offset "
+            "AND outbox.state='acked')"
+        )
         self.db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('collector_version',?)", (str(COLLECTOR_VERSION),))
         self.db.commit()
 

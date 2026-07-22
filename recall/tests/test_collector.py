@@ -157,6 +157,42 @@ class CollectorTest(unittest.TestCase):
         self.assertEqual(collector.doctor()["dead_letter_count"], 0)
         collector.close()
 
+    def test_startup_clears_only_legacy_recovery_markers_for_acked_rows(self) -> None:
+        (self.root / "session.jsonl").write_text(claude_line("already acknowledged"))
+        collector = self.collector()
+        collector.scan()
+        collector.flush()
+        row = collector.db.execute(
+            "SELECT path,start_offset FROM outbox WHERE state='acked'"
+        ).fetchone()
+        collector.db.executemany(
+            "INSERT INTO dead_letters(path,byte_offset,error_code,error_summary,created_at) "
+            "VALUES (?,?,?,?,?)",
+            [
+                (
+                    row["path"],
+                    row["start_offset"],
+                    "RecoveryError",
+                    "record recovery rejected",
+                    time.time(),
+                ),
+                (
+                    row["path"],
+                    row["start_offset"] + 1,
+                    "JSONDecodeError",
+                    "record rejected",
+                    time.time(),
+                ),
+            ],
+        )
+        collector.db.commit()
+        collector.close()
+
+        migrated = self.collector()
+        codes = [item["error_code"] for item in migrated.doctor()["dead_letters"]]
+        self.assertEqual(codes, ["JSONDecodeError"])
+        migrated.close()
+
     def test_process_death_after_remote_commit_before_local_ack_replays_exactly_once(self) -> None:
         (self.root / "session.jsonl").write_text(claude_line("committed before local ack"))
         collector = self.collector()
