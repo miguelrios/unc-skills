@@ -152,12 +152,17 @@ this tool exists to prevent. The per-pool selection detail lives in `references/
   `parable-config.sh`; for a bare Claude alias, use a general-purpose agent with the executor's
   model. If there is no native agent-spawn tool, that executor is unavailable; choose a
   CLI-backed executor.
-- `parable [--brain auto|fable|sol|config] [-- CLAUDE_ARGS...]` — safely reuse a healthy configured loopback proxy or own its
+- `parable [--brain auto|fable|sol|config] [--] [CLAUDE_ARGS...]` — safely reuse a healthy configured loopback proxy or own its
   start/readiness/cleanup lifecycle, require every exact configured id, idempotently synchronize
   Parable-owned project agents, and launch the selected brain model. `auto` prefers Fable while
   its pool is below the tight threshold, then falls back to Sol by live usage; `fable` and `sol`
   pin either parent, and `config` uses `brain_model`. With no arguments, Parable uses `auto` and
-  forwards `--effort high`. `parable claude` remains a backward-compatible explicit alias. `parable setup finalize`
+  forwards `--effort high`. Claude flags pass through directly, so for example
+  `parable --dangerously-skip-permissions` works; the `--` separator is optional. Never enable
+  permission bypass implicitly. Interactive launches render a live brain/cast card inside Claude
+  Code through a session-scoped `SessionStart` system message. It is user-only and costs no model
+  context; headless and bare modes omit it.
+  `parable claude` remains a backward-compatible explicit alias. `parable setup finalize`
   performs only the catalog/sync diagnostic against an already-running proxy. These are package
   CLI commands, not skill scripts.
 - `scripts/parable-resume.sh <run-dir> "<message>"` — continue an executor's existing session

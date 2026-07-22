@@ -27,8 +27,10 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import textwrap
 import time
 import uuid
 from datetime import datetime, timezone
@@ -69,6 +71,25 @@ CLAUDE_BRAIN_MODELS = {
 }
 CLAUDE_BRAIN_MODES = ("auto", "fable", "sol", "config")
 AUTO_BRAIN_TIGHT_PCT = 80.0
+PARABLE_WELCOME_ENV = "PARABLE_WELCOME_MESSAGE"
+PARABLE_WELCOME_PLUGIN = Path(__file__).resolve().parent.parent / "runtime" / "welcome-plugin"
+PARABLE_ASCII = (
+    "          _ __   __ _ _ __ __ _| |__ | | ___",
+    "         | '_ \\ / _` | '__/ _` | '_ \\| |/ _ \\",
+    "         | |_) | (_| | | | (_| | |_) | |  __/",
+    "         | .__/ \\__,_|_|  \\__,_|_.__/|_|\\___|",
+    "         |_|",
+)
+PARABLE_ANIMALS = {
+    "FABLE": "🐢",
+    "SOL": "🐘",
+    "TERRA": "🦊",
+    "LUNA": "🐤",
+    "SONNET": "🫏",
+    "OPUS": "🦉",
+    "HAIKU": "🐦",
+    "GROK": "🐺",
+}
 
 # Tier-0 defaults: Claude-native executors need no API keys — they run as
 # subagents inside the orchestrating session. Anything with an env_key must
@@ -484,6 +505,7 @@ def build_claude_launch(cfg: dict, forwarded: list[str], environ: dict[str, str]
         "ANTHROPIC_API_KEY",
         "CLAUDE_CODE_OAUTH_TOKEN",
         "CLAUDE_CODE_SUBAGENT_MODEL",
+        PARABLE_WELCOME_ENV,
     ):
         launch_env.pop(inherited, None)
     argv = [claude.get("binary", "claude"), "--model", claude["brain_model"], *args]
@@ -578,6 +600,89 @@ def resolve_claude_brain(cfg: dict, mode: str, available: set[str],
 
 def config_with_claude_brain(cfg: dict, model: str) -> dict:
     return {**cfg, "claude": {**cfg["claude"], "brain_model": model}}
+
+
+def _welcome_label(executor_id: str, model: str) -> str:
+    name = re.sub(r"_exact$", "", executor_id).replace("_", "-")
+    return (name or model).upper()
+
+
+def _welcome_summary(value: object, width: int) -> str:
+    text = re.sub(r"\s+", " ", str(value or "General delegated work.")).strip()
+    return textwrap.shorten(text, width=max(width, 20), placeholder="…")
+
+
+def _welcome_animal(label: str) -> str:
+    return PARABLE_ANIMALS.get(label, "◆")
+
+
+def claude_welcome_cast(cfg: dict, brain_model: str, available: set[str]
+                        ) -> tuple[str, list[tuple[str, str, str]]]:
+    """Return the parent label and every usable native executor for display."""
+    brain_label = brain_model.upper()
+    rows: list[tuple[str, str, str]] = []
+    for executor_id, executor in cfg.get("executors", {}).items():
+        if executor.get("enabled", True) is False:
+            continue
+        provider = cfg.get("providers", {}).get(executor.get("provider"), {})
+        if provider.get("type") != "subagent":
+            continue
+        model = executor.get("model")
+        if not isinstance(model, str):
+            continue
+        if model.lower() not in CLAUDE_AGENT_ALIASES and model not in available:
+            continue
+        label = _welcome_label(executor_id, model)
+        if model == brain_model:
+            brain_label = label
+            continue
+        rows.append((label, model, str(executor.get("use_for") or "General delegated work.")))
+    return brain_label, rows
+
+
+def render_claude_welcome(cfg: dict, brain_model: str, decision: str,
+                          available: set[str], columns: int | None = None) -> str:
+    """Render the zero-token launch card shown by the SessionStart hook."""
+    terminal_width = columns or shutil.get_terminal_size((96, 24)).columns
+    width = max(54, min(terminal_width - 10, 110))
+    brain_label, rows = claude_welcome_cast(cfg, brain_model, available)
+    model_width = min(30, max((len(model) for _label, model, _use in rows), default=12))
+    summary_width = max(20, width - 4 - 8 - 1 - model_width - 2)
+    procession = "  ".join(
+        [_welcome_animal(brain_label), *(_welcome_animal(label) for label, _model, _use in rows)]
+    )
+    lines = [*PARABLE_ASCII, f"  {procession}   →  the road ahead"]
+    lines.append(f"  {_welcome_animal(brain_label)} BRAIN   {brain_label} · {brain_model}")
+    lines.append(f"          {_welcome_summary(decision, width - 10)}")
+    lines.append(f"  CAST    {len(rows)} routed models ready")
+    for label, model, use_for in rows:
+        lines.append(
+            f"  {_welcome_animal(label)} {label[:7]:<7} {model[:model_width]:<{model_width}}  "
+            f"{_welcome_summary(use_for, summary_width)}"
+        )
+    lines.append("  the brain carries the story · the cast carries the work")
+    return "\n".join(lines)
+
+
+def add_claude_welcome(argv: list[str], launch_env: dict[str, str], cfg: dict,
+                       brain_model: str, decision: str, available: set[str],
+                       forwarded: list[str]) -> tuple[list[str], dict[str, str]]:
+    """Inject the in-UI startup card only for interactive Claude sessions."""
+    skip_flags = {
+        "-h", "--help", "-v", "--version", "-p", "--print", "--bare", "--init-only",
+    }
+    if any(argument.split("=", 1)[0] in skip_flags for argument in forwarded):
+        return argv, launch_env
+    manifest = PARABLE_WELCOME_PLUGIN / ".claude-plugin" / "plugin.json"
+    hook = PARABLE_WELCOME_PLUGIN / "hooks" / "hooks.json"
+    script = PARABLE_WELCOME_PLUGIN / "scripts" / "welcome.py"
+    if not all(path.is_file() and not path.is_symlink() for path in (manifest, hook, script)):
+        raise ValueError("Parable welcome plugin is missing or unsafe; reinstall Parable")
+    env = dict(launch_env)
+    env[PARABLE_WELCOME_ENV] = render_claude_welcome(
+        cfg, brain_model, decision, available
+    )
+    return [argv[0], "--plugin-dir", str(PARABLE_WELCOME_PLUGIN), *argv[1:]], env
 
 
 def checked_claude_config(root: Path, require_token: bool = True
@@ -676,6 +781,9 @@ def cmd_claude(args: argparse.Namespace) -> int:
         brain_model, decision = resolve_claude_brain(cfg, brain_mode, available)
         launch_cfg = config_with_claude_brain(cfg, brain_model)
         argv, launch_env = build_claude_launch(launch_cfg, forwarded)
+        argv, launch_env = add_claude_welcome(
+            argv, launch_env, cfg, brain_model, decision, available, forwarded
+        )
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"parable: {exc}", file=sys.stderr)
         return 1

@@ -1,6 +1,6 @@
 {
   "name": "@parcha/parable",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "description": "Multi-model coding orchestration skill for Claude Code, Codex, and pi.",
   "bin": {
     "parable": "bin/parable.js"
@@ -18,6 +18,8 @@
     "skills/parable/parable.sh",
     "skills/parable/scripts/*",
     "skills/parable/runtime/**/*",
+    "skills/parable/runtime/welcome-plugin/.claude-plugin/*.json",
+    "!skills/parable/runtime/**/__pycache__/**",
     "!skills/parable/scripts/__pycache__/**",
     "!skills/parable/scripts/*.pyc",
     "skills/parable/references/*",
