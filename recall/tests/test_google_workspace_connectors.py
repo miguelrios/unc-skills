@@ -117,6 +117,8 @@ class GmailConnectorTest(unittest.TestCase):
         self.assertEqual([item.native_id for item in first.records], ["gmail:m1", "gmail:m2"])
         self.assertEqual(first.records[0].content["direction"], "inbound")
         self.assertEqual(first.records[0].content["text"], "Synthetic body")
+        self.assertEqual(first.records[0].content["content_fidelity"], "complete")
+        self.assertNotIn("content_omissions", first.records[0].content)
         self.assertEqual(first.records[0].content["subject"], "Synthetic subject")
         second = connector.pull(first.next_cursor)
         self.assertFalse(second.has_more)
@@ -156,6 +158,159 @@ class GmailConnectorTest(unittest.TestCase):
         self.assertEqual(
             [operation for operation, _params in rail.calls[-3:]],
             ["gmail.history.list", "gmail.messages.list", "gmail.messages.get"],
+        )
+
+    def test_complete_body_prefers_external_plain_part_over_html_alternative(self):
+        rail = FakeRail()
+        rail.add("gmail.messages.list", {"messages": [{"id": "m1"}]})
+        message = gmail_message("m1")
+        message["payload"] = {
+            "mimeType": "multipart/alternative",
+            "headers": message["payload"]["headers"],
+            "body": {"size": 0},
+            "parts": [
+                {
+                    "mimeType": "text/plain",
+                    "filename": "",
+                    "headers": [{
+                        "name": "Content-Type",
+                        "value": "text/plain; charset=utf-8",
+                    }],
+                    "body": {"attachmentId": "body-part-1", "size": 28},
+                },
+                {
+                    "mimeType": "text/html",
+                    "filename": "",
+                    "headers": [],
+                    "body": {"data": encoded("<p>Duplicate HTML body</p>")},
+                },
+            ],
+        }
+        rail.add("gmail.messages.get", message)
+        rail.add(
+            "gmail.messages.attachments.get",
+            {"size": 28, "data": encoded("Complete external plain body")},
+        )
+
+        record = self.connector(rail).pull(None).records[0]
+
+        self.assertEqual(record.content["text"], "Complete external plain body")
+        self.assertEqual(record.content["format"], "text/plain")
+        self.assertEqual(record.content["content_fidelity"], "complete")
+        self.assertEqual(
+            rail.calls[-1],
+            (
+                "gmail.messages.attachments.get",
+                {"userId": "me", "messageId": "m1", "id": "body-part-1"},
+            ),
+        )
+
+    def test_html_only_body_is_converted_to_searchable_text(self):
+        rail = FakeRail()
+        rail.add("gmail.messages.list", {"messages": [{"id": "m1"}]})
+        message = gmail_message("m1")
+        message["payload"] = {
+            "mimeType": "text/html",
+            "headers": message["payload"]["headers"],
+            "body": {
+                "data": encoded(
+                    "<html><head><style>hidden</style></head><body>"
+                    "<h1>Quarterly update</h1>"
+                    "<p>Revenue grew &amp; churn fell.</p>"
+                    "<script>privateTracker()</script></body></html>"
+                )
+            },
+        }
+        rail.add("gmail.messages.get", message)
+
+        record = self.connector(rail).pull(None).records[0]
+
+        self.assertEqual(
+            record.content["text"],
+            "Quarterly update\nRevenue grew & churn fell.",
+        )
+        self.assertEqual(record.content["format"], "text/html-derived")
+        self.assertEqual(record.content["content_fidelity"], "complete")
+
+    def test_all_body_sections_are_kept_and_file_attachments_are_explicit(self):
+        rail = FakeRail()
+        rail.add("gmail.messages.list", {"messages": [{"id": "m1"}]})
+        message = gmail_message("m1")
+        message["payload"] = {
+            "mimeType": "multipart/mixed",
+            "headers": message["payload"]["headers"],
+            "body": {"size": 0},
+            "parts": [
+                {
+                    "mimeType": "text/plain",
+                    "filename": "",
+                    "headers": [],
+                    "body": {"data": encoded("Opening section")},
+                },
+                {
+                    "mimeType": "text/plain",
+                    "filename": "",
+                    "headers": [],
+                    "body": {"data": encoded("Closing section")},
+                },
+                {
+                    "mimeType": "application/pdf",
+                    "filename": "board-pack.pdf",
+                    "headers": [{
+                        "name": "Content-Disposition",
+                        "value": "attachment; filename=board-pack.pdf",
+                    }],
+                    "body": {"attachmentId": "file-1", "size": 12345},
+                },
+            ],
+        }
+        rail.add("gmail.messages.get", message)
+
+        record = self.connector(rail).pull(None).records[0]
+
+        self.assertEqual(record.content["text"], "Opening section\n\nClosing section")
+        self.assertEqual(record.content["content_fidelity"], "partial")
+        self.assertEqual(record.content["content_omissions"], ["file_attachments"])
+        self.assertEqual(
+            record.content["attachments"],
+            [{
+                "mime_type": "application/pdf",
+                "name": "board-pack.pdf",
+                "size_bytes": 12345,
+            }],
+        )
+        self.assertFalse(any(
+            call[0] == "gmail.messages.attachments.get" for call in rail.calls
+        ))
+
+    def test_snippet_fallback_is_never_silently_reported_as_complete(self):
+        rail = FakeRail()
+        rail.add("gmail.messages.list", {"messages": [{"id": "m1"}]})
+        message = gmail_message("m1")
+        message["payload"]["body"] = {"size": 0}
+        rail.add("gmail.messages.get", message)
+
+        record = self.connector(rail).pull(None).records[0]
+
+        self.assertEqual(record.content["text"], "Synthetic snippet")
+        self.assertEqual(record.content["content_fidelity"], "partial")
+        self.assertEqual(
+            record.content["content_omissions"],
+            ["body_part_unavailable", "snippet_fallback"],
+        )
+
+    def test_oversized_unicode_body_is_bounded_and_explicitly_partial(self):
+        rail = FakeRail()
+        rail.add("gmail.messages.list", {"messages": [{"id": "m1"}]})
+        rail.add("gmail.messages.get", gmail_message("m1", text="🧠" * 150_000))
+
+        record = self.connector(rail).pull(None).records[0]
+
+        self.assertEqual(record.content["content_fidelity"], "partial")
+        self.assertIn("body_truncated", record.content["content_omissions"])
+        self.assertLessEqual(
+            len(json.dumps(record.content["text"]).encode()),
+            500_000,
         )
 
     def test_runner_keeps_google_cursor_behind_brain_ack(self):

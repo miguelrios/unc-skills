@@ -45,6 +45,12 @@ PROXY_OPERATIONS = {
         "/gmail/v1/users/{userId}/messages/{id}",
         ("userId", "id"),
     ),
+    "gmail.messages.attachments.get": ProxyOperation(
+        "google.gmail",
+        "gmail",
+        "/gmail/v1/users/{userId}/messages/{messageId}/attachments/{id}",
+        ("userId", "messageId", "id"),
+    ),
     "gmail.history.list": ProxyOperation(
         "google.gmail", "gmail", "/gmail/v1/users/{userId}/history", ("userId",)
     ),

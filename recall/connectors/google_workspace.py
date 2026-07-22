@@ -5,8 +5,11 @@ from __future__ import annotations
 import base64
 import json
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from email.message import Message
 from email.utils import getaddresses
+from html.parser import HTMLParser
 from typing import Any, Mapping, Protocol
 
 from connectors.sdk import (
@@ -21,6 +24,7 @@ from connectors.workspace_rail import WorkspaceRailError
 
 
 MAX_TEXT_BYTES = 500_000
+MAX_GMAIL_PART_BYTES = 750_000
 MAX_SELECTOR_BYTES = 4_096
 MAX_ITEMS = 500
 EPOCH = "1970-01-01T00:00:00Z"
@@ -225,26 +229,252 @@ def _header_values(payload: Mapping[str, Any]) -> dict[str, str]:
     return result
 
 
-def _gmail_body(payload: Mapping[str, Any], snippet: Any) -> str:
-    pending = [payload]
+@dataclass(frozen=True)
+class _GmailPartContent:
+    text: str = ""
+    format: str | None = None
+    quality: int = 0
+    omissions: tuple[str, ...] = ()
+    attachments: tuple[dict[str, Any], ...] = ()
+
+
+class _HTMLText(HTMLParser):
+    _BLOCKS = {
+        "address", "article", "aside", "blockquote", "br", "div", "dl",
+        "dt", "dd", "fieldset", "figcaption", "figure", "footer", "form",
+        "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr", "li",
+        "main", "nav", "ol", "p", "pre", "section", "table", "tr", "ul",
+    }
+    _HIDDEN = {"head", "script", "style", "template"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.hidden_depth = 0
+
+    def handle_starttag(self, tag: str, _attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.casefold()
+        if tag in self._HIDDEN:
+            self.hidden_depth += 1
+        elif not self.hidden_depth and tag in self._BLOCKS:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.casefold()
+        if tag in self._HIDDEN:
+            self.hidden_depth = max(0, self.hidden_depth - 1)
+        elif not self.hidden_depth and tag in self._BLOCKS:
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if not self.hidden_depth:
+            self.parts.append(data)
+
+
+def _html_text(value: str) -> str:
+    parser = _HTMLText()
+    try:
+        parser.feed(value)
+        parser.close()
+    except (ValueError, AssertionError):
+        return ""
+    lines = []
+    for raw in "".join(parser.parts).splitlines():
+        line = re.sub(r"[\t\f\v ]+", " ", raw).strip()
+        if line:
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def _bound_gmail_text(value: str) -> tuple[str, bool]:
+    """Fit one body to the connector record/page budget without silent loss."""
+    truncated = len(value.encode(errors="replace")) > MAX_TEXT_BYTES
+    candidate = _text(value)
+    if len(json.dumps(candidate).encode()) <= MAX_TEXT_BYTES:
+        return candidate, truncated
+    truncated = True
+    low, high = 0, len(candidate)
+    while low < high:
+        midpoint = (low + high + 1) // 2
+        if len(json.dumps(candidate[:midpoint]).encode()) <= MAX_TEXT_BYTES:
+            low = midpoint
+        else:
+            high = midpoint - 1
+    return candidate[:low], truncated
+
+
+def _gmail_charset(part: Mapping[str, Any]) -> str:
+    headers = _header_values(part)
+    value = headers.get("content-type")
+    if not value:
+        return "utf-8"
+    message = Message()
+    message["content-type"] = value
+    return message.get_content_charset() or "utf-8"
+
+
+def _decode_gmail_data(value: Any) -> tuple[bytes | None, tuple[str, ...]]:
+    if not isinstance(value, str) or not value:
+        return None, ("body_part_unavailable",)
+    try:
+        encoded = value.encode("ascii")
+        padded = encoded + b"=" * (-len(encoded) % 4)
+        decoded = base64.b64decode(padded, altchars=b"-_", validate=True)
+    except (UnicodeEncodeError, ValueError, base64.binascii.Error):
+        return None, ("body_part_invalid",)
+    if len(decoded) > MAX_GMAIL_PART_BYTES:
+        return decoded[:MAX_GMAIL_PART_BYTES], ("body_truncated",)
+    return decoded, ()
+
+
+def _attachment_metadata(part: Mapping[str, Any]) -> dict[str, Any]:
+    body = part.get("body")
+    body = body if isinstance(body, dict) else {}
+    value: dict[str, Any] = {
+        "mime_type": _text(part.get("mimeType"), fallback="application/octet-stream"),
+    }
+    filename = part.get("filename")
+    if isinstance(filename, str) and filename:
+        value["name"] = _text(filename)
+    size = body.get("size")
+    if type(size) is int and size >= 0:
+        value["size_bytes"] = size
+    return value
+
+
+def _is_file_attachment(part: Mapping[str, Any]) -> bool:
+    filename = part.get("filename")
+    if isinstance(filename, str) and filename:
+        return True
+    disposition = _header_values(part).get("content-disposition", "")
+    return disposition.casefold().lstrip().startswith("attachment")
+
+
+def _gmail_part_content(
+    rail: WorkspaceClient,
+    message_id: str,
+    value: Any,
+    *,
+    visited: list[int],
+) -> _GmailPartContent:
+    part = _mapping(value, "gmail message part")
+    visited[0] += 1
+    if visited[0] > 256:
+        return _GmailPartContent(omissions=("body_part_limit",))
+    if _is_file_attachment(part):
+        return _GmailPartContent(
+            omissions=("file_attachments",),
+            attachments=(_attachment_metadata(part),),
+        )
+
+    mime_type = part.get("mimeType")
+    mime_type = mime_type.casefold() if isinstance(mime_type, str) else ""
+    children = _items(part.get("parts"), "gmail message parts")
+    if mime_type.startswith("multipart/") or children:
+        candidates = [
+            _gmail_part_content(rail, message_id, child, visited=visited)
+            for child in children
+        ]
+        attachments = tuple(
+            attachment for candidate in candidates for attachment in candidate.attachments
+        )
+        attachment_omissions = {
+            omission
+            for candidate in candidates
+            for omission in candidate.omissions
+            if omission == "file_attachments"
+        }
+        if mime_type == "multipart/alternative":
+            selected = max(candidates, key=lambda item: item.quality, default=_GmailPartContent())
+            return _GmailPartContent(
+                text=selected.text,
+                format=selected.format,
+                quality=selected.quality,
+                omissions=tuple(sorted(set(selected.omissions) | attachment_omissions)),
+                attachments=attachments,
+            )
+        text_parts = [candidate.text for candidate in candidates if candidate.text]
+        formats = {candidate.format for candidate in candidates if candidate.text}
+        omissions = {
+            omission for candidate in candidates for omission in candidate.omissions
+        }
+        combined, truncated = _bound_gmail_text("\n\n".join(text_parts))
+        if truncated:
+            omissions.add("body_truncated")
+        return _GmailPartContent(
+            text=combined,
+            format=(formats.pop() if len(formats) == 1 else "multipart") if text_parts else None,
+            quality=max((candidate.quality for candidate in candidates), default=0),
+            omissions=tuple(sorted(omissions)),
+            attachments=attachments,
+        )
+
+    if mime_type not in {"text/plain", "text/html"}:
+        return _GmailPartContent(omissions=("non_text_body_parts",))
+    body = part.get("body")
+    body = body if isinstance(body, dict) else {}
+    data = body.get("data")
+    expected_size = body.get("size") if type(body.get("size")) is int else None
+    if not data and isinstance(body.get("attachmentId"), str):
+        try:
+            fetched = rail.run("gmail.messages.attachments.get", {
+                "userId": "me",
+                "messageId": message_id,
+                "id": body["attachmentId"],
+            })
+        except WorkspaceRailError:
+            return _GmailPartContent(omissions=("body_part_unavailable",))
+        fetched = _mapping(fetched, "gmail body part")
+        size = fetched.get("size")
+        if type(size) is not int or size < 0:
+            return _GmailPartContent(omissions=("body_part_invalid",))
+        expected_size = size
+        data = fetched.get("data")
+    raw, omissions = _decode_gmail_data(data)
+    if raw is None:
+        return _GmailPartContent(omissions=omissions)
+    if (
+        expected_size is not None
+        and expected_size <= MAX_GMAIL_PART_BYTES
+        and len(raw) != expected_size
+    ):
+        return _GmailPartContent(omissions=("body_part_invalid",))
+    try:
+        decoded = raw.decode(_gmail_charset(part), errors="replace")
+    except LookupError:
+        decoded = raw.decode("utf-8", errors="replace")
+        omissions = tuple(sorted(set(omissions) | {"charset_fallback"}))
+    rendered = decoded if mime_type == "text/plain" else _html_text(decoded)
+    text, truncated = _bound_gmail_text(rendered)
+    if truncated:
+        omissions = tuple(sorted(set(omissions) | {"body_truncated"}))
+    if not text:
+        return _GmailPartContent(omissions=tuple(sorted(set(omissions) | {"body_part_empty"})))
+    return _GmailPartContent(
+        text=text,
+        format="text/plain" if mime_type == "text/plain" else "text/html-derived",
+        quality=2 if mime_type == "text/plain" else 1,
+        omissions=omissions,
+    )
+
+
+def _gmail_content(
+    rail: WorkspaceClient,
+    message_id: str,
+    payload: Mapping[str, Any],
+    snippet: Any,
+) -> _GmailPartContent:
+    result = _gmail_part_content(rail, message_id, payload, visited=[0])
+    if result.text:
+        return result
     fallback = _text(snippet)
-    visited = 0
-    while pending and visited < 64:
-        part = _mapping(pending.pop(0), "gmail message part")
-        visited += 1
-        if part.get("mimeType") == "text/plain":
-            body = part.get("body")
-            data = body.get("data") if isinstance(body, dict) else None
-            if isinstance(data, str) and len(data.encode()) <= 1_000_000:
-                try:
-                    padded = data + "=" * (-len(data) % 4)
-                    decoded = base64.urlsafe_b64decode(padded.encode()).decode(errors="replace")
-                except (ValueError, base64.binascii.Error):
-                    decoded = ""
-                if decoded:
-                    return _text(decoded)
-        pending.extend(_items(part.get("parts"), "gmail message parts"))
-    return fallback
+    omission = "snippet_fallback" if fallback else "body_unavailable"
+    return _GmailPartContent(
+        text=fallback,
+        format="snippet" if fallback else None,
+        omissions=tuple(sorted(set(result.omissions) | {omission})),
+        attachments=result.attachments,
+    )
 
 
 def _addresses(*values: str) -> tuple[str, ...]:
@@ -301,13 +531,21 @@ class GmailConnector:
         )
         participants = tuple(sorted(set(senders) | set(recipients)))
         direction = "outbound" if set(senders) & set(self.own_addresses) else "inbound"
+        body = _gmail_content(self.rail, message_id, payload, message.get("snippet"))
         content: dict[str, Any] = {
             "conversation_id": f"gmail-thread:{thread_id}",
             "message_id": f"gmail:{message_id}",
             "direction": direction,
-            "text": _gmail_body(payload, message.get("snippet")),
+            "text": body.text,
+            "content_fidelity": "partial" if body.omissions else "complete",
             "surface": "gmail",
         }
+        if body.format:
+            content["format"] = body.format
+        if body.omissions:
+            content["content_omissions"] = list(body.omissions)
+        if body.attachments:
+            content["attachments"] = list(body.attachments)
         if participants:
             content["participant_ids"] = list(participants)
         if senders:

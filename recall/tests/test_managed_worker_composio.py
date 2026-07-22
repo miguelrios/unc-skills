@@ -81,6 +81,7 @@ class ManagedWorkerComposioTests(unittest.TestCase):
                 "ca_synthetic_account_123",
             )
             self.assertEqual(connector.rail.toolkit, "gmail")
+            self.assertEqual(connector.page_size, 10)
             self.assertEqual(list(private.iterdir()), [])
             self.assertEqual(spool, worker.spool_root / "synthetic-installation.db")
 

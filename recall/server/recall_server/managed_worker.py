@@ -328,7 +328,11 @@ class ManagedConnectorWorker:
                     "path": str(authority_path),
                 },
                 "spool": str(self.spool_root / f"{row['id']}.db"),
-                "page_size": 25 if connector_id == "x.activity" else 100,
+                "page_size": (
+                    10
+                    if connector_id == "google.gmail"
+                    else 25 if connector_id == "x.activity" else 100
+                ),
                 "timeout_seconds": 60,
                 "selectors": _selectors(
                     connector_id,
