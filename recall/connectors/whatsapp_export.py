@@ -189,6 +189,7 @@ class WhatsAppExportConnector:
             )
             content = {
                 "kind": "communication_message.v1",
+                "content_fidelity": "complete",
                 "conversation_id": self.conversation_id,
                 "direction": direction,
                 "format": "whatsapp-text-export",

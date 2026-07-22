@@ -42,23 +42,28 @@ class ConnectorRecordV2Test(unittest.TestCase):
     def test_each_typed_kind_has_a_minimum_closed_shape(self):
         rows = (
             ("communication_message.v1", {
+                "content_fidelity": "complete",
                 "conversation_id": "thread-1", "message_id": "message-1",
                 "direction": "inbound", "text": "synthetic",
             }),
             ("calendar_event.v1", {
+                "content_fidelity": "complete",
                 "calendar_id": "calendar-1", "event_id": "event-1",
                 "start": "2026-07-16T00:00:00Z", "end": "2026-07-16T01:00:00Z",
                 "title": "Synthetic event",
             }),
             ("contact_identity.v1", {
+                "content_fidelity": "complete",
                 "identity_id": "person-1", "identifier_type": "email",
                 "display_name": "Synthetic Person",
             }),
             ("social_post.v1", {
+                "content_fidelity": "complete",
                 "post_id": "post-1", "author_id": "person-1", "text": "synthetic",
                 "stream_type": "own",
             }),
             ("document.v1", {
+                "content_fidelity": "complete",
                 "document_id": "document-1", "name": "Synthetic document",
                 "mime_type": "text/plain",
             }),
@@ -89,17 +94,68 @@ class ConnectorRecordV2Test(unittest.TestCase):
                 "content": {"kind": "communication_message.v1", "guess": True},
             })
 
+    def test_every_live_typed_record_requires_truthful_content_fidelity(self):
+        minimum = {
+            "conversation_id": "thread-1",
+            "message_id": "message-1",
+            "direction": "inbound",
+            "text": "synthetic complete body",
+        }
+        with self.assertRaisesRegex(ConnectorContractError, "missing fields"):
+            self.record("communication_message.v1", **minimum)
+
+        complete = self.record(
+            "communication_message.v1", **minimum, content_fidelity="complete",
+        )
+        self.assertEqual(complete.content["content_fidelity"], "complete")
+
+        with self.assertRaisesRegex(ConnectorContractError, "content fidelity"):
+            self.record(
+                "communication_message.v1", **minimum,
+                content_fidelity="complete", content_omissions=["body_truncated"],
+            )
+        with self.assertRaisesRegex(ConnectorContractError, "content fidelity"):
+            self.record(
+                "communication_message.v1", **minimum,
+                content_fidelity="partial", content_omissions=[],
+            )
+        with self.assertRaisesRegex(ConnectorContractError, "content fidelity"):
+            self.record(
+                "communication_message.v1", **minimum,
+                content_fidelity="partial",
+            )
+        with self.assertRaisesRegex(ConnectorContractError, "content fidelity"):
+            self.record(
+                "communication_message.v1", **minimum,
+                content_fidelity="partial",
+                content_omissions=["snippet_fallback", "body_unavailable"],
+            )
+
+    def test_snippet_only_content_cannot_claim_complete_fidelity(self):
+        with self.assertRaisesRegex(ConnectorContractError, "content fidelity"):
+            self.record(
+                "communication_message.v1",
+                conversation_id="thread-1",
+                message_id="message-1",
+                direction="inbound",
+                text="synthetic snippet",
+                format="snippet",
+                content_fidelity="complete",
+            )
+
     def test_typed_values_and_closed_enums_fail_before_the_spool(self):
         with self.assertRaisesRegex(ConnectorContractError, "invalid field values"):
             self.record(
                 "communication_message.v1", conversation_id="thread-1",
                 message_id="message-1", direction="sideways", text="synthetic",
+                content_fidelity="complete",
             )
         with self.assertRaisesRegex(ConnectorContractError, "invalid field values"):
             self.record(
                 "calendar_event.v1", calendar_id="calendar-1", event_id="event-1",
                 start="2026-07-16T00:00:00Z", end="2026-07-16T01:00:00Z",
                 title="Synthetic event", attendee_ids="not-a-list",
+                content_fidelity="complete",
             )
 
 
@@ -135,6 +191,7 @@ class ConnectorRunnerV2Test(unittest.TestCase):
             "content": {
                 "kind": "communication_message.v1", "conversation_id": "thread-1",
                 "message_id": "message-1", "direction": "inbound", "text": "synthetic",
+                "content_fidelity": "complete",
             },
             "provenance": {"uri": "connector://synthetic-v2"}, "deleted": False,
         })

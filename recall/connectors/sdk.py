@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 from client.mac import canonical_envelope
 from contracts.v2 import ContractError, validate_contract
 from privacy.policy import PrivacyPolicy, summarize_receipts
-from connectors.record_contract import TYPED_RECORD_FIELDS
+from connectors.record_contract import TYPED_RECORD_FIELDS, validate_content_fidelity
 
 
 CONNECTOR_SCHEMA_VERSION = 1
@@ -387,6 +387,10 @@ class ConnectorRecordV2(ConnectorRecord):
             for field in fields
         ):
             raise ConnectorContractError("record content has invalid field values")
+        try:
+            validate_content_fidelity(self.content, deleted=self.deleted)
+        except ValueError:
+            raise ConnectorContractError("record content fidelity is invalid") from None
 
     @property
     def record_kind(self) -> str:

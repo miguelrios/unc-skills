@@ -103,6 +103,7 @@ def mapper(record):
         occurred_at=record.data["updated_at"],
         content={
             "kind": "document.v1",
+            "content_fidelity": "complete",
             "document_id": record.id,
             "mime_type": "text/plain",
             "name": "Synthetic managed document",

@@ -421,6 +421,7 @@ class TypedConnectorProjectionTest(unittest.TestCase):
             content={
                 "kind": "communication_message.v1", "conversation_id": "thread-1",
                 "message_id": "message-1", "direction": "inbound",
+                "content_fidelity": "complete",
                 "subject": "Synthetic subject", "text": "Synthetic body",
             },
             provenance={"connector_id": "google.gmail", "connector_schema_version": 2},
@@ -432,6 +433,8 @@ class TypedConnectorProjectionTest(unittest.TestCase):
         self.assertEqual(items[0]["role"], "inbound")
         self.assertEqual(items[0]["text_redacted"], "Synthetic subject\nSynthetic body")
         self.assertEqual(metadata["record_kind"], "communication_message.v1")
+        self.assertEqual(metadata["content_fidelity"], "complete")
+        self.assertNotIn("content_omissions", metadata)
 
     def test_v2_connector_record_rejects_unknown_or_mismatched_kind(self) -> None:
         for content in (
@@ -451,11 +454,48 @@ class TypedConnectorProjectionTest(unittest.TestCase):
             content={
                 "kind": "communication_message.v1", "conversation_id": "thread-1",
                 "message_id": "message-1", "direction": "sideways", "text": "synthetic",
+                "content_fidelity": "complete",
             },
             provenance={"connector_id": "synthetic.pull", "connector_schema_version": 2},
         )
         with self.assertRaisesRegex(ValueError, "invalid typed connector record"):
             validate_envelope(value)
+
+    def test_v2_partial_fidelity_projects_omissions_and_rejects_fake_success(self) -> None:
+        partial = envelope(
+            kind="connector_record", native_id="message-partial",
+            content={
+                "kind": "communication_message.v1",
+                "content_fidelity": "partial",
+                "content_omissions": ["body_truncated"],
+                "conversation_id": "thread-1", "message_id": "message-partial",
+                "direction": "inbound", "text": "Synthetic partial body",
+            },
+            provenance={"connector_id": "synthetic.pull", "connector_schema_version": 2},
+        )
+        validate_envelope(partial)
+        _items, metadata = project(partial, 1)
+        self.assertEqual(metadata["content_fidelity"], "partial")
+        self.assertEqual(metadata["content_omissions"], ["body_truncated"])
+
+        for mutation in (
+            {"content_fidelity": "partial"},
+            {"content_fidelity": "partial", "content_omissions": []},
+            {"content_fidelity": "complete", "content_omissions": ["body_truncated"]},
+        ):
+            invalid = envelope(
+                kind="connector_record",
+                content={
+                    "kind": "communication_message.v1",
+                    "conversation_id": "thread-1", "message_id": "message-1",
+                    "direction": "inbound", "text": "Synthetic body", **mutation,
+                },
+                provenance={"connector_id": "synthetic.pull", "connector_schema_version": 2},
+            )
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(
+                ValueError, "invalid typed connector record",
+            ):
+                validate_envelope(invalid)
 
 
 class SourceScopedReadContractTest(unittest.TestCase):

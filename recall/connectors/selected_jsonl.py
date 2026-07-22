@@ -156,6 +156,7 @@ class SelectedJsonlConnector:
                     occurred_at=occurred_at,
                     content={
                         "kind": "document.v1",
+                        "content_fidelity": "complete",
                         "document_id": native_id,
                         "mime_type": "application/x-ndjson",
                         "name": _bounded(
