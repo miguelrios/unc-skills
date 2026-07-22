@@ -44,6 +44,11 @@ const AUTH_FLAGS = Object.freeze({
   claude: Object.freeze({ browser: "--claude-login", extra: "--no-browser" }),
   xai: Object.freeze({ browser: "--xai-login", extra: "--no-browser" }),
 });
+const AUTH_RECORD_TYPES = Object.freeze({
+  chatgpt: "codex",
+  claude: "claude",
+  xai: "xai",
+});
 const VENDORS = Object.freeze({
   chatgpt: Object.freeze({
     models: Object.freeze(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]),
@@ -825,16 +830,25 @@ function runNativeAuth(context, vendor, device, log) {
     log("Keep this same authorization process running until its new callback completes.");
   }
   log(`starting native ${vendor} authorization`);
-  const result = spawnSync(context.manifest.proxyBinary, args, {
-    stdio: "inherit",
-    env: process.env,
-  });
+  const previousUmask = process.umask(0o077);
+  let result;
+  try {
+    result = spawnSync(context.manifest.proxyBinary, args, {
+      stdio: "inherit",
+      env: process.env,
+    });
+  } finally {
+    process.umask(previousUmask);
+  }
   if (result.error) {
     throw new OnboardingError(`could not start native ${vendor} authorization: ${result.error.message}`);
   }
   if (result.status !== 0) {
     const ended = result.signal ? `signal ${result.signal}` : `exit status ${result.status}`;
     throw new OnboardingError(`native ${vendor} authorization failed with ${ended}`);
+  }
+  if (secureProviderCredentialRecords(context.authDir, vendor)) {
+    log(`${vendor}: secured credential permissions`);
   }
   const status = scanAuthStatus(context.authDir);
   if (!status.providers[vendor].present) {
@@ -896,6 +910,64 @@ function authDirectoryModeValid(authDir) {
     && stat.isDirectory()
     && modeOf(stat) === 0o700
   );
+}
+
+function secureProviderCredentialRecords(authDir, vendor) {
+  if (!authDirectoryModeValid(authDir)) return 0;
+  const expectedType = AUTH_RECORD_TYPES[vendor];
+  if (!expectedType) return 0;
+  const currentUid = typeof process.getuid === "function" ? process.getuid() : null;
+  let secured = 0;
+  for (const entry of fs.readdirSync(authDir, { withFileTypes: true })) {
+    if (!entry.name.endsWith(".json")) continue;
+    const target = path.join(authDir, entry.name);
+    const initial = lstatOrNull(target);
+    if (!initial || initial.isSymbolicLink() || !initial.isFile()) continue;
+    let descriptor;
+    try {
+      const noFollow = fs.constants.O_NOFOLLOW || 0;
+      descriptor = fs.openSync(target, fs.constants.O_RDONLY | noFollow);
+    } catch {
+      continue;
+    }
+    try {
+      const opened = fs.fstatSync(descriptor);
+      const openedMode = modeOf(opened);
+      if (
+        !opened.isFile()
+        || opened.dev !== initial.dev
+        || opened.ino !== initial.ino
+        || (currentUid !== null && opened.uid !== currentUid)
+        || openedMode === 0o600
+        || (openedMode & 0o400) === 0
+        || (openedMode & 0o077) === 0
+      ) {
+        continue;
+      }
+      let record;
+      try {
+        record = JSON.parse(fs.readFileSync(descriptor, "utf8"));
+      } catch {
+        continue;
+      }
+      if (!record || Array.isArray(record) || typeof record !== "object") continue;
+      if (record.type !== expectedType) continue;
+      try {
+        fs.fchmodSync(descriptor, 0o600);
+      } catch (error) {
+        throw new OnboardingError(
+          `could not secure ${vendor} credential permissions: ${error.message}`,
+        );
+      }
+      if (modeOf(fs.fstatSync(descriptor)) !== 0o600) {
+        throw new OnboardingError(`could not secure ${vendor} credential permissions`);
+      }
+      secured += 1;
+    } finally {
+      fs.closeSync(descriptor);
+    }
+  }
+  return secured;
 }
 
 function scanAuthStatus(authDir) {
@@ -992,6 +1064,11 @@ async function runAuthLogin(argv, log) {
     return;
   }
   const context = loadSetupContext();
+  for (const vendor of context.vendors) {
+    if (secureProviderCredentialRecords(context.authDir, vendor)) {
+      log(`${vendor}: secured credential permissions`);
+    }
+  }
   let status = scanAuthStatus(context.authDir);
   for (const vendor of context.vendors) {
     if (status.providers[vendor].present) {

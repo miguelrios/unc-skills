@@ -179,6 +179,10 @@ CLIProxyAPI's auth directory is `~/.cli-proxy-api`, mode `0700`. Parable never
 parses, copies, or writes provider OAuth token fields. `auth status` opens only
 mode-`0600` regular JSON records and emits provider presence/counts plus
 mode/parse aggregates—never filenames, paths, accounts, or credential values.
+Native authorization inherits a private `0077` umask. Before accepting a record,
+Parable narrows broader permissions to `0600` only when it is a regular file owned
+by the current user, inside that `0700` directory, with the expected provider type.
+`auth status` remains read-only.
 
 ## Native authorization mapping
 

@@ -8,6 +8,7 @@ import secrets
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import tempfile
 import threading
@@ -486,7 +487,7 @@ exit 0
             self.assertEqual(first.stdout.count(handoff), 1)
             self.assertIn(launch, first.stdout)
 
-            installed = home / ".local" / "share" / "parable" / "0.1.13"
+            installed = home / ".local" / "share" / "parable" / "0.1.14"
             durable = home / ".local" / "bin" / "parable"
             self.assertTrue((installed / "bin" / "parable.js").is_file())
             self.assertTrue((installed / "lib" / "onboarding.js").is_file())
@@ -1249,9 +1250,13 @@ mapping = {
 }
 for flag, (vendor, record_type) in mapping.items():
     if flag in sys.argv and os.environ.get("FAKE_PROXY_SKIP_AUTH") != vendor:
+        if os.environ.get("FAKE_PROXY_UMASK_CAPTURE"):
+            current_umask = os.umask(0)
+            os.umask(current_umask)
+            Path(os.environ["FAKE_PROXY_UMASK_CAPTURE"]).write_text(oct(current_umask))
         target = Path.home() / ".cli-proxy-api" / f"fake-{vendor}.json"
         target.write_text(json.dumps({"type": record_type}))
-        target.chmod(0o600)
+        target.chmod(int(os.environ.get("FAKE_PROXY_RECORD_MODE", "0600"), 8))
 if os.environ.get("FAKE_PROXY_STDOUT"):
     print(os.environ["FAKE_PROXY_STDOUT"])
 raise SystemExit(int(os.environ.get("FAKE_PROXY_EXIT", "0")))
@@ -1357,6 +1362,26 @@ raise SystemExit(int(os.environ.get("FAKE_PROXY_EXIT", "0")))
             ])
             self.assertIn("authorization complete", proc.stdout)
 
+    def test_auth_add_uses_private_umask_and_secures_proxy_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            proxy, capture = self.make_proxy(home / "tools")
+            setup = self.setup(home, proxy, capture, vendors="claude")
+            self.assertEqual(setup.returncode, 0, setup.stdout + setup.stderr)
+            umask_capture = home / "child-umask"
+            proc = self.run_cli(
+                home, proxy, capture, "auth", "add", "claude",
+                extra_env={
+                    "FAKE_PROXY_RECORD_MODE": "0664",
+                    "FAKE_PROXY_UMASK_CAPTURE": str(umask_capture),
+                },
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertEqual(umask_capture.read_text(), "0o77")
+            record = home / ".cli-proxy-api" / "fake-claude.json"
+            self.assertEqual(stat.S_IMODE(record.stat().st_mode), 0o600)
+            self.assertIn("claude: secured credential permissions", proc.stdout)
+
     def test_auth_login_walks_only_selected_missing_vendors_and_hands_off_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -1365,7 +1390,10 @@ raise SystemExit(int(os.environ.get("FAKE_PROXY_EXIT", "0")))
             self.assertEqual(setup.returncode, 0, setup.stdout + setup.stderr)
             claude_record = home / ".cli-proxy-api" / "existing-claude.json"
             claude_record.write_text('{"type":"claude"}')
-            claude_record.chmod(0o600)
+            claude_record.chmod(0o664)
+            unrelated = home / ".cli-proxy-api" / "unrelated.json"
+            unrelated.write_text('{"type":"kimi"}')
+            unrelated.chmod(0o664)
             proc = self.run_cli(home, proxy, capture, "auth", "login")
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             config = home / ".config" / "parable" / "cliproxy.yaml"
@@ -1373,6 +1401,9 @@ raise SystemExit(int(os.environ.get("FAKE_PROXY_EXIT", "0")))
                 ["--config", str(config), "--codex-login"],
                 ["--config", str(config), "--xai-login", "--no-browser"],
             ])
+            self.assertEqual(stat.S_IMODE(claude_record.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(unrelated.stat().st_mode), 0o664)
+            self.assertIn("claude: secured credential permissions", proc.stdout)
             self.assertIn("claude: already authorized", proc.stdout)
             self.assertEqual(proc.stdout.count(
                 "In a new terminal, open your project and run:"
@@ -1486,6 +1517,7 @@ raise SystemExit(int(os.environ.get("FAKE_PROXY_EXIT", "0")))
             })
             self.assertTrue(status["directoryModeValid"])
             self.assertTrue(status["scanned"])
+            self.assertEqual(stat.S_IMODE(bad_mode.stat().st_mode), 0o644)
             forbidden = [
                 "SECRET-", "private@example.invalid", "account-alpha", "bad-mode",
                 "linked.json", str(auth_dir), str(outside), "kimi",
