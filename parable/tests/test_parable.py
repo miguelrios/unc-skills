@@ -169,11 +169,15 @@ class TestClaudeLaunch(unittest.TestCase):
             "CLAUDE_CODE_OAUTH_TOKEN": "native-token",
             "CLAUDE_CODE_SUBAGENT_MODEL": "gpt-5.6-sol",
         }
+        # Separator ownership: the parser has already consumed Parable's `--`
+        # separators, so any `--` reaching the builder is Claude's own
+        # terminator and is forwarded untouched.
         argv, env = parable.build_claude_launch(
-            self.cfg(), ["--", "--print", "hello"], source
+            self.cfg(), ["--print", "hello", "--", "--model"], source
         )
         self.assertEqual(
-            argv, ["claude", "--model", "gpt-5.6-sol", "--print", "hello"]
+            argv,
+            ["claude", "--model", "gpt-5.6-sol", "--print", "hello", "--", "--model"],
         )
         self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://127.0.0.1:8317")
         self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "local-token")
@@ -281,6 +285,38 @@ class TestClaudeLaunch(unittest.TestCase):
         # Before the terminator they are still misplaced.
         with self.assertRaisesRegex(ValueError, "place Parable's --solo option"):
             parable.parse_claude_launch_args(["--print", "hi", "--solo", "kimi"])
+
+    def test_parser_forwards_claude_terminator_after_parable_options(self):
+        # Consecutive separators: Parable's region-closing `--` is consumed,
+        # Claude's terminator survives, and literal prompt text after it —
+        # even option-shaped — reaches Claude unmodified.
+        self.assertEqual(
+            parable.parse_claude_launch_args(
+                ["--solo", "kimi", "--", "--", "--fallback-model"]
+            ),
+            ("config", "kimi", ["--", "--fallback-model"]),
+        )
+        # With no Parable option consumed, a second leading `--` is Claude's.
+        self.assertEqual(
+            parable.parse_claude_launch_args(["--", "--", "--solo"]),
+            ("config", None, ["--", "--solo"]),
+        )
+        self.assertEqual(
+            parable.parse_claude_launch_args(["--brain=fable", "--", "--", "--brain"]),
+            ("fable", None, ["--", "--brain"]),
+        )
+        # The forwarded Claude terminator survives the solo builder too.
+        cfg = parable.config_with_claude_brain(self.cfg(), "kimi-k3")
+        argv, _ = parable.build_claude_launch(
+            cfg, ["--", "--fallback-model"], {"CLIPROXY_API_KEY": "x"}, solo=True
+        )
+        self.assertEqual(
+            argv,
+            [
+                "claude", "--model", "kimi-k3", "--disallowedTools", "Agent",
+                "--", "--fallback-model",
+            ],
+        )
 
     def test_solo_model_resolution_accepts_aliases_and_exact_ids(self):
         cfg = self.auto_cfg()

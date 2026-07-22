@@ -488,11 +488,11 @@ def fetch_proxy_models(base_url: str, token: str, timeout: float = 5.0) -> set[s
 def build_claude_launch(cfg: dict, forwarded: list[str], environ: dict[str, str] | None = None,
                         *, solo: bool = False) -> tuple[list[str], dict[str, str]]:
     claude = cfg["claude"]
-    args = list(forwarded)
-    if args and args[0] == "--":
-        args.pop(0)
-    # Claude's own `--` terminator ends option scanning: everything after it is
+    # Separator ownership: parse_claude_launch_args consumes Parable's `--`
+    # separators; every token here — including any `--` — belongs to Claude.
+    # Claude's own terminator ends option scanning: everything after it is
     # literal prompt text and must pass through untouched, even option-shaped.
+    args = list(forwarded)
     scan = args[:args.index("--")] if "--" in args else args
     option_names = {arg.split("=", 1)[0] for arg in scan if arg.startswith("-")}
     if "--model" in option_names:
@@ -570,7 +570,10 @@ def parse_claude_launch_args(forwarded: list[str]) -> tuple[str, str | None, lis
         raise ValueError(
             f"--brain {mode!r} is invalid (use {', '.join(CLAUDE_BRAIN_MODES)})"
         )
-    if args and args[0] == "--":
+    # A separator here closes Parable's option region only when a Parable
+    # option was actually consumed; otherwise it is Claude's own terminator
+    # and must be forwarded untouched.
+    if (solo is not None or brain_explicit) and args and args[0] == "--":
         args.pop(0)
     # Scan only Claude's option region: a later standalone `--` is Claude's own
     # terminator, and option-shaped prompt text after it is literal, not misplaced.
@@ -792,7 +795,8 @@ def add_claude_welcome(argv: list[str], launch_env: dict[str, str], cfg: dict,
     skip_flags = {
         "-h", "--help", "-v", "--version", "-p", "--print", "--bare", "--init-only",
     }
-    if any(argument.split("=", 1)[0] in skip_flags for argument in forwarded):
+    scan = forwarded[:forwarded.index("--")] if "--" in forwarded else forwarded
+    if any(argument.split("=", 1)[0] in skip_flags for argument in scan):
         return argv, launch_env
     manifest = PARABLE_WELCOME_PLUGIN / ".claude-plugin" / "plugin.json"
     hook = PARABLE_WELCOME_PLUGIN / "hooks" / "hooks.json"
