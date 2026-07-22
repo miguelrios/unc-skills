@@ -226,6 +226,17 @@ class SemanticRuntimeContractTest(unittest.TestCase):
             runtime.embed_documents(["decision"])
         self.assertEqual(post.call_count, 2)
 
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"VOYAGE_API_KEY": "short-lived-synthetic-embedding-key"},
+            ),
+            mock.patch.object(runtime, "_post", side_effect=malformed) as post,
+            self.assertRaises(json.JSONDecodeError),
+        ):
+            runtime.embed_query("what did we decide?")
+        self.assertEqual(post.call_count, 1)
+
     def test_voyage_environment_profile_has_hosted_batch_defaults(self) -> None:
         environment = {
             "RECALL_EMBEDDING_PROTOCOL": "voyage",

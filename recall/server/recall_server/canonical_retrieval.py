@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
+import urllib.error
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit
@@ -343,11 +345,16 @@ class BoundCanonicalRetrieval:
                 lexical_mode = "relaxed" if lexical else "relaxed-empty"
         semantic: list[dict[str, Any]] = []
         runtime = self.store.semantic_runtime
+        semantic_status = "disabled" if runtime is None else "ok"
         if runtime is not None:
-            vector = runtime.embed_query(query)
-            with self.store.connect() as connection:
-                semantic = connection.execute(
-                    """SELECT chunk.source_id,document.native_id,document.revision,
+            try:
+                vector = runtime.embed_query(query)
+            except (json.JSONDecodeError, TimeoutError, urllib.error.URLError):
+                semantic_status = "unavailable"
+            else:
+                with self.store.connect() as connection:
+                    semantic = connection.execute(
+                        """SELECT chunk.source_id,document.native_id,document.revision,
                               event.occurred_at,chunk.text_redacted,chunk.receipt,
                               1-(embedding.embedding <=> %s::halfvec) AS score
                        FROM canonical_chunk_embeddings embedding
@@ -368,19 +375,19 @@ class BoundCanonicalRetrieval:
                        ORDER BY embedding.embedding <=> %s::halfvec,
                                 event.occurred_at DESC,chunk.chunk_id
                        LIMIT %s""",
-                    (
-                        vector,
-                        self.tenant_id,
-                        sources,
-                        runtime.fingerprint,
-                        since,
-                        since,
-                        until,
-                        until,
-                        vector,
-                        candidate_limit,
-                    ),
-                ).fetchall()
+                        (
+                            vector,
+                            self.tenant_id,
+                            sources,
+                            runtime.fingerprint,
+                            since,
+                            since,
+                            until,
+                            until,
+                            vector,
+                            candidate_limit,
+                        ),
+                    ).fetchall()
         combined: dict[str, tuple[dict[str, Any], float]] = {}
         for weight, rows in ((0.6, lexical), (0.4, semantic)):
             for rank, row in enumerate(rows, start=1):
@@ -401,6 +408,7 @@ class BoundCanonicalRetrieval:
                 "engine": "canonical-v2",
                 "lexical_candidates": len(lexical),
                 "semantic_candidates": len(semantic),
+                "semantic_status": semantic_status,
                 "lexical_mode": lexical_mode,
             },
         }

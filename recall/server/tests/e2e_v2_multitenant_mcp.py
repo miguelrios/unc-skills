@@ -54,6 +54,8 @@ class FakeSemanticRuntime:
         return [self._vector(text) for text in texts]
 
     def embed_query(self, query: str) -> list[float]:
+        if "semantic unavailable" in query:
+            raise TimeoutError("synthetic semantic dependency timeout")
         return self._vector(query)
 
 
@@ -353,6 +355,18 @@ def main() -> None:
             )["result"]["structuredContent"]
             assert unrelated["diagnostics"]["lexical_candidates"] == 0
             assert unrelated["diagnostics"]["lexical_mode"] == "relaxed-empty"
+
+            degraded = rpc(
+                server,
+                personal_token["token"],
+                "recall_search",
+                {"query": "shared launch marker semantic unavailable"},
+            )["result"]["structuredContent"]
+            assert degraded["results"]
+            assert {row["source_id"] for row in degraded["results"]} == {
+                PERSONAL_SOURCE
+            }
+            assert degraded["diagnostics"]["semantic_status"] == "unavailable"
 
             family_routed = rpc(
                 server,

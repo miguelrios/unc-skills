@@ -486,6 +486,8 @@ class SemanticRuntime:
                     self._managed_embedding_endpoint, payload, headers
                 )
             except json.JSONDecodeError:
+                if input_type != "document":
+                    raise
                 response = self._post(
                     self._managed_embedding_endpoint, payload, headers
                 )
