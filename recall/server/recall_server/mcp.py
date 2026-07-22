@@ -118,7 +118,18 @@ READ_TOOLS = (
                     "maxLength": 8192,
                     "description": "A natural-language question or search phrase.",
                 },
-                "filters": {"type": "object", "default": {}},
+                "filters": {
+                    "type": "object",
+                    "default": {},
+                    "properties": {
+                        "since": {"type": "string", "format": "date-time"},
+                        "until": {"type": "string", "format": "date-time"},
+                        "source_id": {"type": "string"},
+                        "source_family": {"type": "string"},
+                        "source_alias": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
