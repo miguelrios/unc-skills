@@ -263,6 +263,25 @@ class TestClaudeLaunch(unittest.TestCase):
             with self.subTest(args=args), self.assertRaisesRegex(ValueError, "mutually exclusive"):
                 parable.parse_claude_launch_args(args)
 
+    def test_parser_treats_post_terminator_tokens_as_literal_prompt_text(self):
+        # After Claude's own `--` terminator, option-shaped tokens are prompt
+        # text, never misplaced Parable options.
+        self.assertEqual(
+            parable.parse_claude_launch_args(
+                ["--solo", "kimi", "--print", "--", "--solo"]
+            ),
+            ("config", "kimi", ["--print", "--", "--solo"]),
+        )
+        self.assertEqual(
+            parable.parse_claude_launch_args(
+                ["--brain", "fable", "--print", "--", "--brain=sol"]
+            ),
+            ("fable", None, ["--print", "--", "--brain=sol"]),
+        )
+        # Before the terminator they are still misplaced.
+        with self.assertRaisesRegex(ValueError, "place Parable's --solo option"):
+            parable.parse_claude_launch_args(["--print", "hi", "--solo", "kimi"])
+
     def test_solo_model_resolution_accepts_aliases_and_exact_ids(self):
         cfg = self.auto_cfg()
         cfg["executors"]["sol_exact"] = {
@@ -287,6 +306,26 @@ class TestClaudeLaunch(unittest.TestCase):
                 cfg, "kimi", {"kimi-k3", "other-kimi-model"}
             )
 
+    def test_solo_alias_covers_any_subagent_provider_not_just_claude_id(self):
+        # SKILL.md promises aliases for enabled exact-model executors whose
+        # provider has type = "subagent", whatever the provider id is.
+        cfg = self.auto_cfg()
+        cfg["providers"]["custom_lane"] = {"type": "subagent"}
+        cfg["executors"]["lane"] = {
+            "provider": "custom_lane", "model": "lane-model-1",
+        }
+        self.assertEqual(
+            parable.resolve_solo_model(cfg, "lane", {"lane-model-1"})[0],
+            "lane-model-1",
+        )
+        # Non-subagent providers never contribute aliases.
+        cfg["providers"]["metered"] = {"type": "codex"}
+        cfg["executors"]["metered_lane"] = {
+            "provider": "metered", "model": "metered-model",
+        }
+        with self.assertRaisesRegex(ValueError, "unknown"):
+            parable.resolve_solo_model(cfg, "metered_lane", {"metered-model"})
+
     def test_solo_launch_disables_agent_delegation_and_teams(self):
         source = {
             "CLIPROXY_API_KEY": "local-token",
@@ -306,12 +345,29 @@ class TestClaudeLaunch(unittest.TestCase):
         self.assertNotIn("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", env)
         for option in (
             "--agent", "--agents", "--allowedTools", "--allowed-tools",
-            "--disallowedTools", "--disallowed-tools",
+            "--disallowedTools", "--disallowed-tools", "--fallback-model",
         ):
-            with self.subTest(option=option), self.assertRaisesRegex(ValueError, "owns agent isolation"):
+            with self.subTest(option=option), self.assertRaisesRegex(
+                ValueError, "owns model selection and agent isolation"
+            ):
                 parable.build_claude_launch(
                     cfg, [option, "value"], source, solo=True
                 )
+        # Option-shaped prompt text after Claude's `--` terminator passes through.
+        argv, _ = parable.build_claude_launch(
+            cfg, ["--print", "--", "--fallback-model", "--agent"], source, solo=True
+        )
+        self.assertEqual(
+            argv,
+            [
+                "claude", "--model", "kimi-k3", "--disallowedTools", "Agent",
+                "--print", "--", "--fallback-model", "--agent",
+            ],
+        )
+        with self.assertRaisesRegex(ValueError, "remove --model"):
+            parable.build_claude_launch(
+                cfg, ["--print", "--model"], source, solo=True
+            )
 
     def test_solo_welcome_has_no_cast_or_delegation_cues(self):
         card = parable.render_claude_solo_welcome(

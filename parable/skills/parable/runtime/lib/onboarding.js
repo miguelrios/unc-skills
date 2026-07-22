@@ -683,7 +683,25 @@ function removeReplacementArtifacts(entries) {
   }
 }
 
+// Durably commit directory-entry changes (temp creation, rename, cleanup) so a
+// host crash after a rename cannot resurface a state the recovery contract does
+// not recognize. Best-effort on platforms that reject directory fsync.
+function fsyncDirectory(directory) {
+  let descriptor;
+  try {
+    descriptor = fs.openSync(directory, "r");
+  } catch {
+    return;
+  }
+  try {
+    fs.fsyncSync(descriptor);
+  } catch { /* some platforms cannot fsync directories */ } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
 function replacePrivateFileSet(entries) {
+  const directories = new Set(entries.map(([target]) => path.dirname(target)));
   removeReplacementArtifacts(entries);
   const temporary = [];
   try {
@@ -699,11 +717,14 @@ function replacePrivateFileSet(entries) {
       fs.chmodSync(temp, 0o600);
       temporary.push(temp);
     }
+    directories.forEach(fsyncDirectory);
     entries.forEach(([target], index) => {
       fs.renameSync(temporary[index], target);
+      fsyncDirectory(path.dirname(target));
     });
   } finally {
     removeReplacementArtifacts(entries);
+    directories.forEach(fsyncDirectory);
   }
 }
 

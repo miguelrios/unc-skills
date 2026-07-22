@@ -113,10 +113,14 @@ When you run `parable --solo kimi`, Parable resolves the alias to `kimi-k3`, ver
 
 Inside a solo session:
 - The **Agent tool is unavailable**. No `Agent()`, no subagents, no agent-team orchestration.
+  Solo disables delegation (the Agent tool and agent teams); it is not a sandbox — the
+  session still loads your normal settings, plugins, hooks, and MCP servers, and existing
+  `.claude/agents` files remain on disk (they are simply not invocable without the Agent tool).
 - Startup skips `parable-config.sh`, agent synchronization, and the multi-model cast card. A **user-only** SOLO startup card is shown instead (session-scoped, no model context cost).
 - The session uses only the selected model. Implement the user's work directly; do not ask to hand it to an executor.
 - Verify and review your own work directly. Do not invoke `parable-review.sh` or seek another model.
-- `--brain` and `--model` flags are rejected (they conflict with solo selection).
+- `--brain`, `--model`, and `--fallback-model` flags are rejected (they conflict with
+  single-model solo selection), as are agent/tool override flags.
 
 Solo refusals are **hard fails** — a solo session does not silently degrade to multi-model or skip Agent invocations. If you need agents or multi-model casting, use normal Parable mode (`parable` or `parable --brain`).
 

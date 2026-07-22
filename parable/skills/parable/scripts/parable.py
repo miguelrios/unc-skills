@@ -344,10 +344,12 @@ def custom_claude_executors(cfg: dict) -> dict[str, dict]:
     file. Arbitrary model ids are preserved exactly in frontmatter.
     """
     result: dict[str, dict] = {}
+    providers = cfg.get("providers", {})
     for executor_id, executor in cfg.get("executors", {}).items():
         if executor.get("enabled", True) is False:
             continue
-        if executor.get("provider") != "claude":
+        provider = providers.get(executor.get("provider"), {})
+        if provider.get("type") != "subagent":
             continue
         model = executor.get("model")
         if isinstance(model, str) and model.lower() not in CLAUDE_AGENT_ALIASES:
@@ -489,7 +491,10 @@ def build_claude_launch(cfg: dict, forwarded: list[str], environ: dict[str, str]
     args = list(forwarded)
     if args and args[0] == "--":
         args.pop(0)
-    option_names = {arg.split("=", 1)[0] for arg in args if arg.startswith("-")}
+    # Claude's own `--` terminator ends option scanning: everything after it is
+    # literal prompt text and must pass through untouched, even option-shaped.
+    scan = args[:args.index("--")] if "--" in args else args
+    option_names = {arg.split("=", 1)[0] for arg in scan if arg.startswith("-")}
     if "--model" in option_names:
         raise ValueError(
             "Parable owns the Claude parent model; remove --model and use --brain or --solo"
@@ -499,10 +504,11 @@ def build_claude_launch(cfg: dict, forwarded: list[str], environ: dict[str, str]
             "--agent", "--agents",
             "--allowedTools", "--allowed-tools",
             "--disallowedTools", "--disallowed-tools",
+            "--fallback-model",
         })
         if conflicts:
             raise ValueError(
-                "solo mode owns agent isolation; remove Claude option(s): "
+                "solo mode owns model selection and agent isolation; remove Claude option(s): "
                 + ", ".join(conflicts)
             )
     source_env = os.environ if environ is None else environ
@@ -566,8 +572,11 @@ def parse_claude_launch_args(forwarded: list[str]) -> tuple[str, str | None, lis
         )
     if args and args[0] == "--":
         args.pop(0)
-    misplaced_brain = any(arg == "--brain" or arg.startswith("--brain=") for arg in args)
-    misplaced_solo = any(arg == "--solo" or arg.startswith("--solo=") for arg in args)
+    # Scan only Claude's option region: a later standalone `--` is Claude's own
+    # terminator, and option-shaped prompt text after it is literal, not misplaced.
+    scan = args[:args.index("--")] if "--" in args else args
+    misplaced_brain = any(arg == "--brain" or arg.startswith("--brain=") for arg in scan)
+    misplaced_solo = any(arg == "--solo" or arg.startswith("--solo=") for arg in scan)
     if misplaced_brain or misplaced_solo:
         if (
             solo is not None and misplaced_brain

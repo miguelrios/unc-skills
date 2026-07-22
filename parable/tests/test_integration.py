@@ -2153,8 +2153,11 @@ for flag, (vendor, record_type) in mapping.items():
             self.assertIn("You are the only agent", captured["welcome_message"])
             self.assertNotIn("BRAIN", captured["welcome_message"])
             self.assertNotIn("CAST", captured["welcome_message"])
-            for path, snapshot in solo_before.items():
-                self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), snapshot)
+            solo_after = {
+                path: (path.read_bytes(), path.stat().st_mtime_ns)
+                for path in agents_dir.glob("parable-*.md")
+            }
+            self.assertEqual(solo_after, solo_before)
 
             solo_exact = self.run_cli(
                 repo, env, "--solo=kimi-k3", "--print", "solo-exact"
