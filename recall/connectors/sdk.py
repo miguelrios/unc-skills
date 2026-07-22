@@ -25,10 +25,14 @@ CONNECTOR_SCHEMA_VERSION_V2 = 2
 MAX_PAGE_RECORDS = 500
 MAX_RECORD_BYTES = 1_000_000
 MAX_PAGE_BYTES = 8_000_000
+MAX_ARCHIVE_OVERRIDE_BYTES = 64 * 1024 * 1024
 IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@/=-]{1,255}\Z")
 CONNECTOR_ID = re.compile(r"[a-z][a-z0-9_.-]{2,63}\Z")
 SOURCE_ID = re.compile(r"[A-Za-z0-9_.:@-]{3,160}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+MEDIA_TYPE = re.compile(
+    r"[a-z0-9][a-z0-9.+-]{0,63}/[a-z0-9][a-z0-9.+-]{0,127}\Z"
+)
 ALLOWED_PROVENANCE_SCHEMES = {"https", "export", "connector", "manual"}
 MAX_ACK_SEED_BYTES = 16_000_000
 MAX_ACK_SEED_RECORDS = 250_000
@@ -284,6 +288,11 @@ def _validate_typed_value(value: Any, specification: dict[str, Any]) -> bool:
         valid
         and ("const" not in specification or value == specification["const"])
         and ("enum" not in specification or value in specification["enum"])
+        and (
+            "pattern" not in specification
+            or isinstance(value, str)
+            and re.fullmatch(specification["pattern"], value) is not None
+        )
     )
 
 
@@ -312,6 +321,19 @@ def _validate_record_common(record: Any) -> None:
         raise ConnectorContractError("provenance uri must not contain credentials, query, or fragment")
     if not isinstance(record.deleted, bool):
         raise ConnectorContractError("deleted must be boolean")
+    if (record.archive_payload is None) != (record.archive_media_type is None):
+        raise ConnectorContractError("archive payload and media type must be configured together")
+    if record.archive_payload is not None and (
+        record.deleted
+        or not isinstance(record.archive_payload, bytes)
+        or not 1 <= len(record.archive_payload) <= MAX_ARCHIVE_OVERRIDE_BYTES
+    ):
+        raise ConnectorContractError("archive payload is invalid")
+    if record.archive_media_type is not None and (
+        not isinstance(record.archive_media_type, str)
+        or not MEDIA_TYPE.fullmatch(record.archive_media_type)
+    ):
+        raise ConnectorContractError("archive media type is invalid")
     object.__setattr__(record, "content", _json_copy(record.content, "content"))
     object.__setattr__(record, "provenance", _json_copy(record.provenance, "provenance"))
     if len(json.dumps({"content": record.content, "provenance": record.provenance}).encode()) > MAX_RECORD_BYTES:
@@ -327,6 +349,8 @@ class ConnectorRecord:
     provenance: dict[str, Any]
     native_parent_id: str | None = None
     deleted: bool = False
+    archive_payload: bytes | None = None
+    archive_media_type: str | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != CONNECTOR_SCHEMA_VERSION:
@@ -533,6 +557,8 @@ class ConnectorRunner:
 
     @staticmethod
     def _raw_payload(record: ConnectorRecord) -> bytes:
+        if record.archive_payload is not None:
+            return record.archive_payload
         return json.dumps(
             {
                 "schema_version": record.schema_version,
@@ -553,13 +579,14 @@ class ConnectorRunner:
         if self.archive is None:
             return None
         payload = self._raw_payload(record)
+        media_type = record.archive_media_type or "application/json"
         try:
             candidate = self.archive.put_raw(
                 tenant_id=self.tenant_id,
                 source_id=self.source_id,
                 native_id=record.native_id,
                 payload=payload,
-                media_type="application/json",
+                media_type=media_type,
                 created_at=record.occurred_at,
             )
         except Exception as error:
@@ -575,7 +602,7 @@ class ConnectorRunner:
             "source_id": self.source_id,
             "content_sha256": hashlib.sha256(payload).hexdigest(),
             "size_bytes": len(payload),
-            "media_type": "application/json",
+            "media_type": media_type,
             "created_at": record.occurred_at,
         }
         if any(reference.get(key) != value for key, value in expected.items()):

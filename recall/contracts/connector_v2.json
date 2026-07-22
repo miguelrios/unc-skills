@@ -76,9 +76,10 @@
       }
     },
     "document.v1": {
-      "optional": ["attachments", "content_omissions", "modified_at", "owner_ids", "parent_id", "participant_ids", "source_url", "surface", "text"],
+      "optional": ["artifact_content_sha256", "attachments", "content_omissions", "modified_at", "owner_ids", "parent_id", "participant_ids", "source_url", "surface", "text"],
       "required": ["content_fidelity", "document_id", "kind", "mime_type", "name"],
       "properties": {
+        "artifact_content_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
         "attachments": {"type": "object_list"},
         "content_fidelity": {"enum": ["complete", "partial"], "type": "string"},
         "content_omissions": {"type": "string_list"},

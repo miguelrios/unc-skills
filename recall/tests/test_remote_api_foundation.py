@@ -25,7 +25,7 @@ from connectors.sdk import ConnectorRateLimited
 REMOTE_CONNECTORS = {
     "google.gmail": {
         "family": "communications",
-        "kinds": ("communication_message.v1",),
+        "kinds": ("communication_message.v1", "document.v1"),
         "auth": "oauth2",
         "acquisition": ("poll",),
     },
@@ -99,7 +99,10 @@ class RemoteRegistryTest(unittest.TestCase):
                 self.assertTrue(item.auth.minimum_scopes)
                 self.assertEqual(item.authority_slots, ("brain", "source"))
                 self.assertEqual(item.policy.default_privacy_mode, "scrub")
-                self.assertFalse(item.policy.attachment_capability)
+                self.assertEqual(
+                    item.policy.attachment_capability,
+                    connector_id == "google.gmail",
+                )
                 self.assertEqual(
                     ConnectorDefinitionV3.from_mapping(item.to_public()),
                     item,

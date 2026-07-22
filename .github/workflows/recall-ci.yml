@@ -62,6 +62,7 @@ jobs:
             e2e_integration_activation.py \
             e2e_connector_registry.py \
             e2e_connector_sdk.py \
+            e2e_gmail_attachments.py \
             e2e_connector_supervisor.py \
             e2e_export_inbox.py \
             e2e_federation_ranking.py \

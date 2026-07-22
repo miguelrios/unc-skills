@@ -77,6 +77,7 @@ def _private_root(path: Path) -> Path:
 def _selector_defaults(connector_id: str) -> dict[str, Any]:
     return {
         "google.gmail": {
+            "include_attachments": False,
             "include_spam_trash": False,
             "label_ids": [],
             "own_addresses": [],

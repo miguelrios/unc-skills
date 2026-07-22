@@ -94,6 +94,26 @@ class ConnectorRecordV2Test(unittest.TestCase):
                 "content": {"kind": "communication_message.v1", "guess": True},
             })
 
+    def test_document_artifact_digest_is_a_closed_sha256(self):
+        content = {
+            "content_fidelity": "complete",
+            "document_id": "document-1",
+            "name": "Synthetic attachment",
+            "mime_type": "text/plain",
+        }
+        valid = self.record(
+            "document.v1",
+            **content,
+            artifact_content_sha256="a" * 64,
+        )
+        self.assertEqual(valid.content["artifact_content_sha256"], "a" * 64)
+        with self.assertRaisesRegex(ConnectorContractError, "invalid field value"):
+            self.record(
+                "document.v1",
+                **content,
+                artifact_content_sha256="not-a-digest",
+            )
+
     def test_every_live_typed_record_requires_truthful_content_fidelity(self):
         minimum = {
             "conversation_id": "thread-1",
@@ -162,7 +182,10 @@ class ConnectorRecordV2Test(unittest.TestCase):
 class ConnectorManifestV2Test(unittest.TestCase):
     def test_google_definitions_are_static_v3_and_content_free(self):
         expected = {
-            "google.gmail": ("communications", ("communication_message.v1",)),
+            "google.gmail": (
+                "communications",
+                ("communication_message.v1", "document.v1"),
+            ),
             "google.calendar": ("schedule", ("calendar_event.v1",)),
             "google.contacts": ("contacts", ("contact_identity.v1",)),
             "google.drive": ("documents", ("document.v1",)),

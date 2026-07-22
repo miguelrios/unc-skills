@@ -550,6 +550,7 @@ def _remote_v3(
     auth_kind: str,
     scopes: list[str],
     selection_fields: list[str],
+    attachment_capability: bool = False,
 ) -> ConnectorDefinitionV3:
     return ConnectorDefinitionV3.from_mapping({
         "schema_version": 3,
@@ -579,7 +580,7 @@ def _remote_v3(
             "privacy_modes": ["drop", "scrub"],
             "default_privacy_mode": "scrub",
             "retention_modes": ["source_controlled"],
-            "attachment_capability": False,
+            "attachment_capability": attachment_capability,
         },
         "selection_fields": selection_fields,
     })
@@ -590,12 +591,13 @@ REMOTE_API_REGISTRY = (
         connector_id="google.gmail",
         command="remote-worker-run",
         source_family="communications",
-        record_kinds=["communication_message.v1"],
+        record_kinds=["communication_message.v1", "document.v1"],
         acquisition=["poll"],
         auth_kind="oauth2",
         scopes=["https://www.googleapis.com/auth/gmail.readonly"],
+        attachment_capability=True,
         selection_fields=[
-            "include_spam_trash", "label_ids", "own_addresses", "query",
+            "include_attachments", "include_spam_trash", "label_ids", "own_addresses", "query",
         ],
     ),
     _remote_v3(

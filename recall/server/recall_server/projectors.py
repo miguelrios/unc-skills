@@ -107,6 +107,11 @@ def _valid_typed_value(value: Any, specification: dict[str, Any]) -> bool:
         valid
         and ("const" not in specification or value == specification["const"])
         and ("enum" not in specification or value in specification["enum"])
+        and (
+            "pattern" not in specification
+            or isinstance(value, str)
+            and re.fullmatch(specification["pattern"], value) is not None
+        )
     )
 
 

@@ -120,8 +120,10 @@ class FakeArchive:
 
 
 def record(native_id: str, text: str, *, deleted: bool = False,
-           native_parent_id: str | None = None) -> ConnectorRecord:
-    return ConnectorRecord.from_mapping({
+           native_parent_id: str | None = None,
+           archive_payload: bytes | None = None,
+           archive_media_type: str | None = None) -> ConnectorRecord:
+    value = {
         "schema_version": 1,
         "native_id": native_id,
         "native_parent_id": native_parent_id,
@@ -129,7 +131,14 @@ def record(native_id: str, text: str, *, deleted: bool = False,
         "content": {"text": text},
         "provenance": {"uri": f"https://example.invalid/items/{native_id}"},
         "deleted": deleted,
-    })
+    }
+    if archive_payload is None and archive_media_type is None:
+        return ConnectorRecord.from_mapping(value)
+    return ConnectorRecord(
+        **value,
+        archive_payload=archive_payload,
+        archive_media_type=archive_media_type,
+    )
 
 
 class ConnectorContractTest(unittest.TestCase):
@@ -265,6 +274,53 @@ class ConnectorRunnerTest(unittest.TestCase):
         self.assertEqual(artifact["tenant_id"], "tenant:synthetic")
         self.assertEqual(artifact["source_id"], connector.source_id)
         runner.close()
+
+    def test_exact_binary_override_is_archived_but_never_spooled_or_projected(self) -> None:
+        exact = b"%PDF-synthetic-binary-attachment\x00\xff"
+        connector = SyntheticConnector({
+            None: ConnectorPage(
+                records=(record(
+                    "attachment-one",
+                    "Extracted searchable attachment text",
+                    native_parent_id="message-one",
+                    archive_payload=exact,
+                    archive_media_type="application/pdf",
+                ),),
+                next_cursor="done",
+                has_more=False,
+            ),
+        })
+        archive = FakeArchive()
+        brain = FakeBrain()
+        runner = ConnectorRunner(
+            connector=connector,
+            brain=brain,
+            archive=archive,
+            tenant_id="tenant:synthetic",
+            principal_id="principal:owner",
+            spool_path=self.spool,
+        )
+
+        self.assertEqual(runner.run_once()["archived"], 1)
+        self.assertEqual(next(iter(archive.objects.values())), exact)
+        event = next(iter(brain.events.values()))
+        self.assertEqual(event["provenance"]["artifact_ref"]["media_type"], "application/pdf")
+        self.assertIn("Extracted searchable attachment text", json.dumps(event))
+        self.assertNotIn(exact, self.spool_bytes())
+        runner.close()
+
+    def test_binary_override_contract_is_closed_and_bounded(self) -> None:
+        with self.assertRaisesRegex(ConnectorContractError, "configured together"):
+            record("missing-media", "safe", archive_payload=b"raw")
+        with self.assertRaisesRegex(ConnectorContractError, "configured together"):
+            record("missing-payload", "safe", archive_media_type="text/plain")
+        with self.assertRaisesRegex(ConnectorContractError, "media type"):
+            record(
+                "invalid-media",
+                "safe",
+                archive_payload=b"raw",
+                archive_media_type="text/plain; credential=synthetic",
+            )
 
     def test_archive_failure_never_stages_calls_brain_or_moves_cursor(self) -> None:
         connector = SyntheticConnector({
