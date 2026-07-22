@@ -16,6 +16,26 @@ python3 scripts/recall.py <command>       # relative to this skill directory
 
 ## Local, central, and shadow modes
 
+### First-run choice
+
+When installing or configuring Recall and no valid client profile exists, do not infer a mode.
+Use the harness's native structured question tool—`AskUserQuestion` in Claude Code or
+`request_user_input` in Codex—to ask one blocking question with exactly these choices:
+
+- **Hosted brain (Recommended):** configure the supplied HTTPS `/mcp` endpoint and private
+  token-file reference.
+- **Local-only:** use the disposable on-device SQLite index without a network service.
+
+Ask: **Where should Recall search?** Do not auto-resolve or silently default to local. If the
+structured question tool is unavailable, ask the same blocking question in the conversation.
+Do not ask again when a valid profile already exists unless the user requests reconfiguration.
+
+After applying the choice, run `python3 scripts/recall.py doctor`. Accept hosted setup only when
+it reports `OK remote`; accept local-only setup only when it reports local index health. A failed
+hosted check stays remote and fails closed—it never falls back to SQLite. If hosted was selected
+but the endpoint or token-file reference is unavailable, ask for the missing reference without
+searching unrelated credential stores or rendering secret values.
+
 With no central configuration, every command behaves exactly as the local engine described below.
 Setting `RECALL_URL` selects the tailnet central service for read commands (`search`, `show`,
 `related`, and `doctor`) and enables deliberate writes (`put` and `delete`). The same flags and output shapes remain valid, and every displayed remote
