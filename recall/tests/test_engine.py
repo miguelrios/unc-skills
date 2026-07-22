@@ -1208,6 +1208,23 @@ class RemoteTransportTest(unittest.TestCase):
         self.assertEqual(RemoteHandler.requests, [])
         self.assertEqual(hashlib.sha256(self.db.read_bytes()).hexdigest(), before)
 
+    def test_central_profile_blocks_accidental_local_rebuild_even_in_local_mode(self):
+        os.environ["RECALL_MODE"] = "local"
+        code, out, error = self.call("index", "--rebuild")
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("local index disabled", error)
+        self.assertIn("cannot repair or refresh the central brain", error)
+        self.assertFalse(self.db.exists())
+        self.assertEqual(RemoteHandler.requests, [])
+
+    def test_central_profile_allows_explicit_local_index_maintenance(self):
+        os.environ["RECALL_MODE"] = "local"
+        code, _out, error = self.call("index", "--allow-local-index")
+        self.assertEqual((code, error), (0, ""))
+        self.assertTrue(self.db.exists())
+        self.assertEqual(RemoteHandler.requests, [])
+
     def test_remote_failure_does_not_silently_fallback(self):
         self.seed_local(); RemoteHandler.fail_search = True
         code, out, err = self.call("search", "deadbeef", "--paths")
