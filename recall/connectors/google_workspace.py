@@ -438,7 +438,7 @@ def _gmail_part_content(
         and expected_size <= MAX_GMAIL_PART_BYTES
         and len(raw) != expected_size
     ):
-        return _GmailPartContent(omissions=("body_part_invalid",))
+        omissions = tuple(sorted(set(omissions) | {"body_size_mismatch"}))
     try:
         decoded = raw.decode(_gmail_charset(part), errors="replace")
     except LookupError:
