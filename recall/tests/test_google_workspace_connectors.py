@@ -313,6 +313,19 @@ class GmailConnectorTest(unittest.TestCase):
             500_000,
         )
 
+    def test_decoded_body_survives_an_inaccurate_provider_size(self):
+        rail = FakeRail()
+        rail.add("gmail.messages.list", {"messages": [{"id": "m1"}]})
+        message = gmail_message("m1", text="Complete body despite size drift")
+        message["payload"]["body"]["size"] = 1
+        rail.add("gmail.messages.get", message)
+
+        record = self.connector(rail).pull(None).records[0]
+
+        self.assertEqual(record.content["text"], "Complete body despite size drift")
+        self.assertEqual(record.content["content_fidelity"], "partial")
+        self.assertEqual(record.content["content_omissions"], ["body_size_mismatch"])
+
     def test_runner_keeps_google_cursor_behind_brain_ack(self):
         rail = FakeRail()
         rail.add("gmail.messages.list", {"messages": [{"id": "m1"}]})
