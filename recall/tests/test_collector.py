@@ -10,7 +10,7 @@ from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from collector.collector import Collector
+from collector.collector import Collector, CollectorRuntimeError
 from privacy.policy import PrivacyPolicy
 
 
@@ -100,6 +100,10 @@ class CollectorTest(unittest.TestCase):
         self.assertEqual(scan["records_queued"], 2)
         self.assertEqual(offline.doctor()["committed_files"], 0)
         self.assertEqual(offline.flush()["acked"], 0)
+        self.assertEqual(
+            offline.doctor(include_dead_letters=False)["last_error_code"],
+            "brain_unavailable",
+        )
         offline.close()
 
         resumed = self.collector()
@@ -107,6 +111,8 @@ class CollectorTest(unittest.TestCase):
         doctor = resumed.doctor()
         self.assertEqual(doctor["pending"], 0)
         self.assertEqual(doctor["committed_files"], 1)
+        self.assertIsNone(doctor["last_error_code"])
+        self.assertGreater(doctor["last_success_epoch"], 0)
         resumed.close()
 
     def test_disconnect_after_commit_replays_without_duplicate(self) -> None:
@@ -125,6 +131,86 @@ class CollectorTest(unittest.TestCase):
         self.assertEqual(Path(located["path"]).name, "session.jsonl")
         self.assertGreater(located["end_offset"], located["start_offset"])
         collector.close()
+
+    def test_successful_ack_clears_resolved_recovery_dead_letter(self) -> None:
+        (self.root / "session.jsonl").write_text(claude_line("recovered"))
+        collector = self.collector()
+        collector.scan()
+        row = collector.db.execute(
+            "SELECT path,start_offset FROM outbox WHERE state='pending'"
+        ).fetchone()
+        collector.db.execute(
+            "INSERT INTO dead_letters(path,byte_offset,error_code,error_summary,created_at) "
+            "VALUES (?,?,?,?,?)",
+            (
+                row["path"],
+                row["start_offset"],
+                "RecoveryError",
+                "record recovery rejected",
+                time.time(),
+            ),
+        )
+        collector.db.commit()
+
+        self.assertEqual(collector.doctor()["dead_letter_count"], 1)
+        self.assertEqual(collector.flush()["acked"], 1)
+        self.assertEqual(collector.doctor()["dead_letter_count"], 0)
+        collector.close()
+
+    def test_startup_clears_only_legacy_recovery_markers_for_acked_rows(self) -> None:
+        (self.root / "session.jsonl").write_text(claude_line("already acknowledged"))
+        collector = self.collector()
+        collector.scan()
+        collector.flush()
+        row = collector.db.execute(
+            "SELECT path,start_offset FROM outbox WHERE state='acked'"
+        ).fetchone()
+        collector.db.executemany(
+            "INSERT INTO dead_letters(path,byte_offset,error_code,error_summary,created_at) "
+            "VALUES (?,?,?,?,?)",
+            [
+                (
+                    row["path"],
+                    row["start_offset"],
+                    "RecoveryError",
+                    "record recovery rejected",
+                    time.time(),
+                ),
+                (
+                    row["path"],
+                    row["start_offset"] + 1,
+                    "JSONDecodeError",
+                    "record rejected",
+                    time.time(),
+                ),
+            ],
+        )
+        collector.db.commit()
+        collector.close()
+
+        migrated = self.collector()
+        codes = [item["error_code"] for item in migrated.doctor()["dead_letters"]]
+        self.assertEqual(codes, ["JSONDecodeError"])
+        migrated.close()
+
+    def test_startup_backfills_legacy_last_success_from_acked_outbox(self) -> None:
+        (self.root / "session.jsonl").write_text(claude_line("legacy acknowledgement"))
+        collector = self.collector()
+        collector.scan()
+        collector.flush()
+        acked_at = collector.db.execute(
+            "SELECT acked_at FROM outbox WHERE state='acked'"
+        ).fetchone()[0]
+        collector.db.execute("DELETE FROM meta WHERE key='last_success_epoch'")
+        collector.db.commit()
+        collector.close()
+
+        migrated = self.collector()
+        self.assertEqual(
+            migrated.doctor(include_dead_letters=False)["last_success_epoch"],
+            int(acked_at),
+        )
+        migrated.close()
 
     def test_process_death_after_remote_commit_before_local_ack_replays_exactly_once(self) -> None:
         (self.root / "session.jsonl").write_text(claude_line("committed before local ack"))
@@ -608,8 +694,14 @@ class CollectorTest(unittest.TestCase):
             tenant_id="tenant:personal",
             archive_workers=1,
         )
-        self.assertEqual(collector.scan()["records_queued"], 1001)
+        first = collector.scan()
+        self.assertEqual(first["records_queued"], 1000)
+        self.assertFalse(first["scan_complete"])
         self.assertEqual(collector.doctor()["acked"], 1000)
+        self.assertEqual(collector.doctor()["pending"], 0)
+        second = collector.scan()
+        self.assertEqual(second["records_queued"], 1)
+        self.assertTrue(second["scan_complete"])
         self.assertEqual(collector.doctor()["pending"], 1)
         self.assertEqual(collector.flush()["acked"], 1)
         collector.close()
@@ -804,6 +896,98 @@ class CollectorTest(unittest.TestCase):
         )
         collector.scan()
         self.assertEqual({event["visibility"] for event in collector.pending_envelopes()}, {"shared"})
+        collector.close()
+
+    def test_large_tree_is_bounded_resumable_and_unchanged_rerun_is_incremental(self) -> None:
+        transcript = self.root / "large.jsonl"
+        transcript.write_text(
+            "".join(claude_line(f"record-{index}") for index in range(2501))
+        )
+        collector = Collector(
+            root=self.root,
+            harness="claude",
+            source_id="claude:linux:test",
+            spool_path=self.spool,
+            endpoint=self.endpoint,
+            token="test-token-not-a-secret",
+            max_scan_records=250,
+            max_scan_seconds=5,
+        )
+
+        started = time.monotonic()
+        slices = []
+        while True:
+            result = collector.scan()
+            slices.append(result)
+            self.assertLessEqual(result["records_queued"], 250)
+            if result["scan_complete"]:
+                break
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(sum(item["records_queued"] for item in slices), 2501)
+        self.assertEqual(len(slices), 11)
+        self.assertLess(elapsed, 5.0)
+        rerun = collector.scan()
+        self.assertTrue(rerun["scan_complete"])
+        self.assertEqual(rerun["records_queued"], 0)
+        self.assertEqual(collector.doctor(include_dead_letters=False)["pending"], 2501)
+        collector.close()
+
+    def test_archive_failure_is_content_free_recoverable_and_never_advances_scan(self) -> None:
+        (self.root / "session.jsonl").write_text(claude_line("synthetic"))
+
+        class Archive:
+            fail = True
+
+            def put_raw(inner, **kwargs):
+                if inner.fail:
+                    raise OSError("private archive detail")
+                digest = hashlib.sha256(kwargs["payload"]).hexdigest()
+                return {
+                    "contract": "recall.artifact-ref.v1",
+                    "schema_version": 1,
+                    "tenant_id": kwargs["tenant_id"],
+                    "source_id": kwargs["source_id"],
+                    "artifact_id": "art_" + digest[:32],
+                    "storage_backend": "s3",
+                    "object_key": "objects/aa/" + digest,
+                    "content_sha256": digest,
+                    "size_bytes": len(kwargs["payload"]),
+                    "media_type": kwargs["media_type"],
+                    "encryption": "sse-s3",
+                    "version_id": "synthetic-version",
+                    "created_at": kwargs["created_at"],
+                }
+
+        class Writer:
+            def ingest(self, _events):
+                raise AssertionError("scan must archive before ingest")
+
+        archive = Archive()
+        collector = Collector(
+            root=self.root,
+            harness="claude",
+            source_id="claude:linux:test",
+            spool_path=self.spool,
+            endpoint=self.endpoint,
+            token="test-token-not-a-secret",
+            brain_writer=Writer(),
+            archive=archive,
+            tenant_id="tenant:personal",
+            archive_workers=1,
+        )
+
+        with self.assertRaisesRegex(CollectorRuntimeError, "archive_unavailable"):
+            collector.scan()
+        failed = collector.doctor(include_dead_letters=False)
+        self.assertEqual(failed["last_error_code"], "archive_unavailable")
+        self.assertEqual(failed["pending"], 0)
+        self.assertFalse(failed["running"])
+
+        archive.fail = False
+        recovered = collector.scan()
+        self.assertEqual(recovered["records_queued"], 1)
+        self.assertIsNone(collector.doctor(include_dead_letters=False)["last_error_code"])
         collector.close()
 
     def test_giant_file_resumes_from_durable_scan_checkpoint(self) -> None:

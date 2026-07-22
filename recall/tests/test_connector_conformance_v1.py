@@ -30,6 +30,7 @@ def record(native_id: str, text: str, *, deleted: bool = False) -> ConnectorReco
             if deleted
             else {
                 "kind": "communication_message.v1",
+                "content_fidelity": "complete",
                 "conversation_id": "conversation-1",
                 "message_id": native_id,
                 "direction": "inbound",
@@ -125,9 +126,24 @@ class ReferenceFactory:
         if self.mutant == "wrong_identity":
             connector_id = "synthetic.other"
         one = record("message-1", "synthetic first")
+        if scenario == "content_fidelity":
+            if self.mutant == "missing_fidelity":
+                one.content.pop("content_fidelity")
+            elif self.mutant == "empty_partial_omissions":
+                one.content["content_fidelity"] = "partial"
+                one.content["content_omissions"] = []
+            elif self.mutant == "complete_with_omissions":
+                one.content["content_omissions"] = ["body_truncated"]
+            elif self.mutant == "unstable_omissions":
+                one.content["content_fidelity"] = "partial"
+                one.content["content_omissions"] = [
+                    "snippet_fallback", "body_unavailable",
+                ]
+            elif self.mutant == "snippet_complete":
+                one.content["format"] = "snippet"
         pages: dict[str | None, ConnectorPage | object]
         rate_limited = False
-        if scenario in {"first_page", "lost_ack", "wire"}:
+        if scenario in {"content_fidelity", "first_page", "lost_ack", "wire"}:
             pages = {None: ConnectorPage(records=(one,), next_cursor="done", has_more=False)}
         elif scenario == "pagination":
             pages = {
@@ -224,6 +240,11 @@ class ConnectorConformanceTest(unittest.TestCase):
             "changed_replay",
             "rate_limit_as_success",
             "invalid_as_success",
+            "missing_fidelity",
+            "empty_partial_omissions",
+            "complete_with_omissions",
+            "unstable_omissions",
+            "snippet_complete",
         )
         for mutant in mutants:
             with self.subTest(mutant=mutant):

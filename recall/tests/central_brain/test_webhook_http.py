@@ -20,6 +20,7 @@ def webhook_body(
     record = {"kind": "communication_message.v1"}
     if not deleted:
         record.update({
+            "content_fidelity": "complete",
             "conversation_id": "conversation-1",
             "direction": "inbound",
             "message_id": event_id,

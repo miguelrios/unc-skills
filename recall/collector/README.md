@@ -18,8 +18,16 @@ python -m collector.cli run \
   --visibility private
 ```
 
-`doctor` reports file coverage, parse/dead-letter rate, pending/acked records, committed files,
-and acknowledgement latency p95. `locate --receipt ...` maps a central receipt back to its
+Each scan invocation is resumably bounded to 1,000 complete JSONL records or 20
+seconds by default. Override these closed deployment bounds with
+`--max-scan-records` and `--max-scan-seconds`. A bounded slice retains its exact
+byte checkpoint and scan membership, never infers deletion from unvisited files,
+and resumes before it advances to later work. An unchanged rerun reads no record
+bodies and queues no versions.
+
+`doctor` reports file coverage, parse/dead-letter rate, pending/acked records,
+committed files, acknowledgement latency p95, last successful Brain ACK, bounded
+scan completion, and stable runtime error state. `locate --receipt ...` maps a central receipt back to its
 original local file and exact byte window without retaining acknowledged envelope bodies.
 Transport batches are capped at 8 MB under the server's authenticated 12 MB request ceiling.
 An oversized row retains its source coordinates and is losslessly recoverable with `recover` after

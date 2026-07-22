@@ -146,6 +146,7 @@ class SelectedTextConnector:
                 occurred_at=modified,
                 content={
                     "kind": "document.v1",
+                    "content_fidelity": "complete",
                     "document_id": native_id,
                     "mime_type": mime_type,
                     "modified_at": modified,

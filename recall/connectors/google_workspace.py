@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -11,6 +12,11 @@ from email.message import Message
 from email.utils import getaddresses
 from html.parser import HTMLParser
 from typing import Any, Mapping, Protocol
+
+from connectors.attachment_extract import (
+    SUPPORTED_MEDIA_TYPES,
+    extract_attachment_text,
+)
 
 from connectors.sdk import (
     ConnectorContractError,
@@ -25,6 +31,8 @@ from connectors.workspace_rail import WorkspaceRailError
 
 MAX_TEXT_BYTES = 500_000
 MAX_GMAIL_PART_BYTES = 750_000
+MAX_GMAIL_ATTACHMENTS = 8
+MAX_GMAIL_ATTACHMENT_BYTES = 8 * 1024 * 1024
 MAX_SELECTOR_BYTES = 4_096
 MAX_ITEMS = 500
 EPOCH = "1970-01-01T00:00:00Z"
@@ -205,8 +213,10 @@ def _record(
     parent: str | None = None,
     deleted: bool = False,
     provenance_uri: str,
+    archive_payload: bytes | None = None,
+    archive_media_type: str | None = None,
 ) -> ConnectorRecordV2:
-    return ConnectorRecordV2.from_mapping({
+    value = {
         "schema_version": 2,
         "native_id": native_id,
         "native_parent_id": parent,
@@ -214,7 +224,14 @@ def _record(
         "content": {"kind": kind} if deleted else {"kind": kind, **(content or {})},
         "provenance": {"uri": provenance_uri},
         "deleted": deleted,
-    })
+    }
+    if archive_payload is None and archive_media_type is None:
+        return ConnectorRecordV2.from_mapping(value)
+    return ConnectorRecordV2(
+        **value,
+        archive_payload=archive_payload,
+        archive_media_type=archive_media_type,
+    )
 
 
 def _header_values(payload: Mapping[str, Any]) -> dict[str, str]:
@@ -230,12 +247,22 @@ def _header_values(payload: Mapping[str, Any]) -> dict[str, str]:
 
 
 @dataclass(frozen=True)
+class _GmailAttachmentPart:
+    media_type: str
+    name: str | None
+    size_bytes: int | None
+    external_id: str | None
+    inline_data: str | None
+    ordinal: int
+
+
+@dataclass(frozen=True)
 class _GmailPartContent:
     text: str = ""
     format: str | None = None
     quality: int = 0
     omissions: tuple[str, ...] = ()
-    attachments: tuple[dict[str, Any], ...] = ()
+    attachments: tuple[_GmailAttachmentPart, ...] = ()
 
 
 class _HTMLText(HTMLParser):
@@ -327,19 +354,26 @@ def _decode_gmail_data(value: Any) -> tuple[bytes | None, tuple[str, ...]]:
     return decoded, ()
 
 
-def _attachment_metadata(part: Mapping[str, Any]) -> dict[str, Any]:
+def _attachment_part(part: Mapping[str, Any], *, ordinal: int) -> _GmailAttachmentPart:
     body = part.get("body")
     body = body if isinstance(body, dict) else {}
-    value: dict[str, Any] = {
-        "mime_type": _text(part.get("mimeType"), fallback="application/octet-stream"),
-    }
+    media_type = _text(part.get("mimeType"), fallback="application/octet-stream")
     filename = part.get("filename")
-    if isinstance(filename, str) and filename:
-        value["name"] = _text(filename)
+    name = _text(filename) if isinstance(filename, str) and filename else None
     size = body.get("size")
-    if type(size) is int and size >= 0:
-        value["size_bytes"] = size
-    return value
+    size_bytes = size if type(size) is int and size >= 0 else None
+    external_id = body.get("attachmentId")
+    external_id = external_id if isinstance(external_id, str) and external_id else None
+    inline_data = body.get("data")
+    inline_data = inline_data if isinstance(inline_data, str) and inline_data else None
+    return _GmailAttachmentPart(
+        media_type=media_type,
+        name=name,
+        size_bytes=size_bytes,
+        external_id=external_id,
+        inline_data=inline_data,
+        ordinal=ordinal,
+    )
 
 
 def _is_file_attachment(part: Mapping[str, Any]) -> bool:
@@ -364,7 +398,7 @@ def _gmail_part_content(
     if _is_file_attachment(part):
         return _GmailPartContent(
             omissions=("file_attachments",),
-            attachments=(_attachment_metadata(part),),
+            attachments=(_attachment_part(part, ordinal=visited[0]),),
         )
 
     mime_type = part.get("mimeType")
@@ -438,7 +472,7 @@ def _gmail_part_content(
         and expected_size <= MAX_GMAIL_PART_BYTES
         and len(raw) != expected_size
     ):
-        return _GmailPartContent(omissions=("body_part_invalid",))
+        omissions = tuple(sorted(set(omissions) | {"body_size_mismatch"}))
     try:
         decoded = raw.decode(_gmail_charset(part), errors="replace")
     except LookupError:
@@ -486,6 +520,60 @@ def _addresses(*values: str) -> tuple[str, ...]:
     return tuple(sorted(result))
 
 
+def _attachment_metadata(part: _GmailAttachmentPart) -> dict[str, Any]:
+    value: dict[str, Any] = {"mime_type": part.media_type}
+    if part.name:
+        value["name"] = part.name
+    if part.size_bytes is not None:
+        value["size_bytes"] = part.size_bytes
+    return value
+
+
+def _exact_attachment_bytes(
+    rail: WorkspaceClient,
+    *,
+    message_id: str,
+    part: _GmailAttachmentPart,
+) -> tuple[bytes | None, tuple[str, ...]]:
+    if part.size_bytes is not None and part.size_bytes > MAX_GMAIL_ATTACHMENT_BYTES:
+        return None, ("attachment_size_limit",)
+    data = part.inline_data
+    expected_size = part.size_bytes
+    if data is None and part.external_id is not None:
+        try:
+            fetched = rail.run("gmail.messages.attachments.get", {
+                "userId": "me",
+                "messageId": message_id,
+                "id": part.external_id,
+            })
+        except WorkspaceRailError:
+            return None, ("attachment_unavailable",)
+        fetched = _mapping(fetched, "gmail attachment")
+        fetched_size = fetched.get("size")
+        if type(fetched_size) is not int or fetched_size < 0:
+            return None, ("attachment_malformed",)
+        if fetched_size > MAX_GMAIL_ATTACHMENT_BYTES:
+            return None, ("attachment_size_limit",)
+        expected_size = fetched_size
+        data = fetched.get("data")
+    if not isinstance(data, str) or not data:
+        return None, ("attachment_unavailable",)
+    try:
+        encoded = data.encode("ascii")
+        padded = encoded + b"=" * (-len(encoded) % 4)
+        raw = base64.b64decode(padded, altchars=b"-_", validate=True)
+    except (UnicodeEncodeError, ValueError, base64.binascii.Error):
+        return None, ("attachment_malformed",)
+    if len(raw) > MAX_GMAIL_ATTACHMENT_BYTES:
+        return None, ("attachment_size_limit",)
+    omissions = (
+        ("attachment_size_mismatch",)
+        if expected_size is not None and len(raw) != expected_size
+        else ()
+    )
+    return raw, omissions
+
+
 class GmailConnector:
     connector_id = "google.gmail"
 
@@ -498,6 +586,7 @@ class GmailConnector:
         label_ids: tuple[str, ...] = (),
         query: str | None = None,
         include_spam_trash: bool = False,
+        include_attachments: bool = False,
         page_size: int = 100,
     ):
         if not callable(getattr(rail, "run", None)):
@@ -512,11 +601,87 @@ class GmailConnector:
         if not isinstance(include_spam_trash, bool):
             raise ConnectorContractError("include_spam_trash is invalid")
         self.include_spam_trash = include_spam_trash
+        if not isinstance(include_attachments, bool):
+            raise ConnectorContractError("include_attachments is invalid")
+        self.include_attachments = include_attachments
         if type(page_size) is not int or not 1 <= page_size <= 500:
             raise ConnectorContractError("page_size is invalid")
-        self.page_size = page_size
+        self.page_size = min(page_size, 2) if include_attachments else page_size
 
-    def _message(self, value: Any) -> tuple[ConnectorRecordV2, str]:
+    def _attachment_records(
+        self,
+        *,
+        message_id: str,
+        occurred_at: str,
+        parts: tuple[_GmailAttachmentPart, ...],
+    ) -> tuple[list[ConnectorRecordV2], list[dict[str, Any]], set[str]]:
+        records: list[ConnectorRecordV2] = []
+        metadata: list[dict[str, Any]] = []
+        omissions: set[str] = set()
+        identities: set[str] = set()
+        if len(parts) > MAX_GMAIL_ATTACHMENTS:
+            omissions.add("attachment_count_limit")
+        for part in parts[:MAX_GMAIL_ATTACHMENTS]:
+            public = _attachment_metadata(part)
+            media_type = part.media_type.casefold()
+            if media_type not in SUPPORTED_MEDIA_TYPES:
+                public["content_fidelity"] = "partial"
+                public["content_omissions"] = ["attachment_unsupported_type"]
+                omissions.add("attachment_unsupported_type")
+                metadata.append(public)
+                continue
+            basis = (
+                f"{message_id}\0{part.external_id or f'inline:{part.ordinal}'}"
+            ).encode()
+            document_id = f"gmail-attachment:{message_id}:{hashlib.sha256(basis).hexdigest()[:32]}"
+            if document_id in identities:
+                continue
+            identities.add(document_id)
+            raw, byte_omissions = _exact_attachment_bytes(
+                self.rail,
+                message_id=message_id,
+                part=part,
+            )
+            if raw is None:
+                public["content_fidelity"] = "partial"
+                public["content_omissions"] = list(byte_omissions)
+                omissions.update(byte_omissions)
+                metadata.append(public)
+                continue
+            extraction = extract_attachment_text(raw, media_type)
+            record_omissions = tuple(sorted(set(byte_omissions) | set(extraction.omissions)))
+            content: dict[str, Any] = {
+                "artifact_content_sha256": hashlib.sha256(raw).hexdigest(),
+                "content_fidelity": "partial" if record_omissions else "complete",
+                "document_id": document_id,
+                "mime_type": media_type,
+                "name": part.name or f"attachment-{part.ordinal}",
+                "parent_id": f"gmail:{message_id}",
+                "surface": "gmail_attachment",
+            }
+            if extraction.text:
+                content["text"] = extraction.text
+            if record_omissions:
+                content["content_omissions"] = list(record_omissions)
+                omissions.update(record_omissions)
+            public["document_id"] = document_id
+            public["content_fidelity"] = content["content_fidelity"]
+            if record_omissions:
+                public["content_omissions"] = list(record_omissions)
+            metadata.append(public)
+            records.append(_record(
+                native_id=document_id,
+                parent=f"gmail:{message_id}",
+                occurred_at=occurred_at,
+                kind="document.v1",
+                content=content,
+                provenance_uri="connector://google-gmail-attachment",
+                archive_payload=raw,
+                archive_media_type=media_type,
+            ))
+        return records, metadata, omissions
+
+    def _message(self, value: Any) -> tuple[tuple[ConnectorRecordV2, ...], str]:
         message = _mapping(value, "gmail message")
         message_id = _bounded_string(message.get("id"), "gmail message id")
         thread_id = _bounded_string(message.get("threadId"), "gmail thread id")
@@ -532,20 +697,36 @@ class GmailConnector:
         participants = tuple(sorted(set(senders) | set(recipients)))
         direction = "outbound" if set(senders) & set(self.own_addresses) else "inbound"
         body = _gmail_content(self.rail, message_id, payload, message.get("snippet"))
+        occurred_at = _millisecond_timestamp(message.get("internalDate"))
+        body_omissions = set(body.omissions)
+        attachment_records: list[ConnectorRecordV2] = []
+        attachment_metadata: list[dict[str, Any]] = []
+        if body.attachments and self.include_attachments:
+            body_omissions.discard("file_attachments")
+            attachment_records, attachment_metadata, attachment_omissions = (
+                self._attachment_records(
+                    message_id=message_id,
+                    occurred_at=occurred_at,
+                    parts=body.attachments,
+                )
+            )
+            body_omissions.update(attachment_omissions)
+        elif body.attachments:
+            attachment_metadata = [_attachment_metadata(part) for part in body.attachments]
         content: dict[str, Any] = {
             "conversation_id": f"gmail-thread:{thread_id}",
             "message_id": f"gmail:{message_id}",
             "direction": direction,
             "text": body.text,
-            "content_fidelity": "partial" if body.omissions else "complete",
+            "content_fidelity": "partial" if body_omissions else "complete",
             "surface": "gmail",
         }
         if body.format:
             content["format"] = body.format
-        if body.omissions:
-            content["content_omissions"] = list(body.omissions)
-        if body.attachments:
-            content["attachments"] = list(body.attachments)
+        if body_omissions:
+            content["content_omissions"] = sorted(body_omissions)
+        if attachment_metadata:
+            content["attachments"] = attachment_metadata
         if participants:
             content["participant_ids"] = list(participants)
         if senders:
@@ -553,18 +734,18 @@ class GmailConnector:
         subject = headers.get("subject")
         if subject:
             content["subject"] = _text(subject)
-        occurred_at = _millisecond_timestamp(message.get("internalDate"))
         content["sent_at" if direction == "outbound" else "received_at"] = occurred_at
-        return _record(
+        parent_record = _record(
             native_id=f"gmail:{message_id}",
             parent=f"gmail-thread:{thread_id}",
             occurred_at=occurred_at,
             kind="communication_message.v1",
             content=content,
             provenance_uri="connector://google-gmail",
-        ), history_id
+        )
+        return (parent_record, *attachment_records), history_id
 
-    def _get(self, message_id: str) -> tuple[ConnectorRecordV2, str]:
+    def _get(self, message_id: str) -> tuple[tuple[ConnectorRecordV2, ...], str]:
         value = self.rail.run("gmail.messages.get", {
             "userId": "me",
             "id": message_id,
@@ -599,8 +780,8 @@ class GmailConnector:
         for raw in raw_messages:
             summary = _mapping(raw, "gmail message summary")
             message_id = _bounded_string(summary.get("id"), "gmail message id")
-            record, history_id = self._get(message_id)
-            records.append(record)
+            message_records, history_id = self._get(message_id)
+            records.extend(message_records)
             history_ids.append(history_id)
         next_page = _optional_string(response.get("nextPageToken"), "gmail page token")
         latest = max(history_ids, key=lambda item: int(item)) if history_ids else None
@@ -673,8 +854,8 @@ class GmailConnector:
                 provenance_uri="connector://google-gmail",
             ))
         for message_id in sorted(set(changed) - set(deleted)):
-            record, _history_id = self._get(message_id)
-            records.append(record)
+            message_records, _history_id = self._get(message_id)
+            records.extend(message_records)
         next_page = _optional_string(response.get("nextPageToken"), "gmail page token")
         if next_page:
             next_cursor = _cursor({
@@ -778,6 +959,7 @@ class GoogleCalendarConnector:
         end, end_all_day = _calendar_time(event.get("end"))
         content: dict[str, Any] = {
             "calendar_id": self.calendar_id,
+            "content_fidelity": "complete",
             "event_id": event_id,
             "start": start,
             "end": end,
@@ -951,6 +1133,7 @@ class GoogleContactsConnector:
         identifier = primary_email or primary_phone
         identifier_type = "email" if primary_email else "phone" if primary_phone else "google_person"
         content: dict[str, Any] = {
+            "content_fidelity": "complete",
             "identity_id": identity_id,
             "identifier_type": identifier_type,
             "display_name": display_name,
@@ -1094,6 +1277,8 @@ class GoogleDriveConnector:
         name = _bounded_string(item.get("name"), "drive file name", maximum=MAX_TEXT_BYTES)
         mime_type = _bounded_string(item.get("mimeType"), "drive mime type")
         content: dict[str, Any] = {
+            "content_fidelity": "partial",
+            "content_omissions": ["document_text_not_exported"],
             "document_id": file_id,
             "name": name,
             "mime_type": mime_type,
@@ -1130,6 +1315,8 @@ class GoogleDriveConnector:
             if not isinstance(exported, bytes):
                 raise ConnectorContractError("drive export is invalid")
             content["text"] = _text(exported.decode(errors="replace"))
+            content["content_fidelity"] = "complete"
+            content.pop("content_omissions")
         return _record(
             native_id=native_id,
             occurred_at=occurred_at,

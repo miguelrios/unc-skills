@@ -23,6 +23,7 @@ def body(*, text: str = "synthetic cobalt webhook", deleted: bool = False) -> di
     record = {"kind": "communication_message.v1"}
     if not deleted:
         record.update({
+            "content_fidelity": "complete",
             "conversation_id": "synthetic-conversation",
             "direction": "inbound",
             "message_id": "synthetic-event",

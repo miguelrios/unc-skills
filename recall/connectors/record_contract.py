@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
+
+
+OMISSION_CODE = re.compile(r"[a-z][a-z0-9_]{2,63}\Z")
 
 
 def _json_copy(value: Any, label: str) -> Any:
@@ -41,6 +45,8 @@ def load_typed_record_fields() -> dict[str, dict[str, Any]]:
         optional = set(schema["optional"])
         if (
             "kind" not in required
+            or "content_fidelity" not in required
+            or "content_omissions" not in optional
             or required & optional
             or required | optional != set(schema["properties"])
         ):
@@ -56,3 +62,26 @@ def load_typed_record_fields() -> dict[str, dict[str, Any]]:
 
 TYPED_RECORD_FIELDS = load_typed_record_fields()
 
+
+def validate_content_fidelity(content: dict[str, Any], *, deleted: bool = False) -> None:
+    """Reject dishonest or unstable fidelity claims before records reach durable state."""
+    if deleted:
+        return
+    fidelity = content.get("content_fidelity")
+    omissions = content.get("content_omissions")
+    valid_omissions = (
+        isinstance(omissions, list)
+        and bool(omissions)
+        and omissions == sorted(set(omissions))
+        and all(isinstance(item, str) and OMISSION_CODE.fullmatch(item) for item in omissions)
+    )
+    if (
+        (fidelity == "complete" and omissions is not None)
+        or (fidelity == "partial" and not valid_omissions)
+        or fidelity not in {"complete", "partial"}
+    ):
+        raise ValueError("content fidelity is invalid")
+    if content.get("format") == "snippet" and (
+        fidelity != "partial" or "snippet_fallback" not in omissions
+    ):
+        raise ValueError("content fidelity is invalid")

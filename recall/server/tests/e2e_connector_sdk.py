@@ -32,15 +32,28 @@ def value(native_id: str, text: str, *, deleted: bool = False) -> ConnectorRecor
     })
 
 
-def typed_value() -> ConnectorRecordV2:
+def typed_value(
+    native_id: str = "typed-message",
+    *,
+    fidelity: str = "complete",
+    omissions: list[str] | None = None,
+) -> ConnectorRecordV2:
+    content = {
+        "kind": "communication_message.v1", "conversation_id": "typed-thread",
+        "message_id": native_id, "direction": "inbound",
+        "content_fidelity": fidelity,
+        "subject": "synthetic typed subject",
+        "text": (
+            "partial typed connector evidence"
+            if fidelity == "partial" else "typed connector evidence"
+        ),
+    }
+    if omissions is not None:
+        content["content_omissions"] = omissions
     return ConnectorRecordV2.from_mapping({
-        "schema_version": 2, "native_id": "typed-message", "native_parent_id": "typed-thread",
+        "schema_version": 2, "native_id": native_id, "native_parent_id": "typed-thread",
         "occurred_at": "2026-07-14T00:00:00Z",
-        "content": {
-            "kind": "communication_message.v1", "conversation_id": "typed-thread",
-            "message_id": "typed-message", "direction": "inbound",
-            "subject": "synthetic typed subject", "text": "typed connector evidence",
-        },
+        "content": content,
         "provenance": {"uri": "connector://synthetic/typed-message"}, "deleted": False,
     })
 
@@ -55,6 +68,10 @@ class Pages:
                 value("safe-one", "connector postgres exact safe marker"),
                 value("scrub-one", "keep context api_key=connector-postgres-secret-canary after"),
                 typed_value(),
+                typed_value(
+                    "typed-partial-message", fidelity="partial",
+                    omissions=["body_truncated"],
+                ),
             ), next_cursor="page-1", has_more=True),
             "page-1": ConnectorPage(records=(
                 value("scrub-one", "keep context api_key=connector-postgres-secret-canary after"),
@@ -94,14 +111,19 @@ def main() -> None:
             privacy=PrivacyPolicy(mode="scrub"),
         )
         first = runner.run_once()
-        assert first["acked"] == 3
-        assert first["privacy"]["actions"] == {"keep": 2, "scrub": 1}
+        assert first["acked"] == 4
+        assert first["privacy"]["actions"] == {"keep": 3, "scrub": 1}
         assert store.search("connector postgres exact safe marker", authorized_source=SOURCE)["results"]
         assert store.search("synthetic typed subject", authorized_source=SOURCE)["results"]
+        partial = store.search(
+            "partial typed connector evidence", authorized_source=SOURCE,
+        )["results"]
+        assert partial
+        assert store.resolve(partial[0]["receipt"], authorized_source=SOURCE)
         assert store.search("connector-postgres-secret-canary", authorized_source=SOURCE)["results"] == []
         with store.connect() as connection:
-            assert connection.execute("SELECT count(*) AS n FROM source_events").fetchone()["n"] == 3
-            assert connection.execute("SELECT count(*) AS n FROM items WHERE deleted_at IS NULL").fetchone()["n"] == 3
+            assert connection.execute("SELECT count(*) AS n FROM source_events").fetchone()["n"] == 4
+            assert connection.execute("SELECT count(*) AS n FROM items WHERE deleted_at IS NULL").fetchone()["n"] == 4
         second = runner.run_once()
         assert second["acked"] == 1
         assert second["deduplicated"] == 1
@@ -114,8 +136,8 @@ def main() -> None:
         runner.close()
         assert b"connector-postgres-secret-canary" not in spool.read_bytes()
         print(json.dumps({
-            "status": "pass", "records_acked": 4, "typed_records_acked": 1,
-            "typed_search_hits": 1, "exact_repeats_suppressed": 2,
+            "status": "pass", "records_acked": 5, "typed_records_acked": 2,
+            "typed_search_hits": 2, "exact_repeats_suppressed": 2,
             "searchable_before_delete": 1,
             "searchable_after_delete": 0, "canary_search_hits": 0,
             "spool_canary_hits": 0, "pending": 0,

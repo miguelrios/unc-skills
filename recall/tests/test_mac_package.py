@@ -433,6 +433,79 @@ class MacPackageTest(unittest.TestCase):
         self.assertFalse(json.loads(deleted.stdout)["state_retained"])
         self.assertFalse(prefix.exists())
 
+    def test_four_primary_mac_sources_install_as_independent_bounded_schedules(self) -> None:
+        archive = self.build("primary-schedules.tar.gz")
+        extracted = self.root / "primary-schedules-package"
+        extracted.mkdir()
+        with tarfile.open(archive, "r:gz") as package_archive:
+            package_archive.extractall(extracted, filter="data")
+        package = extracted / "recall-brain-macos"
+        self._use_host_runtime(package)
+        prefix = self.root / "primary-prefix"
+        agents = self.root / "primary-agents"
+        claude = self.root / "claude-root"
+        codex = self.root / "codex-root"
+        cowork = self.root / "cowork-root"
+        inbox = self.root / "chatgpt-inbox"
+        for path in (claude, codex, cowork, inbox):
+            path.mkdir()
+
+        subprocess.run([
+            "sh", str(package / "install.sh"),
+            "--prefix", str(prefix), "--launch-agents", str(agents),
+            "--endpoint", "https://example.invalid", "--host-id", "synthetic-host",
+            "--keychain-service", "synthetic.reference", "--visibility", "private",
+            "--privacy-mode", "scrub", "--sources", "claude,codex,cowork",
+            "--claude-root", str(claude), "--codex-root", str(codex),
+            "--cowork-root", str(cowork), "--export-inbox", str(inbox),
+            "--no-load",
+        ], check=True, text=True, capture_output=True)
+
+        expected = {
+            "claude": ("collect", "claude:mac:synthetic-host"),
+            "codex": ("collect", "codex:mac:synthetic-host"),
+            "cowork": ("cowork-local-sync", "cowork:mac:synthetic-host"),
+            "chatgpt-export": (
+                "export-inbox-sync", "chatgpt-export:mac:synthetic-host",
+            ),
+        }
+        spools = set()
+        for label, (command, source_id) in expected.items():
+            with (agents / f"ai.parcha.recall.{label}.plist").open("rb") as source:
+                value = plistlib.load(source)
+            arguments = value["ProgramArguments"]
+            self.assertEqual(arguments[3], command)
+            self.assertEqual(
+                arguments[arguments.index("--source-id") + 1],
+                source_id,
+            )
+            spool = arguments[arguments.index("--spool") + 1]
+            self.assertNotIn(spool, spools)
+            spools.add(spool)
+            self.assertTrue(value["RunAtLoad"])
+            self.assertEqual(value["StartInterval"], 30)
+            if command == "collect":
+                self.assertEqual(
+                    arguments[arguments.index("--max-scan-records") + 1],
+                    "1000",
+                )
+                self.assertEqual(
+                    arguments[arguments.index("--max-scan-seconds") + 1],
+                    "20",
+                )
+
+        status = subprocess.run([
+            str(prefix / "bin" / "recall-brain"), "mac-status",
+            "--prefix", str(prefix), "--launch-agents", str(agents),
+            "--now", "200",
+        ], check=True, text=True, capture_output=True)
+        value = json.loads(status.stdout)
+        self.assertEqual(value["enabled"], 4)
+        self.assertTrue(all(
+            value["sources"][name]["health"] == "starting"
+            for name in ("claude-code", "codex", "cowork", "chatgpt-export")
+        ))
+
     def test_packaged_cli_resolves_the_installed_root_through_a_symlink(self) -> None:
         archive = self.build("symlink-entrypoint.tar.gz")
         extracted = self.root / "symlink-entrypoint-package"

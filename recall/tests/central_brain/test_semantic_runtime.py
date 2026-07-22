@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -179,6 +180,63 @@ class SemanticRuntimeContractTest(unittest.TestCase):
                 ],
             )
 
+    def test_managed_embedding_retries_one_malformed_json_response(self) -> None:
+        runtime = SemanticRuntime(
+            embedding_protocol="voyage",
+            embedding_url="https://api.voyage.example",
+            embedding_approved_url="https://api.voyage.example",
+            embedding_key_env="VOYAGE_API_KEY",
+            model="voyage-synthetic",
+            revision="voyage-synthetic-v1",
+            dimensions=512,
+        )
+        vector = [0.0] * 512
+        response = {
+            "data": [{"object": "embedding", "index": 0, "embedding": vector}],
+            "model": "voyage-synthetic",
+            "object": "list",
+        }
+        malformed = json.JSONDecodeError("synthetic truncation", "{", 1)
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"VOYAGE_API_KEY": "short-lived-synthetic-embedding-key"},
+            ),
+            mock.patch.object(
+                runtime,
+                "_post",
+                side_effect=[malformed, response],
+            ) as post,
+        ):
+            self.assertEqual(runtime.embed_documents(["decision"]), [vector])
+        self.assertEqual(post.call_count, 2)
+
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"VOYAGE_API_KEY": "short-lived-synthetic-embedding-key"},
+            ),
+            mock.patch.object(
+                runtime,
+                "_post",
+                side_effect=[malformed, malformed],
+            ) as post,
+            self.assertRaises(json.JSONDecodeError),
+        ):
+            runtime.embed_documents(["decision"])
+        self.assertEqual(post.call_count, 2)
+
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"VOYAGE_API_KEY": "short-lived-synthetic-embedding-key"},
+            ),
+            mock.patch.object(runtime, "_post", side_effect=malformed) as post,
+            self.assertRaises(json.JSONDecodeError),
+        ):
+            runtime.embed_query("what did we decide?")
+        self.assertEqual(post.call_count, 1)
+
     def test_voyage_environment_profile_has_hosted_batch_defaults(self) -> None:
         environment = {
             "RECALL_EMBEDDING_PROTOCOL": "voyage",
@@ -197,6 +255,35 @@ class SemanticRuntimeContractTest(unittest.TestCase):
         self.assertEqual(runtime.revision, "voyage-synthetic")
         self.assertEqual(runtime.embedding_batch_size, 64)
         self.assertEqual(runtime.query_prefix, "")
+
+    def test_query_embedding_has_a_hard_wall_clock_deadline(self) -> None:
+        runtime = SemanticRuntime(
+            embedding_protocol="voyage",
+            embedding_url="https://api.voyageai.com",
+            embedding_approved_url="https://api.voyageai.com",
+            embedding_key_env="VOYAGE_API_KEY",
+            model="voyage-4-large",
+            revision="voyage-4-large",
+            dimensions=512,
+            timeout_seconds=0.02,
+        )
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_query(_query: str) -> list[float]:
+            started.set()
+            release.wait(timeout=1)
+            return [0.0] * 512
+
+        try:
+            with (
+                mock.patch.object(runtime, "embed_query", side_effect=slow_query),
+                self.assertRaisesRegex(TimeoutError, "deadline exceeded"),
+            ):
+                runtime.embed_query_bounded("bounded synthetic query")
+            self.assertTrue(started.is_set())
+        finally:
+            release.set()
 
     def test_managed_embedding_batch_supports_bounded_bulk_backfill(self) -> None:
         runtime = SemanticRuntime(

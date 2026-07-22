@@ -204,6 +204,7 @@ def _record(post: Mapping[str, Any], *, stream: str) -> ConnectorRecordV2:
     native_id = f"x:{stream}:{post_id}"
     content: dict[str, Any] = {
         "author_id": author_id,
+        "content_fidelity": "complete",
         "created_at": created_at,
         "post_id": native_id,
         "source_url": f"https://x.com/i/web/status/{post_id}",

@@ -40,6 +40,7 @@ def schedule(index: int, connector_id: str) -> dict:
 
 SELECTORS = {
     "google.gmail": {
+        "include_attachments": False,
         "own_addresses": ["owner@example.invalid"],
         "label_ids": ["INBOX"],
         "query": None,

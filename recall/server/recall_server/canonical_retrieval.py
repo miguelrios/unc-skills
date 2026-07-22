@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
+import time
+import urllib.error
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit
 
 from .canonical import CanonicalPlane
-from .db import BrainStore, bounded_search_text
+from .db import BrainStore, SearchDeadlineExceeded, bounded_search_text
+from .federation import SOURCE_FAMILIES
 from .projectors import legacy_engine
 
 
 AUTHORITY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._/@+-]{1,255}\Z")
-ALLOWED_FILTERS = frozenset({"since", "until", "source_id"})
+ALLOWED_FILTERS = frozenset(
+    {"since", "until", "source_id", "source_family", "source_alias"}
+)
 
 
 def _timestamp(value: Any) -> str:
@@ -150,7 +156,9 @@ class BoundCanonicalRetrieval:
         self.archive = archive
 
     @staticmethod
-    def _filters(filters: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
+    def _filters(
+        filters: dict[str, Any],
+    ) -> tuple[str | None, str | None, str | None, str | None, str | None]:
         if not isinstance(filters, dict) or set(filters) - ALLOWED_FILTERS:
             raise ValueError("unsupported canonical search filter")
         source_id = filters.get("source_id")
@@ -158,6 +166,15 @@ class BoundCanonicalRetrieval:
             not isinstance(source_id, str) or not AUTHORITY_RE.fullmatch(source_id)
         ):
             raise ValueError("invalid source_id filter")
+        source_family = filters.get("source_family")
+        if source_family is not None and source_family not in SOURCE_FAMILIES:
+            raise ValueError("unsupported source_family filter")
+        source_alias = filters.get("source_alias")
+        if source_alias is not None and (
+            not isinstance(source_alias, str)
+            or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{1,63}", source_alias)
+        ):
+            raise ValueError("invalid source_alias filter")
         values: list[str | None] = []
         for name in ("since", "until"):
             value = filters.get(name)
@@ -168,7 +185,38 @@ class BoundCanonicalRetrieval:
                 if parsed.tzinfo is None:
                     raise ValueError("invalid temporal filter")
             values.append(value)
-        return source_id, values[0], values[1]
+        return source_id, source_family, source_alias, values[0], values[1]
+
+    def _sources(
+        self,
+        *,
+        source_id: str | None,
+        source_family: str | None,
+        source_alias: str | None,
+    ) -> list[str]:
+        """Resolve convenience routes only within the bound canonical grants."""
+        sources = set(self.authorized_sources)
+        if source_id is not None:
+            sources &= {source_id}
+        if not sources or (source_family is None and source_alias is None):
+            return sorted(sources)
+        with self.store.connect() as connection:
+            if source_family is not None:
+                rows = connection.execute(
+                    """SELECT source_id FROM source_profiles
+                       WHERE family=%s AND source_id=ANY(%s)
+                       ORDER BY source_id""",
+                    (source_family, sorted(sources)),
+                ).fetchall()
+                sources &= {row["source_id"] for row in rows}
+            if source_alias is not None and sources:
+                row = connection.execute(
+                    """SELECT source_id FROM source_aliases
+                       WHERE alias=%s AND source_id=ANY(%s)""",
+                    (source_alias, sorted(sources)),
+                ).fetchone()
+                sources &= {row["source_id"]} if row else set()
+        return sorted(sources)
 
     @staticmethod
     def _row(row: dict[str, Any], score: float) -> dict[str, Any]:
@@ -195,10 +243,14 @@ class BoundCanonicalRetrieval:
             raise ValueError("invalid canonical search query")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
             raise ValueError("invalid canonical search limit")
-        source_id, since, until = self._filters(filters or {})
-        sources = list(self.authorized_sources)
-        if source_id is not None:
-            sources = [source_id] if source_id in sources else []
+        source_id, source_family, source_alias, since, until = self._filters(
+            filters or {}
+        )
+        sources = self._sources(
+            source_id=source_id,
+            source_family=source_family,
+            source_alias=source_alias,
+        )
         if not sources:
             return {
                 "results": [],
@@ -220,6 +272,9 @@ class BoundCanonicalRetrieval:
                 },
             }
         candidate_limit = min(100, max(20, limit * 5))
+        lexical_deadline_at = (
+            time.monotonic() + self.store.search_deadline_ms / 1000
+        )
 
         def lexical_rows(
             connection: Any,
@@ -227,7 +282,8 @@ class BoundCanonicalRetrieval:
             *,
             minimum_matches: int,
         ) -> list[dict[str, Any]]:
-            rows = connection.execute(
+            rows = self.store._execute_bounded(
+                connection,
                 """SELECT chunk.source_id,document.native_id,document.revision,
                           event.occurred_at,chunk.text_redacted,chunk.receipt,
                           ts_rank_cd(
@@ -269,6 +325,7 @@ class BoundCanonicalRetrieval:
                     until,
                     candidate_limit,
                 ),
+                lexical_deadline_at,
             ).fetchall()
             return [
                 row
@@ -277,28 +334,44 @@ class BoundCanonicalRetrieval:
             ]
 
         strict_query = " ".join(informative)
-        with self.store.connect() as connection:
-            lexical = lexical_rows(
-                connection,
-                strict_query,
-                minimum_matches=len(informative),
-            )
-            lexical_mode = "strict"
-            if not lexical and len(informative) > 1:
-                relaxed_query = " OR ".join(f'"{term}"' for term in informative)
+        try:
+            with self.store.connect() as connection:
                 lexical = lexical_rows(
                     connection,
-                    relaxed_query,
-                    minimum_matches=2 if len(informative) >= 3 else 1,
+                    strict_query,
+                    minimum_matches=len(informative),
                 )
-                lexical_mode = "relaxed" if lexical else "relaxed-empty"
+                lexical_mode = "strict"
+                if not lexical and len(informative) > 1:
+                    relaxed_query = " OR ".join(
+                        f'"{term}"' for term in informative
+                    )
+                    lexical = lexical_rows(
+                        connection,
+                        relaxed_query,
+                        minimum_matches=2 if len(informative) >= 3 else 1,
+                    )
+                    lexical_mode = "relaxed" if lexical else "relaxed-empty"
+        except SearchDeadlineExceeded:
+            lexical = []
+            lexical_mode = "deadline-exceeded"
         semantic: list[dict[str, Any]] = []
         runtime = self.store.semantic_runtime
+        semantic_status = "disabled" if runtime is None else "ok"
         if runtime is not None:
-            vector = runtime.embed_query(query)
-            with self.store.connect() as connection:
-                semantic = connection.execute(
-                    """SELECT chunk.source_id,document.native_id,document.revision,
+            try:
+                bounded_embed = getattr(runtime, "embed_query_bounded", None)
+                vector = (
+                    bounded_embed(query)
+                    if bounded_embed is not None
+                    else runtime.embed_query(query)
+                )
+            except (json.JSONDecodeError, TimeoutError, urllib.error.URLError):
+                semantic_status = "unavailable"
+            else:
+                with self.store.connect() as connection:
+                    semantic = connection.execute(
+                        """SELECT chunk.source_id,document.native_id,document.revision,
                               event.occurred_at,chunk.text_redacted,chunk.receipt,
                               1-(embedding.embedding <=> %s::halfvec) AS score
                        FROM canonical_chunk_embeddings embedding
@@ -319,19 +392,19 @@ class BoundCanonicalRetrieval:
                        ORDER BY embedding.embedding <=> %s::halfvec,
                                 event.occurred_at DESC,chunk.chunk_id
                        LIMIT %s""",
-                    (
-                        vector,
-                        self.tenant_id,
-                        sources,
-                        runtime.fingerprint,
-                        since,
-                        since,
-                        until,
-                        until,
-                        vector,
-                        candidate_limit,
-                    ),
-                ).fetchall()
+                        (
+                            vector,
+                            self.tenant_id,
+                            sources,
+                            runtime.fingerprint,
+                            since,
+                            since,
+                            until,
+                            until,
+                            vector,
+                            candidate_limit,
+                        ),
+                    ).fetchall()
         combined: dict[str, tuple[dict[str, Any], float]] = {}
         for weight, rows in ((0.6, lexical), (0.4, semantic)):
             for rank, row in enumerate(rows, start=1):
@@ -352,6 +425,7 @@ class BoundCanonicalRetrieval:
                 "engine": "canonical-v2",
                 "lexical_candidates": len(lexical),
                 "semantic_candidates": len(semantic),
+                "semantic_status": semantic_status,
                 "lexical_mode": lexical_mode,
             },
         }
