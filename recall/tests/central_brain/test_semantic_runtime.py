@@ -256,6 +256,35 @@ class SemanticRuntimeContractTest(unittest.TestCase):
         self.assertEqual(runtime.embedding_batch_size, 64)
         self.assertEqual(runtime.query_prefix, "")
 
+    def test_query_embedding_has_a_hard_wall_clock_deadline(self) -> None:
+        runtime = SemanticRuntime(
+            embedding_protocol="voyage",
+            embedding_url="https://api.voyageai.com",
+            embedding_approved_url="https://api.voyageai.com",
+            embedding_key_env="VOYAGE_API_KEY",
+            model="voyage-4-large",
+            revision="voyage-4-large",
+            dimensions=512,
+            timeout_seconds=0.02,
+        )
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_query(_query: str) -> list[float]:
+            started.set()
+            release.wait(timeout=1)
+            return [0.0] * 512
+
+        try:
+            with (
+                mock.patch.object(runtime, "embed_query", side_effect=slow_query),
+                self.assertRaisesRegex(TimeoutError, "deadline exceeded"),
+            ):
+                runtime.embed_query_bounded("bounded synthetic query")
+            self.assertTrue(started.is_set())
+        finally:
+            release.set()
+
     def test_managed_embedding_batch_supports_bounded_bulk_backfill(self) -> None:
         runtime = SemanticRuntime(
             embedding_protocol="voyage",
