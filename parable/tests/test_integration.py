@@ -64,6 +64,7 @@ capture = {
             "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
         )
     },
+    "max_context_tokens": os.environ.get("CLAUDE_CODE_MAX_CONTEXT_TOKENS"),
 }
 with open(os.environ["FAKE_CLAUDE_CAPTURE"], "w") as handle:
     json.dump(capture, handle)
@@ -494,7 +495,7 @@ exit 0
             self.assertEqual(first.stdout.count(handoff), 1)
             self.assertIn(launch, first.stdout)
 
-            installed = home / ".local" / "share" / "parable" / "0.1.18"
+            installed = home / ".local" / "share" / "parable" / "0.1.19"
             durable = home / ".local" / "bin" / "parable"
             self.assertTrue((installed / "bin" / "parable.js").is_file())
             self.assertTrue((installed / "lib" / "onboarding.js").is_file())
@@ -2109,7 +2110,11 @@ for flag, (vendor, record_type) in mapping.items():
             )
             self.assertIn("_ __   __ _ _ __", captured["welcome_message"])
             self.assertIn("🐢  🐘  🦊", captured["welcome_message"])
-            self.assertIn("BRAIN   FABLE · claude-fable-5", captured["welcome_message"])
+            self.assertIn("BRAIN   FABLE · claude-fable-5 · 1M ctx", captured["welcome_message"])
+            # Multi-model cast: ceiling is the min across non-Claude cast
+            # models (gpt-5.6-* at 372k beat kimi-k3's 1M). Anthropic models
+            # ignore the env var, so the brain is unaffected.
+            self.assertEqual(captured["max_context_tokens"], "372000")
             self.assertIn("TERRA", captured["welcome_message"])
             self.assertIn("React and frontend", captured["welcome_message"])
             self.assertNotIn(token, captured["welcome_message"])
@@ -2149,7 +2154,11 @@ for flag, (vendor, record_type) in mapping.items():
             self.assertFalse(
                 captured["inherited"]["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"]
             )
+            # Solo pins the real window of the exact model so auto-compact
+            # fires before the upstream limit, not after.
+            self.assertEqual(captured["max_context_tokens"], "1000000")
             self.assertIn("SOLO    KIMI · kimi-k3", captured["welcome_message"])
+            self.assertIn("1M ctx", captured["welcome_message"])
             self.assertIn("You are the only agent", captured["welcome_message"])
             self.assertNotIn("BRAIN", captured["welcome_message"])
             self.assertNotIn("CAST", captured["welcome_message"])

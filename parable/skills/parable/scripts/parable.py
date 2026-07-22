@@ -71,6 +71,30 @@ CLAUDE_BRAIN_MODELS = {
 }
 CLAUDE_BRAIN_MODES = ("auto", "fable", "sol", "config")
 AUTO_BRAIN_TIGHT_PCT = 80.0
+# Real context windows for models routed through the loopback proxy. Claude Code
+# assumes 200k (or 1M via the [1m]/beta paths) for models it does not recognize,
+# so without this table auto-compact fires far too late for proxied non-Anthropic
+# models and sessions die with upstream "input exceeds the context window" 400s.
+# Sources: the pinned CLIProxyAPI registry (internal/registry/models/*.json) and
+# upstream issue reports; kimi-k3 is ~1M because the pinned proxy normalizes the
+# upstream id to bare "k3" (router-for-me/CLIProxyAPI#4418). A `context_ktok`
+# on the executor in parable.toml overrides this table.
+MODEL_CONTEXT_WINDOWS = {
+    "claude-fable-5": 1_000_000,
+    "claude-sonnet-5": 1_000_000,
+    "claude-opus-4-8": 1_000_000,
+    "claude-haiku-4-5-20251001": 200_000,
+    "gpt-5.6-sol": 372_000,
+    "gpt-5.6-terra": 372_000,
+    "gpt-5.6-luna": 372_000,
+    "gpt-5.5": 272_000,
+    "grok-4.5": 500_000,
+    "kimi-k3": 1_000_000,
+}
+# Claude Code's own fallback for unrecognized models; used as the floor when a
+# cast model's window is unknown so we never raise the assumed ceiling blindly.
+CLAUDE_DEFAULT_CONTEXT_WINDOW = 200_000
+CLAUDE_CONTEXT_ENV = "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
 PARABLE_WELCOME_ENV = "PARABLE_WELCOME_MESSAGE"
 PARABLE_WELCOME_PLUGIN = Path(__file__).resolve().parent.parent / "runtime" / "welcome-plugin"
 PARABLE_ASCII = (
@@ -268,6 +292,9 @@ def validate_config(cfg: dict) -> list[str]:
                 allowed = EFFORT_LEVELS
             if allowed is not None and effort not in allowed:
                 problems.append(f"executor '{eid}': effort='{effort}' (allowed for {ptype}: {', '.join(allowed)})")
+        window = ex.get("context_ktok")
+        if window is not None and (not isinstance(window, int) or isinstance(window, bool) or window <= 0):
+            problems.append(f"executor '{eid}': context_ktok must be a positive integer (thousands of tokens)")
     for klass, chain in cfg.get("routing", {}).items():
         if klass == "notes" or not isinstance(chain, list):
             continue
@@ -530,6 +557,13 @@ def build_claude_launch(cfg: dict, forwarded: list[str], environ: dict[str, str]
         launch_env.pop(inherited, None)
     if solo:
         launch_env.pop("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", None)
+    # Give Claude Code the real context ceiling for proxied non-Anthropic
+    # models so auto-compact fires before the upstream window, not after.
+    # A user's own CLAUDE_CODE_MAX_CONTEXT_TOKENS always wins.
+    if not source_env.get(CLAUDE_CONTEXT_ENV):
+        ceiling = claude_context_ceiling(cfg, claude["brain_model"], solo=solo)
+        if ceiling is not None:
+            launch_env[CLAUDE_CONTEXT_ENV] = str(ceiling)
     isolation = ["--disallowedTools", "Agent"] if solo else []
     argv = [
         claude.get("binary", "claude"),
@@ -704,6 +738,44 @@ def resolve_solo_model(cfg: dict, selector: str, available: set[str]) -> tuple[s
     return model, f"configured solo alias {selector}"
 
 
+def model_context_window(cfg: dict, model: str) -> int | None:
+    """Best-known context window for a proxied model, or None when unknown.
+
+    A `context_ktok` on any enabled executor pinned to that exact model wins
+    over the built-in table, so users can correct or extend it in parable.toml.
+    """
+    for executor in custom_claude_executors(cfg).values():
+        if executor.get("model") == model:
+            override = executor.get("context_ktok")
+            if isinstance(override, int) and not isinstance(override, bool) and override > 0:
+                return override * 1000
+    return MODEL_CONTEXT_WINDOWS.get(model)
+
+
+def claude_context_ceiling(cfg: dict, brain_model: str, *, solo: bool = False) -> int | None:
+    """The CLAUDE_CODE_MAX_CONTEXT_TOKENS value for a launch, or None to not set it.
+
+    Claude Code honors this env var only for models whose id does not start
+    with "claude-", and it is process-wide — one value covers the parent and
+    every subagent. Solo has exactly one model, so it gets that model's window.
+    A multi-model launch takes the minimum window across the brain and every
+    enabled non-Claude cast model, treating unknown windows as Claude Code's
+    own 200k fallback so an unknown model never raises the assumed ceiling.
+    Anthropic models ignore the env var, so the min never handicaps them.
+    """
+    if solo:
+        return model_context_window(cfg, brain_model)
+    models = {brain_model}
+    models.update(ex["model"] for ex in custom_claude_executors(cfg).values())
+    non_claude = [m for m in models if not m.lower().startswith("claude-")]
+    if not non_claude:
+        return None
+    return min(
+        model_context_window(cfg, m) or CLAUDE_DEFAULT_CONTEXT_WINDOW
+        for m in non_claude
+    )
+
+
 def config_with_claude_brain(cfg: dict, model: str) -> dict:
     return {**cfg, "claude": {**cfg["claude"], "brain_model": model}}
 
@@ -746,6 +818,15 @@ def claude_welcome_cast(cfg: dict, brain_model: str, available: set[str]
     return brain_label, rows
 
 
+def _welcome_window(cfg: dict, model: str) -> str:
+    window = model_context_window(cfg, model)
+    if window is None:
+        return ""
+    if window >= 1_000_000:
+        return f" · {window // 1_000_000}M ctx"
+    return f" · {window // 1_000}k ctx"
+
+
 def render_claude_welcome(cfg: dict, brain_model: str, decision: str,
                           available: set[str], columns: int | None = None) -> str:
     """Render the zero-token launch card shown by the SessionStart hook."""
@@ -758,7 +839,10 @@ def render_claude_welcome(cfg: dict, brain_model: str, decision: str,
         [_welcome_animal(brain_label), *(_welcome_animal(label) for label, _model, _use in rows)]
     )
     lines = [*PARABLE_ASCII, f"  {procession}   →  the road ahead"]
-    lines.append(f"  {_welcome_animal(brain_label)} BRAIN   {brain_label} · {brain_model}")
+    lines.append(
+        f"  {_welcome_animal(brain_label)} BRAIN   {brain_label} · {brain_model}"
+        f"{_welcome_window(cfg, brain_model)}"
+    )
     lines.append(f"          {_welcome_summary(decision, width - 10)}")
     lines.append(f"  CAST    {len(rows)} routed models ready")
     for label, model, use_for in rows:
@@ -778,7 +862,7 @@ def render_claude_solo_welcome(cfg: dict, model: str, decision: str) -> str:
             label = _welcome_label(executor_id, model)
             break
     lines = [*PARABLE_ASCII]
-    lines.append(f"  {_welcome_animal(label)} SOLO    {label} · {model}")
+    lines.append(f"  {_welcome_animal(label)} SOLO    {label} · {model}{_welcome_window(cfg, model)}")
     lines.append(f"          {decision}")
     lines.append("  SOLO CONTRACT")
     lines.append("          You are the only agent. Work directly from request to verified result.")
@@ -928,9 +1012,11 @@ def cmd_claude(args: argparse.Namespace) -> int:
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"parable: {exc}", file=sys.stderr)
         return 1
+    ceiling = launch_env.get(CLAUDE_CONTEXT_ENV)
+    context_note = f"; context ceiling {int(ceiling):,} tokens" if ceiling else ""
     if solo_selector is not None:
         print(f"proxy: ready ({len(available)} models); solo agent isolation enabled", flush=True)
-        print(f"solo: {brain_model} ({decision})", flush=True)
+        print(f"solo: {brain_model} ({decision}){context_note}", flush=True)
     else:
         assert result is not None
         print(
@@ -939,7 +1025,7 @@ def cmd_claude(args: argparse.Namespace) -> int:
             f"{len(result['unchanged'])} unchanged, {len(result['removed'])} removed",
             flush=True,
         )
-        print(f"brain: {brain_model} ({decision})", flush=True)
+        print(f"brain: {brain_model} ({decision}){context_note}", flush=True)
     try:
         os.execvpe(argv[0], argv, launch_env)
     except FileNotFoundError:

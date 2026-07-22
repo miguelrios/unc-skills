@@ -124,6 +124,11 @@ Inside a solo session:
 
 Solo refusals are **hard fails** — a solo session does not silently degrade to multi-model or skip Agent invocations. If you need agents or multi-model casting, use normal Parable mode (`parable` or `parable --brain`).
 
+Every launch (solo and multi-model) also pins `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to the real
+context window of the proxied non-Anthropic models in play, because Claude Code guesses 200k or
+1M for models it does not recognize and both guesses break auto-compact against the upstream
+limit. Details and the override knob (`context_ktok`): `references/config.md`.
+
 ### Solo requires `[claude]` configuration
 
 Solo mode **requires** `parable.toml` to have `[claude]` configured (subscription-only mode with a loopback proxy). Solo cannot run with codex, pi, cursor, or other provider-backed executors. When launching with `parable --solo <model>`:

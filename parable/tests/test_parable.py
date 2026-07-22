@@ -405,6 +405,72 @@ class TestClaudeLaunch(unittest.TestCase):
                 cfg, ["--print", "--model"], source, solo=True
             )
 
+    def test_context_ceiling_tracks_real_windows_for_non_anthropic_models(self):
+        cfg = self.cfg()
+        # Solo: exactly the selected model's known window.
+        self.assertEqual(
+            parable.claude_context_ceiling(cfg, "kimi-k3", solo=True), 1_000_000
+        )
+        self.assertEqual(
+            parable.claude_context_ceiling(cfg, "gpt-5.6-sol", solo=True), 372_000
+        )
+        # Solo on an unknown model: no override rather than a guess.
+        self.assertIsNone(
+            parable.claude_context_ceiling(cfg, "mystery-model", solo=True)
+        )
+        # Multi-model: minimum across brain + non-Claude cast models.
+        self.assertEqual(parable.claude_context_ceiling(cfg, "gpt-5.6-sol"), 372_000)
+        # Anthropic-only cast (kimi disabled): env should not be set at all.
+        cfg_claude_only = self.cfg()
+        cfg_claude_only["executors"]["kimi"]["enabled"] = False
+        self.assertIsNone(
+            parable.claude_context_ceiling(cfg_claude_only, "claude-fable-5")
+        )
+        # An unknown cast model clamps to Claude Code's own 200k fallback.
+        cfg_unknown = self.cfg()
+        cfg_unknown["executors"]["mystery"] = {
+            "provider": "claude", "model": "mystery-model",
+        }
+        self.assertEqual(
+            parable.claude_context_ceiling(cfg_unknown, "gpt-5.6-sol"), 200_000
+        )
+        # parable.toml context_ktok override beats the built-in table.
+        cfg_override = self.cfg()
+        cfg_override["executors"]["kimi"]["context_ktok"] = 256
+        self.assertEqual(
+            parable.claude_context_ceiling(cfg_override, "kimi-k3", solo=True), 256_000
+        )
+
+    def test_launch_sets_context_env_and_respects_user_override(self):
+        cfg = parable.config_with_claude_brain(self.cfg(), "kimi-k3")
+        source = {"CLIPROXY_API_KEY": "x"}
+        _argv, env = parable.build_claude_launch(cfg, [], source, solo=True)
+        self.assertEqual(env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "1000000")
+        # Multi-model launch takes the min across the non-Claude cast.
+        multi = parable.config_with_claude_brain(self.cfg(), "gpt-5.6-sol")
+        _argv, env = parable.build_claude_launch(multi, [], source)
+        self.assertEqual(env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "372000")
+        # A user's own value is never clobbered.
+        user = {"CLIPROXY_API_KEY": "x", "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "123000"}
+        _argv, env = parable.build_claude_launch(cfg, [], user, solo=True)
+        self.assertEqual(env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "123000")
+        # Unknown solo model: the env is left unset, not guessed.
+        unknown = parable.config_with_claude_brain(self.cfg(), "mystery-model")
+        _argv, env = parable.build_claude_launch(unknown, [], source, solo=True)
+        self.assertNotIn("CLAUDE_CODE_MAX_CONTEXT_TOKENS", env)
+
+    def test_context_ktok_config_field_is_validated(self):
+        cfg = self.cfg()
+        cfg["executors"]["kimi"]["context_ktok"] = 256
+        self.assertEqual(parable.validate_config(cfg), [])
+        for bad in (0, -5, "256", 1.5, True):
+            cfg["executors"]["kimi"]["context_ktok"] = bad
+            problems = parable.validate_config(cfg)
+            self.assertTrue(
+                any("context_ktok" in p for p in problems),
+                f"expected context_ktok problem for {bad!r}: {problems}",
+            )
+
     def test_solo_welcome_has_no_cast_or_delegation_cues(self):
         card = parable.render_claude_solo_welcome(
             self.cfg(), "kimi-k3", "configured solo alias kimi"
