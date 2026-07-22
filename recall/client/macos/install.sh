@@ -569,6 +569,7 @@ value = {
         "--source-id", source_id, "--principal-id", "owner",
         "--visibility", visibility, "--harness", harness,
         "--root", root, "--spool", spool,
+        "--max-scan-records", "1000", "--max-scan-seconds", "20",
         "--keychain-service", service, "--keychain-account", source_id,
         "--privacy-mode", privacy_mode,
     ],
