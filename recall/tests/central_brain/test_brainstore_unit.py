@@ -461,6 +461,22 @@ class TypedConnectorProjectionTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "invalid typed connector record"):
             validate_envelope(value)
 
+    def test_v2_document_rejects_invalid_artifact_digest(self) -> None:
+        value = envelope(
+            kind="connector_record",
+            content={
+                "kind": "document.v1",
+                "content_fidelity": "complete",
+                "document_id": "document-1",
+                "name": "Synthetic attachment",
+                "mime_type": "text/plain",
+                "artifact_content_sha256": "not-a-digest",
+            },
+            provenance={"connector_id": "google.gmail", "connector_schema_version": 2},
+        )
+        with self.assertRaisesRegex(ValueError, "invalid typed connector record"):
+            validate_envelope(value)
+
     def test_v2_partial_fidelity_projects_omissions_and_rejects_fake_success(self) -> None:
         partial = envelope(
             kind="connector_record", native_id="message-partial",

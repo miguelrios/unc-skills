@@ -185,7 +185,7 @@ class GrepOptions:
 
 REMOTE_SELECTOR_FIELDS = {
     "google.gmail": {
-        "include_spam_trash", "label_ids", "own_addresses", "query",
+        "include_attachments", "include_spam_trash", "label_ids", "own_addresses", "query",
     },
     "google.calendar": {"calendar_id", "time_max", "time_min"},
     "google.contacts": set(),
@@ -225,7 +225,10 @@ def _remote_selectors(connector_id: str, value: Any) -> Mapping[str, Any]:
         _selector_strings(selected["own_addresses"], "own_addresses")
         _selector_strings(selected["label_ids"], "label_ids")
         _selector_string(selected["query"], "query", optional=True)
-        if type(selected["include_spam_trash"]) is not bool:
+        if (
+            type(selected["include_attachments"]) is not bool
+            or type(selected["include_spam_trash"]) is not bool
+        ):
             raise ConnectorHostError("invalid_remote_selectors")
     elif connector_id == "google.calendar":
         _selector_string(selected["calendar_id"], "calendar_id")

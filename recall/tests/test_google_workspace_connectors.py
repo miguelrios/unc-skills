@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import tempfile
 import unittest
@@ -22,7 +23,7 @@ from connectors.sdk import (
 )
 from connectors.workspace_rail import WorkspaceRailError
 from privacy.policy import PrivacyPolicy
-from tests.test_connector_sdk import FakeBrain
+from tests.test_connector_sdk import FakeArchive, FakeBrain
 
 
 def encoded(value: str) -> str:
@@ -84,7 +85,12 @@ class FakeRail:
 
 
 class GmailConnectorTest(unittest.TestCase):
-    def connector(self, rail: FakeRail) -> GmailConnector:
+    def connector(
+        self,
+        rail: FakeRail,
+        *,
+        include_attachments: bool = False,
+    ) -> GmailConnector:
         return GmailConnector(
             rail=rail,
             source_id="synthetic:google:gmail",
@@ -92,6 +98,7 @@ class GmailConnectorTest(unittest.TestCase):
             label_ids=("INBOX",),
             query="newer_than:30d",
             include_spam_trash=False,
+            include_attachments=include_attachments,
             page_size=2,
         )
 
@@ -282,6 +289,207 @@ class GmailConnectorTest(unittest.TestCase):
         self.assertFalse(any(
             call[0] == "gmail.messages.attachments.get" for call in rail.calls
         ))
+
+    def test_enabled_attachment_is_exactly_archived_and_searchably_projected(self):
+        rail = FakeRail()
+        rail.add("gmail.messages.list", {"messages": [{"id": "m1"}]})
+        message = gmail_message("m1")
+        message["payload"] = {
+            "mimeType": "multipart/mixed",
+            "headers": message["payload"]["headers"],
+            "body": {"size": 0},
+            "parts": [
+                {
+                    "mimeType": "text/plain",
+                    "filename": "",
+                    "headers": [],
+                    "body": {"data": encoded("Message body")},
+                },
+                {
+                    "mimeType": "text/plain",
+                    "filename": "notes.txt",
+                    "headers": [{
+                        "name": "Content-Disposition",
+                        "value": "attachment; filename=notes.txt",
+                    }],
+                    "body": {"attachmentId": "file-1", "size": 34},
+                },
+            ],
+        }
+        exact = b"Searchable synthetic attachment text"
+        rail.add("gmail.messages.get", message)
+        rail.add(
+            "gmail.messages.attachments.get",
+            {"size": len(exact), "data": base64.urlsafe_b64encode(exact).decode().rstrip("=")},
+        )
+        connector = self.connector(rail, include_attachments=True)
+
+        page = connector.pull(None)
+
+        self.assertEqual(len(page.records), 2)
+        parent, attachment = page.records
+        self.assertEqual(parent.content["content_fidelity"], "complete")
+        self.assertNotIn("content_omissions", parent.content)
+        self.assertTrue(attachment.native_id.startswith("gmail-attachment:m1:"))
+        self.assertEqual(attachment.native_parent_id, "gmail:m1")
+        self.assertEqual(attachment.content["text"], exact.decode())
+        self.assertEqual(
+            attachment.content["artifact_content_sha256"],
+            hashlib.sha256(exact).hexdigest(),
+        )
+        self.assertEqual(attachment.content["content_fidelity"], "complete")
+        self.assertEqual(attachment.archive_payload, exact)
+        self.assertEqual(attachment.archive_media_type, "text/plain")
+        self.assertEqual(
+            parent.content["attachments"][0]["document_id"],
+            attachment.content["document_id"],
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = FakeArchive()
+            brain = FakeBrain()
+            runner = ConnectorRunner(
+                connector=connector,
+                brain=brain,
+                archive=archive,
+                tenant_id="tenant:synthetic",
+                principal_id="principal:owner",
+                spool_path=Path(temporary) / "gmail.db",
+                privacy=PrivacyPolicy(mode="scrub"),
+            )
+            # Use the already-observed page as a frozen connector response.
+            connector.pull = lambda _cursor: page
+            self.assertEqual(runner.run_once()["archived"], 2)
+            self.assertIn(exact, archive.objects.values())
+            self.assertNotIn(
+                base64.b64encode(exact).decode(),
+                json.dumps(list(brain.events.values())),
+            )
+            runner.close()
+
+    def test_enabled_attachment_failures_are_explicit_and_never_fetched_unnecessarily(self):
+        cases = (
+            ("application/octet-stream", 12, "attachment_unsupported_type"),
+            ("application/pdf", 17 * 1024 * 1024, "attachment_size_limit"),
+        )
+        for media_type, size, omission in cases:
+            with self.subTest(omission=omission):
+                rail = FakeRail()
+                rail.add("gmail.messages.list", {"messages": [{"id": "m1"}]})
+                message = gmail_message("m1")
+                message["payload"] = {
+                    "mimeType": "multipart/mixed",
+                    "headers": message["payload"]["headers"],
+                    "body": {"size": 0},
+                    "parts": [
+                        {
+                            "mimeType": "text/plain",
+                            "filename": "",
+                            "headers": [],
+                            "body": {"data": encoded("Message body")},
+                        },
+                        {
+                            "mimeType": media_type,
+                            "filename": "synthetic.bin",
+                            "headers": [],
+                            "body": {"attachmentId": "file-1", "size": size},
+                        },
+                    ],
+                }
+                rail.add("gmail.messages.get", message)
+
+                page = self.connector(rail, include_attachments=True).pull(None)
+
+                self.assertEqual(len(page.records), 1)
+                self.assertEqual(page.records[0].content["content_fidelity"], "partial")
+                self.assertEqual(page.records[0].content["content_omissions"], [omission])
+                self.assertFalse(any(
+                    operation == "gmail.messages.attachments.get"
+                    for operation, _params in rail.calls
+                ))
+
+    def test_duplicate_attachment_identity_is_fetched_and_emitted_once(self) -> None:
+        rail = FakeRail()
+        rail.add("gmail.messages.list", {"messages": [{"id": "m1"}]})
+        message = gmail_message("m1")
+        attachment = {
+            "mimeType": "text/plain",
+            "filename": "duplicate.txt",
+            "headers": [],
+            "body": {"attachmentId": "same-file", "size": 15},
+        }
+        message["payload"] = {
+            "mimeType": "multipart/mixed",
+            "headers": message["payload"]["headers"],
+            "body": {"size": 0},
+            "parts": [
+                {
+                    "mimeType": "text/plain",
+                    "filename": "",
+                    "headers": [],
+                    "body": {"data": encoded("Message body")},
+                },
+                attachment,
+                dict(attachment),
+            ],
+        }
+        exact = b"Duplicate-proof!"
+        rail.add("gmail.messages.get", message)
+        rail.add(
+            "gmail.messages.attachments.get",
+            {"size": len(exact), "data": base64.urlsafe_b64encode(exact).decode().rstrip("=")},
+        )
+
+        page = self.connector(rail, include_attachments=True).pull(None)
+
+        self.assertEqual(len(page.records), 2)
+        self.assertEqual(len(page.records[0].content["attachments"]), 1)
+        self.assertEqual(
+            sum(
+                operation == "gmail.messages.attachments.get"
+                for operation, _params in rail.calls
+            ),
+            1,
+        )
+
+    def test_raw_revision_changes_even_when_normalized_text_is_identical(self) -> None:
+        records = []
+        for exact in (b"Same text\r\n", b"Same text\n"):
+            rail = FakeRail()
+            rail.add("gmail.messages.list", {"messages": [{"id": "m1"}]})
+            message = gmail_message("m1")
+            message["payload"] = {
+                "mimeType": "multipart/mixed",
+                "headers": message["payload"]["headers"],
+                "body": {"size": 0},
+                "parts": [
+                    {
+                        "mimeType": "text/plain",
+                        "filename": "",
+                        "headers": [],
+                        "body": {"data": encoded("Message body")},
+                    },
+                    {
+                        "mimeType": "text/plain",
+                        "filename": "same.txt",
+                        "headers": [],
+                        "body": {"attachmentId": "stable-file", "size": len(exact)},
+                    },
+                ],
+            }
+            rail.add("gmail.messages.get", message)
+            rail.add("gmail.messages.attachments.get", {
+                "size": len(exact),
+                "data": base64.urlsafe_b64encode(exact).decode().rstrip("="),
+            })
+            records.append(self.connector(rail, include_attachments=True).pull(None).records[1])
+
+        self.assertEqual(records[0].native_id, records[1].native_id)
+        self.assertEqual(records[0].content["text"], records[1].content["text"])
+        self.assertNotEqual(
+            records[0].content["artifact_content_sha256"],
+            records[1].content["artifact_content_sha256"],
+        )
 
     def test_snippet_fallback_is_never_silently_reported_as_complete(self):
         rail = FakeRail()

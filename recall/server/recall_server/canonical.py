@@ -13,6 +13,7 @@ from .projectors import validate_envelope
 
 MAX_CANONICAL_TEXT_BYTES = 8_000_000
 MAX_CANONICAL_CHUNK_BYTES = 24_000
+MAX_LINKED_IDENTITIES = 10_000
 
 
 class CanonicalLifecycleError(RuntimeError):
@@ -47,6 +48,42 @@ def _identity_sha256(tenant_id: str, source_id: str, native_id: str) -> str:
 def _opaque(prefix: str, *values: str) -> str:
     digest = hashlib.sha256("\x1f".join(values).encode()).hexdigest()
     return f"{prefix}_{digest[:32]}"
+
+
+def _linked_native_ids(
+    conn: Any,
+    *,
+    tenant_id: str,
+    source_id: str,
+    native_id: str,
+) -> list[str]:
+    rows = conn.execute(
+        """WITH RECURSIVE linked(native_id) AS (
+               SELECT DISTINCT native_id
+               FROM canonical_events
+               WHERE tenant_id=%s AND source_id=%s AND native_parent_id=%s
+               UNION
+               SELECT event.native_id
+               FROM canonical_events event
+               JOIN linked parent ON event.native_parent_id=parent.native_id
+               WHERE event.tenant_id=%s AND event.source_id=%s
+           )
+           SELECT native_id FROM linked ORDER BY native_id LIMIT %s""",
+        (
+            tenant_id,
+            source_id,
+            native_id,
+            tenant_id,
+            source_id,
+            MAX_LINKED_IDENTITIES + 1,
+        ),
+    ).fetchall()
+    if len(rows) > MAX_LINKED_IDENTITIES:
+        raise CanonicalLifecycleError("canonical_lineage_limit")
+    return [
+        native_id,
+        *sorted({row["native_id"] for row in rows if row["native_id"] != native_id}),
+    ]
 
 
 def canonical_text_chunks(text: str) -> list[str]:
@@ -373,13 +410,23 @@ class CanonicalPlane:
                         event["observed_at"], is_tombstone, json.dumps(event),
                     ),
                 )
+                affected_native_ids = (
+                    _linked_native_ids(
+                        conn,
+                        tenant_id=tenant_id,
+                        source_id=source_id,
+                        native_id=native_id,
+                    )
+                    if is_tombstone
+                    else [native_id]
+                )
                 conn.execute(
                     """UPDATE canonical_documents
                        SET is_current=false,
                            deleted_at=CASE WHEN %s THEN now() ELSE deleted_at END
-                       WHERE tenant_id=%s AND source_id=%s AND native_id=%s
+                       WHERE tenant_id=%s AND source_id=%s AND native_id=ANY(%s)
                          AND is_current""",
-                    (is_tombstone, tenant_id, source_id, native_id),
+                    (is_tombstone, tenant_id, source_id, affected_native_ids),
                 )
                 if is_tombstone:
                     conn.execute(
@@ -390,9 +437,9 @@ class CanonicalPlane:
                              AND chunk.source_id=document.source_id
                              AND chunk.document_id=document.document_id
                              AND document.tenant_id=%s AND document.source_id=%s
-                             AND document.native_id=%s
+                             AND document.native_id=ANY(%s)
                              AND chunk.deleted_at IS NULL""",
-                        (tenant_id, source_id, native_id),
+                        (tenant_id, source_id, affected_native_ids),
                     )
                 else:
                     conn.execute(
@@ -500,7 +547,7 @@ class CanonicalPlane:
         *,
         tenant_id: str,
         source_id: str,
-        native_id: str,
+        native_ids: list[str],
     ) -> list[dict[str, Any]]:
         rows = conn.execute(
             """SELECT DISTINCT artifact.tenant_id,artifact.source_id,
@@ -511,9 +558,9 @@ class CanonicalPlane:
                JOIN raw_artifacts artifact
                  USING(tenant_id,source_id,artifact_id)
                WHERE event.tenant_id=%s AND event.source_id=%s
-                 AND event.native_id=%s
+                 AND event.native_id=ANY(%s)
                ORDER BY artifact.artifact_id""",
-            (tenant_id, source_id, native_id),
+            (tenant_id, source_id, native_ids),
         ).fetchall()
         return [
             {
@@ -590,6 +637,21 @@ class CanonicalPlane:
                 ).fetchone()
                 if target is None or target["native_id"] != native_id:
                     raise CanonicalLifecycleError("forget_target_not_found")
+                native_ids = _linked_native_ids(
+                    conn,
+                    tenant_id=tenant_id,
+                    source_id=source_id,
+                    native_id=native_id,
+                )
+                identity_hashes = [
+                    _identity_sha256(tenant_id, source_id, candidate)
+                    for candidate in native_ids
+                ]
+                for candidate in native_ids[1:]:
+                    conn.execute(
+                        "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                        (f"v2\x1f{tenant_id}\x1f{source_id}\x1f{candidate}",),
+                    )
                 if tombstone is None:
                     conn.execute(
                         """INSERT INTO forget_tombstones(
@@ -601,11 +663,24 @@ class CanonicalPlane:
                             value["requested_at"], value["idempotency_key"],
                         ),
                     )
+                for child_hash in identity_hashes[1:]:
+                    conn.execute(
+                        """INSERT INTO forget_tombstones(
+                               tenant_id,source_id,target_identity_sha256,mode,reason,
+                               deleted_at,status,idempotency_key
+                           ) VALUES (%s,%s,%s,%s,%s,%s,'deleting',NULL)
+                           ON CONFLICT(tenant_id,source_id,target_identity_sha256)
+                           DO NOTHING""",
+                        (
+                            tenant_id, source_id, child_hash, value["mode"], reason,
+                            value["requested_at"],
+                        ),
+                    )
                 references = self._archive_references(
                     conn,
                     tenant_id=tenant_id,
                     source_id=source_id,
-                    native_id=native_id,
+                    native_ids=native_ids,
                 )
                 projection_count = conn.execute(
                     """SELECT count(*) AS count
@@ -613,8 +688,8 @@ class CanonicalPlane:
                        JOIN canonical_documents document
                          USING(tenant_id,source_id,document_id)
                        WHERE document.tenant_id=%s AND document.source_id=%s
-                         AND document.native_id=%s AND chunk.deleted_at IS NULL""",
-                    (tenant_id, source_id, native_id),
+                         AND document.native_id=ANY(%s) AND chunk.deleted_at IS NULL""",
+                    (tenant_id, source_id, native_ids),
                 ).fetchone()["count"]
                 conn.execute(
                     """UPDATE canonical_chunks chunk
@@ -624,15 +699,15 @@ class CanonicalPlane:
                          AND chunk.source_id=document.source_id
                          AND chunk.document_id=document.document_id
                          AND document.tenant_id=%s AND document.source_id=%s
-                         AND document.native_id=%s""",
-                    (value["requested_at"], tenant_id, source_id, native_id),
+                         AND document.native_id=ANY(%s)""",
+                    (value["requested_at"], tenant_id, source_id, native_ids),
                 )
                 conn.execute(
                     """UPDATE canonical_documents
                        SET is_current=false,
                            deleted_at=COALESCE(deleted_at,%s)
-                       WHERE tenant_id=%s AND source_id=%s AND native_id=%s""",
-                    (value["requested_at"], tenant_id, source_id, native_id),
+                       WHERE tenant_id=%s AND source_id=%s AND native_id=ANY(%s)""",
+                    (value["requested_at"], tenant_id, source_id, native_ids),
                 )
                 conn.execute(
                     """UPDATE raw_artifacts artifact
@@ -642,8 +717,8 @@ class CanonicalPlane:
                          AND artifact.source_id=event.source_id
                          AND artifact.artifact_id=event.artifact_id
                          AND event.tenant_id=%s AND event.source_id=%s
-                         AND event.native_id=%s AND artifact.state='live'""",
-                    (tenant_id, source_id, native_id),
+                         AND event.native_id=ANY(%s) AND artifact.state='live'""",
+                    (tenant_id, source_id, native_ids),
                 )
 
         try:
@@ -677,18 +752,18 @@ class CanonicalPlane:
                          AND chunk.source_id=document.source_id
                          AND chunk.document_id=document.document_id
                          AND document.tenant_id=%s AND document.source_id=%s
-                         AND document.native_id=%s""",
-                    (tenant_id, source_id, native_id),
+                         AND document.native_id=ANY(%s)""",
+                    (tenant_id, source_id, native_ids),
                 )
                 conn.execute(
                     """DELETE FROM canonical_documents
-                       WHERE tenant_id=%s AND source_id=%s AND native_id=%s""",
-                    (tenant_id, source_id, native_id),
+                       WHERE tenant_id=%s AND source_id=%s AND native_id=ANY(%s)""",
+                    (tenant_id, source_id, native_ids),
                 )
                 conn.execute(
                     """DELETE FROM canonical_events
-                       WHERE tenant_id=%s AND source_id=%s AND native_id=%s""",
-                    (tenant_id, source_id, native_id),
+                       WHERE tenant_id=%s AND source_id=%s AND native_id=ANY(%s)""",
+                    (tenant_id, source_id, native_ids),
                 )
                 artifact_ids = [reference["artifact_id"] for reference in references]
                 if artifact_ids:
@@ -702,8 +777,8 @@ class CanonicalPlane:
                     """UPDATE forget_tombstones
                        SET status='deleted',completed_at=now()
                        WHERE tenant_id=%s AND source_id=%s
-                         AND target_identity_sha256=%s""",
-                    (tenant_id, source_id, target_sha256),
+                         AND target_identity_sha256=ANY(%s)""",
+                    (tenant_id, source_id, identity_hashes),
                 )
                 conn.execute(
                     """INSERT INTO canonical_audit_events(
