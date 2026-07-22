@@ -156,6 +156,24 @@ the pinned CLI remain available for self-hosted deployments.
 Connectors are explicit Python objects. Recall does not discover or execute
 plugins, recipes, entry points, or code from the current directory.
 
+### Content fidelity invariant
+
+Recall is a brain, not a link catalog. A content-bearing connector must acquire
+the fullest authoritative text the provider exposes within the versioned record
+and transport bounds. It must not silently substitute a title, metadata, preview,
+or snippet for an available body. When a provider, format, policy, or hard safety
+bound prevents complete acquisition, the record must remain useful while declaring
+`content_fidelity=partial` and stable `content_omissions`; `complete` means the
+connector acquired the full supported content surface. File attachments are
+separate content surfaces and remain partial until their bytes are explicitly
+projected through a bounded document extractor.
+
+Gmail follows this rule by collecting every non-attachment body section, preferring
+plain text within each MIME alternative, converting HTML-only bodies to text, and
+fetching body sections that Gmail externalizes behind an attachment ID. The Gmail
+snippet is last-resort fallback only and is always marked partial. Attachment
+metadata is retained, but attachment bytes are not yet projected as documents.
+
 ### Work APIs
 
 GitHub Issues and pull requests, Linear issues, Slack channel messages, and

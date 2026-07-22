@@ -153,6 +153,25 @@ class ComposioWorkspaceRailTests(unittest.TestCase):
             ):
                 rail.run(operation, params)
 
+    def test_gmail_body_part_fetch_is_bound_to_message_and_attachment(self):
+        rail, _client, session = self.rail(
+            "google.gmail",
+            {
+                (
+                    "gmail",
+                    "/gmail/v1/users/me/messages/message-1/attachments/body-part-1",
+                ): [ProxyResponse(200, {"size": 12, "data": "c3ludGhldGlj"})]
+            },
+        )
+
+        value = rail.run(
+            "gmail.messages.attachments.get",
+            {"userId": "me", "messageId": "message-1", "id": "body-part-1"},
+        )
+
+        self.assertEqual(value["size"], 12)
+        self.assertEqual(session.calls[0]["parameters"], [])
+
     def test_status_shape_and_output_failures_are_content_free(self):
         expected = {
             401: "authority_revoked",

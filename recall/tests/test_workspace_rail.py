@@ -43,6 +43,13 @@ class WorkspaceRailContractTest(unittest.TestCase):
         self.assertEqual(json.loads(argv[6]), {
             "maxResults": 50, "startHistoryId": "100", "userId": "me",
         })
+        attachment = build_argv("gmail.messages.attachments.get", {
+            "userId": "me", "messageId": "message-1", "id": "body-part-1",
+        })
+        self.assertEqual(attachment[:7], (
+            "/opt/recall/vendor/gws/0.22.5/gws", "gmail", "users", "messages",
+            "attachments", "get", "--params",
+        ))
         for operation, params in (
             ("gmail.messages.send", {"userId": "me"}),
             ("gmail.history.list", {"userId": "me", "shell": "synthetic"}),

@@ -53,33 +53,70 @@ class GmailRail:
             }
         if operation == "gmail.messages.get":
             message_id = params["id"]
-            body = base64.urlsafe_b64encode(
-                b"managed company launch marker "
-                b"api_key=synthetic-managed-content-secret"
-            ).decode().rstrip("=")
+            if message_id == "managed-message-1":
+                payload = {
+                    "mimeType": "multipart/alternative",
+                    "headers": [
+                        {"name": "From", "value": "teammate@example.invalid"},
+                        {"name": "To", "value": "owner@example.invalid"},
+                        {"name": "Subject", "value": "managed company launch marker"},
+                    ],
+                    "body": {"size": 0},
+                    "parts": [
+                        {
+                            "mimeType": "text/plain",
+                            "filename": "",
+                            "headers": [],
+                            "body": {
+                                "attachmentId": "managed-body-1",
+                                "size": 82,
+                            },
+                        },
+                        {
+                            "mimeType": "text/html",
+                            "filename": "",
+                            "headers": [],
+                            "body": {"data": base64.urlsafe_b64encode(
+                                b"<p>duplicate html alternative</p>"
+                            ).decode().rstrip("=")},
+                        },
+                    ],
+                }
+            else:
+                body = base64.urlsafe_b64encode(
+                    b"<html><body><h1>managed html body marker</h1>"
+                    b"<p>api_key=synthetic-managed-content-secret</p>"
+                    b"<script>hidden tracker</script></body></html>"
+                ).decode().rstrip("=")
+                payload = {
+                    "mimeType": "text/html",
+                    "headers": [
+                        {"name": "From", "value": "teammate@example.invalid"},
+                        {"name": "To", "value": "owner@example.invalid"},
+                        {"name": "Subject", "value": "managed html message"},
+                    ],
+                    "body": {"data": body},
+                }
             return {
                 "id": message_id,
                 "threadId": "managed-thread-1",
                 "historyId": "700",
                 "internalDate": "1784505600000",
-                "payload": {
-                    "mimeType": "text/plain",
-                    "headers": [
-                        {
-                            "name": "From",
-                            "value": "teammate@example.invalid",
-                        },
-                        {
-                            "name": "To",
-                            "value": "owner@example.invalid",
-                        },
-                        {
-                            "name": "Subject",
-                            "value": "managed company launch marker",
-                        },
-                    ],
-                    "body": {"data": body},
-                },
+                "payload": payload,
+            }
+        if operation == "gmail.messages.attachments.get":
+            assert params == {
+                "userId": "me",
+                "messageId": "managed-message-1",
+                "id": "managed-body-1",
+            }
+            body = (
+                b"managed external complete body marker "
+                b"api_key=synthetic-managed-content-secret"
+            )
+            return {
+                "size": len(body),
+                "data": base64.urlsafe_b64encode(body).decode().rstrip("="),
             }
         if operation == "gmail.history.list":
             return {"history": [], "historyId": "700"}
@@ -294,13 +331,25 @@ def main():
                    FROM connector_installations WHERE id=%s""",
                 (company_installation,),
             ).fetchone()
-            rendered = json.dumps(
-                database.execute(
+            canonical = [
+                row["canonical_redacted"]
+                for row in database.execute(
                     """SELECT canonical_redacted
                        FROM canonical_events
-                       WHERE tenant_id=%s AND source_id=%s""",
+                       WHERE tenant_id=%s AND source_id=%s
+                       ORDER BY native_id""",
                     (COMPANY, COMPANY_SOURCE),
-                ).fetchone()["canonical_redacted"]
+                ).fetchall()
+            ]
+            rendered = json.dumps(canonical)
+            searchable = "\n".join(
+                row["text_redacted"]
+                for row in database.execute(
+                    """SELECT text_redacted FROM canonical_chunks
+                       WHERE tenant_id=%s AND source_id=%s
+                         AND deleted_at IS NULL""",
+                    (COMPANY, COMPANY_SOURCE),
+                ).fetchall()
             )
         assert [(row["tenant_id"], row["count"]) for row in by_tenant] == [
             (COMPANY, 2)
@@ -316,6 +365,13 @@ def main():
             and route["lease_expires_at"] is None
         )
         assert "synthetic-managed-content-secret" not in rendered
+        assert "managed external complete body marker" in searchable
+        assert "managed html body marker" in searchable
+        assert "duplicate html alternative" not in searchable
+        assert all(
+            event["content"]["content_fidelity"] == "complete"
+            for event in canonical
+        )
 
         force_due(store, company_installation)
         replay = worker.run_once()

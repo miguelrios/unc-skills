@@ -29,11 +29,13 @@
       }
     },
     "communication_message.v1": {
-      "optional": ["attachments", "author_id", "deleted_at", "edited_at", "format", "participant_ids", "received_at", "reply_to_id", "role", "sent_at", "source_url", "subject", "surface"],
+      "optional": ["attachments", "author_id", "content_fidelity", "content_omissions", "deleted_at", "edited_at", "format", "participant_ids", "received_at", "reply_to_id", "role", "sent_at", "source_url", "subject", "surface"],
       "required": ["conversation_id", "direction", "kind", "message_id", "text"],
       "properties": {
         "attachments": {"type": "object_list"},
         "author_id": {"type": "string"},
+        "content_fidelity": {"enum": ["complete", "partial"], "type": "string"},
+        "content_omissions": {"type": "string_list"},
         "conversation_id": {"type": "string"},
         "deleted_at": {"type": "string"},
         "direction": {"enum": ["inbound", "outbound", "system"], "type": "string"},
