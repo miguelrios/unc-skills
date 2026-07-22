@@ -28,6 +28,7 @@ def communication_record(native_id: str = "message-1") -> ConnectorRecordV2:
         "occurred_at": "2026-07-18T00:00:00Z",
         "content": {
             "kind": "communication_message.v1",
+            "content_fidelity": "complete",
             "conversation_id": "conversation-1",
             "message_id": native_id,
             "direction": "inbound",

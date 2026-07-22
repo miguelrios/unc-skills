@@ -316,6 +316,8 @@ class GitHubActivityConnector:
             )
             native = f"github:{self.owner}/{self.repository}:{type_name}:{number}"
             content: dict[str, Any] = {
+                "content_fidelity": "partial",
+                "content_omissions": ["comments_not_fetched"],
                 "document_id": native,
                 "mime_type": f"application/vnd.github.{type_name}+json",
                 "name": title,
@@ -446,6 +448,8 @@ class LinearActivityConnector:
                     if name:
                         labels.append(name)
             content: dict[str, Any] = {
+                "content_fidelity": "partial",
+                "content_omissions": ["comments_not_fetched"],
                 "document_id": f"linear:{item_id}",
                 "mime_type": "application/vnd.linear.issue+json",
                 "name": title,
@@ -586,6 +590,7 @@ class SlackMessagesConnector:
                 "slack author",
             )
             content: dict[str, Any] = {
+                "content_fidelity": "complete",
                 "conversation_id": f"slack-channel:{self.channel_id}",
                 "direction": "system",
                 "message_id": f"slack:{message_ts}",
@@ -593,6 +598,17 @@ class SlackMessagesConnector:
                 "surface": "slack",
                 "text": _text(message.get("text")),
             }
+            omissions = []
+            if _items(message.get("files"), "slack files"):
+                omissions.append("file_attachments")
+            reply_count = message.get("reply_count", 0)
+            if type(reply_count) is not int or reply_count < 0:
+                raise ConnectorContractError("slack reply count is invalid")
+            if reply_count:
+                omissions.append("thread_replies_not_fetched")
+            if omissions:
+                content["content_fidelity"] = "partial"
+                content["content_omissions"] = omissions
             if user:
                 content["author_id"] = user
                 content["participant_ids"] = [user]
@@ -771,6 +787,8 @@ class NotionWorkspaceConnector:
                 continue
             title = _notion_title(item.get("properties"))
             content: dict[str, Any] = {
+                "content_fidelity": "partial",
+                "content_omissions": ["page_body_not_fetched"],
                 "document_id": native,
                 "mime_type": f"application/vnd.notion.{object_type}+json",
                 "modified_at": updated,

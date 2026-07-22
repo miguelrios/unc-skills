@@ -102,7 +102,10 @@ def main() -> None:
                                  '2026-07-19T00:00:00Z','2026-07-19T00:00:01Z',%s)""",
                     (
                         tenant, source, event, artifact, job, content_sha256,
-                        json.dumps({"kind": "document.v1"}),
+                        json.dumps({
+                            "kind": "document.v1",
+                            "content_fidelity": "complete",
+                        }),
                     ),
                 )
                 connection.execute(

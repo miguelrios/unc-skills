@@ -260,8 +260,10 @@ class MailImportConnector(_SnapshotImport):
                 f"{self.archive_id}\0{thread_key or native_id}".encode()
             ).hexdigest()
             occurred_at = _mail_timestamp(message.get("date"))
+            has_attachments = any(True for _part in message.iter_attachments())
             content = {
                 "kind": self.record_kind,
+                "content_fidelity": "partial" if has_attachments else "complete",
                 "conversation_id": conversation_id,
                 "direction": (
                     "outbound"
@@ -274,6 +276,8 @@ class MailImportConnector(_SnapshotImport):
                 "surface": "portable_mail",
                 "text": _mail_body(message),
             }
+            if has_attachments:
+                content["content_omissions"] = ["file_attachments"]
             if subject:
                 content["subject"] = subject
             if senders:
@@ -423,6 +427,7 @@ class CalendarImportConnector(_SnapshotImport):
             title = values.get("SUMMARY", [({}, "(untitled)")])[0][1]
             content: dict[str, Any] = {
                 "kind": self.record_kind,
+                "content_fidelity": "complete",
                 "calendar_id": self.archive_id,
                 "event_id": uid,
                 "start": start,
@@ -497,6 +502,7 @@ class ContactImportConnector(_SnapshotImport):
             identifier = emails[0] if emails else phones[0] if phones else None
             content: dict[str, Any] = {
                 "kind": self.record_kind,
+                "content_fidelity": "complete",
                 "identity_id": identity,
                 "identifier_type": (
                     "email" if emails else "phone" if phones else "vcard"

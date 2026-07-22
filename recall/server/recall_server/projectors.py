@@ -9,6 +9,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from connectors.record_contract import validate_content_fidelity
+
 from . import PROJECTOR_VERSION
 
 SOURCE_ID_RE = re.compile(r"[A-Za-z0-9_.:@-]{3,160}\Z")
@@ -101,6 +103,10 @@ def validate_typed_connector_content(
         )
     ):
         raise ValueError("invalid typed connector record")
+    try:
+        validate_content_fidelity(content, deleted=deleted)
+    except ValueError:
+        raise ValueError("invalid typed connector record") from None
     return content
 
 
@@ -329,6 +335,9 @@ def project(envelope: dict, revision: int) -> tuple[list[dict], dict]:
         and record_kind in TYPED_CONNECTOR_KINDS
     ):
         metadata["record_kind"] = record_kind
+        metadata["content_fidelity"] = content["content_fidelity"]
+        if content.get("content_omissions"):
+            metadata["content_omissions"] = list(content["content_omissions"])
         if record_kind == "communication_message.v1":
             parts = [content.get("subject"), content.get("text")]
             role = content.get("direction")

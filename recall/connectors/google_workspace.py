@@ -778,6 +778,7 @@ class GoogleCalendarConnector:
         end, end_all_day = _calendar_time(event.get("end"))
         content: dict[str, Any] = {
             "calendar_id": self.calendar_id,
+            "content_fidelity": "complete",
             "event_id": event_id,
             "start": start,
             "end": end,
@@ -951,6 +952,7 @@ class GoogleContactsConnector:
         identifier = primary_email or primary_phone
         identifier_type = "email" if primary_email else "phone" if primary_phone else "google_person"
         content: dict[str, Any] = {
+            "content_fidelity": "complete",
             "identity_id": identity_id,
             "identifier_type": identifier_type,
             "display_name": display_name,
@@ -1094,6 +1096,8 @@ class GoogleDriveConnector:
         name = _bounded_string(item.get("name"), "drive file name", maximum=MAX_TEXT_BYTES)
         mime_type = _bounded_string(item.get("mimeType"), "drive mime type")
         content: dict[str, Any] = {
+            "content_fidelity": "partial",
+            "content_omissions": ["document_text_not_exported"],
             "document_id": file_id,
             "name": name,
             "mime_type": mime_type,
@@ -1130,6 +1134,8 @@ class GoogleDriveConnector:
             if not isinstance(exported, bytes):
                 raise ConnectorContractError("drive export is invalid")
             content["text"] = _text(exported.decode(errors="replace"))
+            content["content_fidelity"] = "complete"
+            content.pop("content_omissions")
         return _record(
             native_id=native_id,
             occurred_at=occurred_at,

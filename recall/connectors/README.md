@@ -163,8 +163,10 @@ the fullest authoritative text the provider exposes within the versioned record
 and transport bounds. It must not silently substitute a title, metadata, preview,
 or snippet for an available body. When a provider, format, policy, or hard safety
 bound prevents complete acquisition, the record must remain useful while declaring
-`content_fidelity=partial` and stable `content_omissions`; `complete` means the
-connector acquired the full supported content surface. File attachments are
+`content_fidelity=partial` and a non-empty, sorted, stable `content_omissions` list;
+`complete` is required on every other live typed record and cannot carry omissions.
+Snippet-formatted records can never claim complete fidelity. Tombstones carry only
+their closed record kind. File attachments are
 separate content surfaces and remain partial until their bytes are explicitly
 projected through a bounded document extractor.
 
