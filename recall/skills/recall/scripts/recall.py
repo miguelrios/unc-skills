@@ -197,6 +197,11 @@ def recall_mode() -> str:
     return "remote" if os.environ.get("RECALL_URL") or client_config_path().exists() else "local"
 
 
+def central_client_configured() -> bool:
+    """Return whether this device has selected a central Recall service."""
+    return bool(os.environ.get("RECALL_URL") or client_config_path().exists())
+
+
 def remote_headers() -> dict[str, str]:
     headers = {"Accept": "application/json", "Content-Type": "application/json"}
     config = load_client_config()
@@ -527,6 +532,19 @@ def append_private_jsonl(path: Path, entry: dict) -> None:
 
 
 def run_transport(args) -> int:
+    if (
+        args.command == "index"
+        and central_client_configured()
+        and not args.allow_local_index
+    ):
+        print(
+            "local index disabled: this device has a central Recall profile; "
+            "`index` cannot repair or refresh the central brain. Run `doctor` "
+            "to check the remote service. For an intentional local fallback, "
+            "rerun with --allow-local-index.",
+            file=sys.stderr,
+        )
+        return 2
     mode = recall_mode()
     if args.command in REMOTE_WRITE_COMMANDS:
         if mode == "local":
@@ -1803,7 +1821,14 @@ def doctor(args) -> int:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="recall")
     sub = ap.add_subparsers(dest="command", required=True)
-    p = sub.add_parser("index"); p.add_argument("--rebuild", action="store_true"); p.set_defaults(func=ingest)
+    p = sub.add_parser("index")
+    p.add_argument("--rebuild", action="store_true")
+    p.add_argument(
+        "--allow-local-index",
+        action="store_true",
+        help="explicitly operate the disposable SQLite fallback even when a central profile exists",
+    )
+    p.set_defaults(func=ingest)
     p = sub.add_parser("search"); p.add_argument("query"); p.add_argument("--since"); p.add_argument("--until"); p.add_argument("--cwd"); p.add_argument("--branch"); p.add_argument("--harness", choices=("claude","codex")); p.add_argument("--source-id"); p.add_argument("--source-family", choices=("coding_history","deliberate_capture","user_export","third_party_research","communications","schedule","contacts","social","documents","work_activity","local_activity","personal_media")); p.add_argument("--source-alias"); p.add_argument("--limit", type=int, default=10); p.add_argument("--paths", action="store_true"); p.set_defaults(func=search)
     p = sub.add_parser("show"); p.add_argument("target"); p.add_argument("--around"); p.add_argument("--prompts", action="store_true"); p.add_argument("--tail", type=int, default=0, help="print only the last N chunks"); p.set_defaults(func=show)
     p = sub.add_parser("session-export", help="page one exact redacted session snapshot as JSON")
