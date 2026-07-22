@@ -1,0 +1,18 @@
+{
+  "description": "Show the current Parable cast after Claude Code starts.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/welcome.py"],
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

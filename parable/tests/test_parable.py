@@ -189,6 +189,35 @@ class TestClaudeLaunch(unittest.TestCase):
                 self.cfg(), ["--model", "opus"], {"CLIPROXY_API_KEY": "x"}
             )
 
+    def test_welcome_card_is_user_only_live_cast_and_skips_print_mode(self):
+        cfg = self.auto_cfg()
+        available = {"gpt-5.6-sol", "claude-fable-5", "kimi-k3"}
+        card = parable.render_claude_welcome(
+            cfg,
+            "claude-fable-5",
+            "Claude usage is 20%; keeping the preferred Fable parent",
+            available,
+            columns=96,
+        )
+        self.assertTrue(card.startswith(parable.PARABLE_ASCII[0]))
+        self.assertIn("🐢  🫏  🦉", card)
+        self.assertIn("BRAIN   FABLE · claude-fable-5", card)
+        self.assertIn("KIMI", card)
+        self.assertIn("Independent implementation", card)
+        argv = ["claude", "--model", "claude-fable-5"]
+        interactive_argv, interactive_env = parable.add_claude_welcome(
+            argv, {}, cfg, "claude-fable-5", "explicit fable parent", available, []
+        )
+        self.assertEqual(interactive_argv[:2], ["claude", "--plugin-dir"])
+        self.assertEqual(interactive_env[parable.PARABLE_WELCOME_ENV].splitlines()[0],
+                         parable.PARABLE_ASCII[0])
+        print_argv, print_env = parable.add_claude_welcome(
+            argv, {}, cfg, "claude-fable-5", "explicit fable parent", available,
+            ["--print", "hello"],
+        )
+        self.assertEqual(print_argv, argv)
+        self.assertNotIn(parable.PARABLE_WELCOME_ENV, print_env)
+
     def auto_cfg(self):
         cfg = self.cfg()
         cfg["executors"]["fable_exact"] = {

@@ -22,6 +22,9 @@ for required in \
   "$runtime_dir/bin/parable.js" \
   "$runtime_dir/lib/onboarding.js" \
   "$runtime_dir/patches/cliproxyapi-v7.2.88-claude-effort.patch" \
+  "$runtime_dir/welcome-plugin/.claude-plugin/plugin.json" \
+  "$runtime_dir/welcome-plugin/hooks/hooks.json" \
+  "$runtime_dir/welcome-plugin/scripts/welcome.py" \
   "$script_dir/scripts/parable.py"; do
   [[ -f "$required" && ! -L "$required" ]] || die "the installed skill is incomplete (${required#"$script_dir/"} is missing)"
 done

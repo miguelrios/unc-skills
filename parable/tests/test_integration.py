@@ -50,6 +50,7 @@ import time
 capture = {
     "argv": sys.argv[1:],
     "base_url": os.environ.get("ANTHROPIC_BASE_URL"),
+    "welcome_message": os.environ.get("PARABLE_WELCOME_MESSAGE"),
     "auth_token_present": bool(os.environ.get("ANTHROPIC_AUTH_TOKEN")),
     "source_token_present": any(
         key in os.environ for key in ("PARABLE_PROXY_TOKEN", "CLIPROXY_API_KEY")
@@ -427,6 +428,8 @@ exit 0
         self.assertIn("Do not run it through", skill)
         self.assertIn("Do not give the user three separate `auth add` commands", skill)
         self.assertIn("should never be handed three separate provider commands", readme)
+        self.assertIn("inside Claude Code", readme)
+        self.assertIn("user-only", skill)
 
         self.assertIn('chmod +x "$DEST"/parable.sh', installer)
         self.assertIn('exec "$DEST/parable.sh" "$@"', installer)
@@ -488,11 +491,28 @@ exit 0
             self.assertEqual(first.stdout.count(handoff), 1)
             self.assertIn(launch, first.stdout)
 
-            installed = home / ".local" / "share" / "parable" / "0.1.15"
+            installed = home / ".local" / "share" / "parable" / "0.1.16"
             durable = home / ".local" / "bin" / "parable"
             self.assertTrue((installed / "bin" / "parable.js").is_file())
             self.assertTrue((installed / "lib" / "onboarding.js").is_file())
             self.assertTrue((installed / "skills" / "parable" / "SKILL.md").is_file())
+            welcome = (
+                installed / "skills" / "parable" / "runtime" / "welcome-plugin"
+                / "scripts" / "welcome.py"
+            )
+            self.assertTrue(welcome.is_file())
+            rendered = subprocess.run(
+                ["python3", str(welcome)],
+                env=env | {"PARABLE_WELCOME_MESSAGE": "PARABLE READY"},
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertEqual(rendered.returncode, 0, rendered.stdout + rendered.stderr)
+            self.assertEqual(json.loads(rendered.stdout), {
+                "systemMessage": "\nPARABLE READY",
+                "suppressOutput": True,
+            })
             self.assertTrue(durable.is_symlink())
             self.assertEqual(durable.resolve(), (installed / "bin" / "parable.js").resolve())
             self.assertEqual((home / ".config" / "parable").stat().st_mode & 0o777, 0o700)
@@ -615,6 +635,11 @@ exit 0
         package = json.loads((REPO / "package.json").read_text())
         version = (REPO / "skills" / "parable" / "runtime" / "VERSION").read_text().strip()
         self.assertEqual(version, package["version"])
+        welcome_manifest = json.loads((
+            REPO / "skills" / "parable" / "runtime" / "welcome-plugin"
+            / ".claude-plugin" / "plugin.json"
+        ).read_text())
+        self.assertEqual(welcome_manifest["version"], package["version"])
         patch = (
             REPO / "skills" / "parable" / "runtime" / "patches"
             / "cliproxyapi-v7.2.88-claude-effort.patch"
@@ -1761,6 +1786,7 @@ for flag, (vendor, record_type) in mapping.items():
                 captured["argv"],
                 ["--model", "claude-fable-5", "--print", "hello"],
             )
+            self.assertIsNone(captured["welcome_message"])
             self.assertTrue(captured["auth_token_present"])
             self.assertFalse(captured["source_token_present"])
 
@@ -1768,20 +1794,52 @@ for flag, (vendor, record_type) in mapping.items():
             self.assertEqual(bare.returncode, 0, bare.stdout + bare.stderr)
             self.assertIn("brain: claude-fable-5", bare.stdout)
             captured = json.loads(claude_capture.read_text())
+            welcome_plugin = (
+                REPO / "skills" / "parable" / "runtime" / "welcome-plugin"
+            )
             self.assertEqual(
                 captured["argv"],
-                ["--model", "claude-fable-5", "--effort", "high"],
+                [
+                    "--plugin-dir", str(welcome_plugin),
+                    "--model", "claude-fable-5", "--effort", "high",
+                ],
             )
+            self.assertIn("_ __   __ _ _ __", captured["welcome_message"])
+            self.assertIn("🐢  🐘  🦊", captured["welcome_message"])
+            self.assertIn("BRAIN   FABLE · claude-fable-5", captured["welcome_message"])
+            self.assertIn("TERRA", captured["welcome_message"])
+            self.assertIn("React and frontend", captured["welcome_message"])
+            self.assertNotIn(token, captured["welcome_message"])
 
             pinned = self.run_cli(
-                repo, env, "--brain", "fable", "--", "--print", "root"
+                repo, env, "--brain", "fable", "--dangerously-skip-permissions",
             )
             self.assertEqual(pinned.returncode, 0, pinned.stdout + pinned.stderr)
             captured = json.loads(claude_capture.read_text())
             self.assertEqual(
                 captured["argv"],
-                ["--model", "claude-fable-5", "--effort", "high", "--print", "root"],
+                [
+                    "--plugin-dir", str(welcome_plugin),
+                    "--model", "claude-fable-5", "--effort", "high",
+                    "--dangerously-skip-permissions",
+                ],
             )
+            self.assertIn("explicit fable parent", captured["welcome_message"])
+
+            direct = self.run_cli(
+                repo, env, "--dangerously-skip-permissions", "--effort", "low",
+                "--print", "direct",
+            )
+            self.assertEqual(direct.returncode, 0, direct.stdout + direct.stderr)
+            captured = json.loads(claude_capture.read_text())
+            self.assertEqual(
+                captured["argv"],
+                [
+                    "--model", "claude-fable-5", "--dangerously-skip-permissions",
+                    "--effort", "low", "--print", "direct",
+                ],
+            )
+            self.assertIsNone(captured["welcome_message"])
 
             auto = self.run_cli(
                 repo, env, "claude", "--brain", "auto", "--", "--print", "auto"

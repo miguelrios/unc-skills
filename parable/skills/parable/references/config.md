@@ -59,8 +59,10 @@ The launcher-level `--brain` policy can be `config`, `fable`, `sol`, or `auto`. 
 80%, probes ChatGPT only when that pool is tight, and then selects Sol when it has more or
 unknown headroom. Explicit `fable` or `sol` fails unless that exact model is configured and
 present in the authenticated catalog. Bare `parable` means `--brain auto` with high effort.
-To override it, put the brain option before the Claude argument separator:
-`parable --brain fable -- --effort high`.
+Claude flags pass through directly; use `parable --dangerously-skip-permissions` or pin the
+brain with `parable --brain fable --effort high`. An optional `--` can separate Parable's brain
+option from Claude arguments. Interactive sessions show this selection and the usable executor
+cast in Claude Code via a user-only startup system message; the model does not receive the card.
 
 For a custom executor id such as `kimi`, `parable agents sync` creates the native Claude agent
 name `parable-kimi` with the exact configured model id. Only files carrying Parable's generated

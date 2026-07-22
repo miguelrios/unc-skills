@@ -166,7 +166,14 @@ No broker, shared deployment, provider API key, or copied OAuth credential is in
 
 Bare `parable` uses the automatic brain policy: it prefers Fable while the Claude pool has room
 and moves the parent to Sol when that pool becomes tight. `parable --brain fable` and
-`parable --brain sol` pin either parent. `parable claude` remains a compatibility alias.
+`parable --brain sol` pin either parent. All other flags pass directly to Claude Code, including
+`parable --dangerously-skip-permissions`; `--` remains an optional separator. `parable claude`
+remains a compatibility alias. Permission bypass is never enabled implicitly.
+
+Interactive launches add a session-scoped startup hook that renders Parable ASCII art, the live
+brain decision, and every routed model with its task guidance inside Claude Code. The card is a
+user-only `systemMessage`: it creates no prompt and consumes no model context. Headless `--print`
+and `--bare` launches stay clean.
 
 The generated cast gives the parent evidence-informed stage directions: Fable for ambiguous
 planning and architecture; Sol for long implementation, difficult debugging, and high-recall

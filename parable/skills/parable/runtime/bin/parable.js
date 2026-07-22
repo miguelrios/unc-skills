@@ -149,29 +149,33 @@ function runPython(args, env = process.env) {
 }
 
 function rootLaunchArgs(raw) {
-  let args;
-  if (!raw.length) args = ["--brain", "auto", "--"];
-  else if (raw[0] === "--") args = ["--brain", "auto", ...raw];
-  else if (raw[0] === "--brain" || raw[0].startsWith("--brain=")) args = [...raw];
+  if (raw[0] === "--help" || raw[0] === "-h") return null;
+
+  let brain = ["--brain", "auto"];
+  let forwarded;
+  if (!raw.length) forwarded = [];
+  else if (raw[0] === "--") forwarded = raw.slice(1);
+  else if (raw[0] === "--brain") {
+    brain = raw.slice(0, Math.min(2, raw.length));
+    forwarded = raw.slice(2);
+  } else if (raw[0].startsWith("--brain=")) {
+    brain = [raw[0]];
+    forwarded = raw.slice(1);
+  } else if (raw[0].startsWith("-")) forwarded = [...raw];
   else return null;
 
-  let separator = args.indexOf("--");
-  if (separator === -1) {
-    args.push("--");
-    separator = args.length - 1;
-  }
-  const forwarded = args.slice(separator + 1);
+  if (forwarded[0] === "--") forwarded.shift();
   const hasEffort = forwarded.some(
     (argument) => argument === "--effort" || argument.startsWith("--effort="),
   );
-  if (!hasEffort) args.splice(separator + 1, 0, "--effort", "high");
-  return args;
+  if (!hasEffort) forwarded.unshift("--effort", "high");
+  return [...brain, "--", ...forwarded];
 }
 
 function printUsage() {
-  log("usage: parable [--brain auto|fable|sol|config] [-- CLAUDE_ARGS...]");
+  log("usage: parable [--brain auto|fable|sol|config] [--] [CLAUDE_ARGS...]");
   log("       parable <install|setup|doctor|auth|proxy|claude|agents sync> [options]");
-  log("  (no command)       start the normal auto-brain Claude Code session");
+  log("  (no command)       start the normal auto-brain Claude Code session; flags pass to Claude");
   log("  install            copy the skill to ~/.claude/skills (or ./.claude/skills with --project)");
   log("  setup              configure subscriptions and offer a pinned proxy build");
   log("  setup finalize     diagnostic exact-catalog check and agent synchronization");

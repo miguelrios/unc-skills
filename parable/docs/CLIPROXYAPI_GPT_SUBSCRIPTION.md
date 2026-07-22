@@ -92,6 +92,11 @@ ChatGPT pool has more or unknown headroom; if both are tight, it takes the less
 used pool. Unknown Claude usage keeps the preferred Fable parent. Use
 `parable --brain fable` or `parable --brain sol` to pin one explicitly.
 
+After Claude Code mounts, an in-UI Parable launch card shows the selected brain and every routed
+model with its `use_for` guidance. Parable supplies it through a session-scoped `SessionStart`
+hook as a user-only system message, so it does not enter model context or create a conversation
+turn. `--print`, `--bare`, help, version, and init-only launches omit the card.
+
 `parable` authenticates a readiness
 probe to the configured loopback `/v1/models`. It reuses a healthy endpoint
 without owning or stopping it; otherwise it starts the configured proxy,
