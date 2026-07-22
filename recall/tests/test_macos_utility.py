@@ -22,6 +22,7 @@ from client.macos_utility import (
     route_info,
     support_report,
 )
+from collector.collector import Collector
 
 
 class MacUtilityLifecycleTest(unittest.TestCase):
@@ -75,12 +76,18 @@ class MacUtilityLifecycleTest(unittest.TestCase):
         self.assertEqual(result["source_classes"], list(SOURCE_SPECS))
         self.assertEqual(result["sources"]["claude-code"], {
             "enabled": True, "health": "ready", "lag_seconds": 10,
+            "running_age_seconds": None, "last_ack_age_seconds": None,
+            "pending_count": 0, "dead_letter_count": 0,
+            "remediation": "none",
             "checkpointed": True, "state_present": True,
             "privacy_mode": "scrub", "surface": "claude-code-project-jsonl",
             "connector_id": "local.claude-code",
         })
         self.assertEqual(result["sources"]["cowork"], {
             "enabled": True, "health": "degraded", "lag_seconds": 5,
+            "running_age_seconds": None, "last_ack_age_seconds": 5,
+            "pending_count": 0, "dead_letter_count": 0,
+            "remediation": "retry_brain",
             "checkpointed": True, "state_present": True,
             "privacy_mode": "scrub", "surface": "claude-cowork-project-jsonl",
             "connector_id": "local.cowork",
@@ -111,6 +118,8 @@ class MacUtilityLifecycleTest(unittest.TestCase):
             self.assertNotIn(forbidden, rendered)
 
     def test_status_maps_symlink_corruption_and_private_errors_to_closed_codes(self) -> None:
+        self._enable("claude-code")
+        self._state("claude-code", {"last_scan_at": "190"})
         target = self.home / "outside-private-target"
         target.write_text("synthetic")
         spec = SOURCE_SPECS["codex"]
@@ -120,6 +129,7 @@ class MacUtilityLifecycleTest(unittest.TestCase):
         result = mac_status(prefix=self.prefix, launch_agents=self.agents, now=200)
 
         self.assertEqual(result["sources"]["codex"]["health"], "invalid_local_state")
+        self.assertEqual(result["sources"]["claude-code"]["health"], "ready")
         self.assertNotIn("CANARY", json.dumps(result))
         self.assertNotIn(str(target), json.dumps(result))
 
@@ -129,6 +139,87 @@ class MacUtilityLifecycleTest(unittest.TestCase):
         self.assertEqual(
             result["sources"]["cowork"]["health"], "invalid_local_state"
         )
+
+    def test_status_distinguishes_running_stalled_backfill_and_dead_letters(self) -> None:
+        self._enable("claude-code")
+        state = self.prefix / "state" / SOURCE_SPECS["claude-code"].spool_name
+        self._state("claude-code", {
+            "last_scan_at": "190",
+            "last_scan_complete": "0",
+            "running_started_epoch": "100",
+        })
+
+        running = mac_status(prefix=self.prefix, launch_agents=self.agents, now=200)
+        self.assertEqual(running["sources"]["claude-code"]["health"], "running")
+        self.assertEqual(
+            running["sources"]["claude-code"]["running_age_seconds"],
+            100,
+        )
+
+        stalled = mac_status(prefix=self.prefix, launch_agents=self.agents, now=500)
+        self.assertEqual(stalled["sources"]["claude-code"]["health"], "stalled")
+        self.assertEqual(
+            stalled["sources"]["claude-code"]["remediation"],
+            "restart_stalled_source",
+        )
+
+        connection = sqlite3.connect(state)
+        connection.execute(
+            "DELETE FROM meta WHERE key='running_started_epoch'"
+        )
+        connection.commit()
+        connection.close()
+        backfill = mac_status(prefix=self.prefix, launch_agents=self.agents, now=200)
+        self.assertEqual(
+            backfill["sources"]["claude-code"]["health"],
+            "backfilling",
+        )
+
+        connection = sqlite3.connect(state)
+        connection.execute("CREATE TABLE outbox(state TEXT NOT NULL)")
+        connection.execute(
+            "CREATE TABLE dead_letters(error_code TEXT NOT NULL)"
+        )
+        connection.executemany(
+            "INSERT INTO outbox(state) VALUES (?)",
+            [("pending",), ("pending",)],
+        )
+        connection.execute(
+            "INSERT INTO dead_letters(error_code) VALUES ('synthetic_parse')"
+        )
+        connection.commit()
+        connection.close()
+        degraded = mac_status(prefix=self.prefix, launch_agents=self.agents, now=200)
+        value = degraded["sources"]["claude-code"]
+        self.assertEqual(value["health"], "degraded")
+        self.assertEqual(value["pending_count"], 2)
+        self.assertEqual(value["dead_letter_count"], 1)
+        self.assertEqual(value["remediation"], "inspect_dead_letters")
+
+    def test_status_reads_a_live_wal_without_mutating_the_collector(self) -> None:
+        self._enable("claude-code")
+        root = self.home / "claude-root"
+        root.mkdir()
+        collector = Collector(
+            root=root,
+            harness="claude",
+            source_id="claude:mac:synthetic",
+            spool_path=(
+                self.prefix / "state" / SOURCE_SPECS["claude-code"].spool_name
+            ),
+            endpoint="http://127.0.0.1:1",
+            token="synthetic",
+        )
+        collector._set_meta("running_started_epoch", "100")
+        collector.db.commit()
+
+        result = mac_status(prefix=self.prefix, launch_agents=self.agents, now=200)
+
+        value = result["sources"]["claude-code"]
+        self.assertEqual(value["health"], "running")
+        self.assertEqual(value["running_age_seconds"], 100)
+        self.assertEqual(collector.db.execute("PRAGMA query_only").fetchone()[0], 0)
+        collector.close()
 
     def test_per_source_disable_removes_only_agent_and_preserves_all_state(self) -> None:
         for name in SOURCE_SPECS:

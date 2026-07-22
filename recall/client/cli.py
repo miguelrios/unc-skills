@@ -324,6 +324,8 @@ def parser() -> argparse.ArgumentParser:
     collect.add_argument("--harness", choices=("claude", "codex"), required=True)
     collect.add_argument("--root", required=True)
     collect.add_argument("--spool", required=True)
+    collect.add_argument("--max-scan-records", type=int, default=1000)
+    collect.add_argument("--max-scan-seconds", type=float, default=20.0)
 
     cowork = commands.add_parser("cowork-local-sync")
     _private_connection(cowork)
@@ -1026,6 +1028,8 @@ def main() -> None:
             brain_writer=canonical[0] if canonical else None,
             archive=canonical[1] if canonical else None,
             tenant_id=canonical[2] if canonical else None,
+            max_scan_records=args.max_scan_records,
+            max_scan_seconds=args.max_scan_seconds,
         )
         try:
             result = {

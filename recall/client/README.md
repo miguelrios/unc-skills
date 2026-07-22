@@ -88,6 +88,14 @@ recall-brain mac-revoke --source cowork
 recall-brain mac-reset-local --source cowork --confirm-source cowork
 ```
 
+`mac-status` distinguishes starting, running, bounded backfill, ready, degraded,
+stalled, paused, disabled, and invalid local state. Each source reports only
+aggregate pending/dead-letter counts, running and last-Brain-ACK ages, and one
+stable remediation class. A failed scan or Brain acknowledgement cannot be
+reported as ready. Claude Code, Codex, Cowork, and the consented ChatGPT export
+inbox run as separate LaunchAgents, so one source cannot hold another source's
+schedule.
+
 Per-source disable removes only that LaunchAgent and retains recoverable state.
 `mac-revoke` also removes only that source's Keychain item. `mac-reset-local`
 requires an exact source-name confirmation, pauses the source, and removes its
