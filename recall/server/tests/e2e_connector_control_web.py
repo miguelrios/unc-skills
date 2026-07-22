@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 import http.client
 import json
 import os
@@ -29,6 +30,7 @@ from recall_server.db import BrainStore
 
 OWNER = "principal:owner:e2e-control"
 OUTSIDER = "principal:outsider:e2e-control"
+ADMIN = "principal:admin:e2e-control"
 PERSONAL = "tenant:personal:e2e-control"
 COMPANY = "tenant:company:e2e-control"
 SECRET_CANARY = "synthetic-refresh-token-never-render"
@@ -177,6 +179,7 @@ def main():
     store = BrainStore(os.environ["RECALL_DATABASE_URL"])
     store.migrate()
     tables = (
+        "authorization_audit_events,brain_invitations,external_identity_bindings,"
         "control_audit_events,connector_installations,provider_connections,"
         "oauth_sessions,admin_sessions,admin_credentials,"
         "canonical_source_grants,brain_access_grants,brain_memberships,"
@@ -203,16 +206,23 @@ def main():
         owner_principal_id=OWNER,
     )
     with store.connect() as connection:
+        for principal_id in (OUTSIDER, ADMIN):
+            connection.execute(
+                """INSERT INTO brain_principals(tenant_id,principal_id)
+                   VALUES (%s,%s)""",
+                (COMPANY, principal_id),
+            )
+            connection.execute(
+                """INSERT INTO brain_access_grants(
+                       tenant_id,principal_id,permission
+                   ) VALUES (%s,%s,'admin')""",
+                (COMPANY, principal_id),
+            )
         connection.execute(
-            """INSERT INTO brain_principals(tenant_id,principal_id)
-               VALUES (%s,%s)""",
-            (COMPANY, OUTSIDER),
-        )
-        connection.execute(
-            """INSERT INTO brain_access_grants(
-                   tenant_id,principal_id,permission
-               ) VALUES (%s,%s,'admin')""",
-            (COMPANY, OUTSIDER),
+            """INSERT INTO brain_memberships(
+                   organization_id,principal_id,role
+               ) VALUES ('org:company:e2e-control',%s,'admin')""",
+            (ADMIN,),
         )
 
     provider = FakeGoogle()
@@ -230,6 +240,10 @@ def main():
     outsider_token = control.create_admin_token(
         "outsider-control-e2e",
         principal_id=OUTSIDER,
+    )["token"]
+    admin_token = control.create_admin_token(
+        "admin-control-e2e",
+        principal_id=ADMIN,
     )["token"]
     previous = {
         key: os.environ.get(key)
@@ -256,6 +270,8 @@ def main():
         assert status == 200
         assert b"Recall Switchboard" in page
         assert b"Choose what your" in page
+        assert b"Company access" in page
+        assert b"Open a door" in page
         assert b"Admin access key" in page
         security = dict(headers)
         assert security["X-Frame-Options"] == "DENY"
@@ -263,6 +279,9 @@ def main():
 
         status, _, stylesheet = request(server, "GET", "/admin/assets/admin.css")
         assert status == 200 and b"--acid: #c8ff52" in stylesheet
+        status, _, script = request(server, "GET", "/admin/assets/admin.js")
+        assert status == 200 and b"/mcp/brains/" in script
+        assert b"navigator.clipboard.writeText" in script
         status, _, denied = request(server, "GET", "/admin/api/v1/state")
         assert status == 401 and denied["error"] == "admin_session_invalid"
         status, _, denied = request(
@@ -275,6 +294,7 @@ def main():
 
         owner_cookie, owner_csrf = login(server, owner_token)
         outsider_cookie, outsider_csrf = login(server, outsider_token)
+        admin_cookie, admin_csrf = login(server, admin_token)
         status, _, initial = request(
             server, "GET", "/admin/api/v1/state", cookie=owner_cookie
         )
@@ -290,6 +310,128 @@ def main():
         rendered = json.dumps(initial)
         assert SECRET_CANARY not in rendered
         assert "token_sha256" not in rendered
+        assert initial["invitations"] == []
+
+        invitation_body = {
+            "tenant_id": COMPANY,
+            "email": "Teammate@Example.com",
+            "role": "member",
+        }
+        status, _, denied = request(
+            server,
+            "POST",
+            "/admin/api/v1/invitations",
+            body=invitation_body,
+            cookie=owner_cookie,
+        )
+        assert status == 403 and denied["error"] == "admin_csrf_invalid"
+        status, _, denied = request(
+            server,
+            "POST",
+            "/admin/api/v1/invitations",
+            body={**invitation_body, "tenant_id": PERSONAL},
+            cookie=owner_cookie,
+            csrf=owner_csrf,
+        )
+        assert status == 403 and denied["error"] == "brain_admin_forbidden"
+        status, _, denied = request(
+            server,
+            "POST",
+            "/admin/api/v1/invitations",
+            body=invitation_body,
+            cookie=outsider_cookie,
+            csrf=outsider_csrf,
+        )
+        assert status == 403 and denied["error"] == "brain_admin_forbidden"
+        status, _, invitation = request(
+            server,
+            "POST",
+            "/admin/api/v1/invitations",
+            body=invitation_body,
+            cookie=owner_cookie,
+            csrf=owner_csrf,
+        )
+        assert status == 201
+        assert invitation["email"] == "teammate@example.com"
+        assert invitation["status"] == "pending"
+        status, _, denied = request(
+            server,
+            "POST",
+            f"/admin/api/v1/invitations/{invitation['id']}/revoke",
+            body={},
+            cookie=outsider_cookie,
+            csrf=outsider_csrf,
+        )
+        assert status == 403 and denied["error"] == "brain_admin_forbidden"
+        with store.connect() as connection:
+            stored = connection.execute(
+                """SELECT encrypted_email,email_sha256
+                   FROM brain_invitations WHERE id=%s""",
+                (invitation["id"],),
+            ).fetchone()
+            assert b"teammate@example.com" not in bytes(stored["encrypted_email"])
+            assert stored["email_sha256"] != "teammate@example.com"
+            assert stored["email_sha256"] != hashlib.sha256(
+                b"teammate@example.com"
+            ).hexdigest()
+        status, _, invited_state = request(
+            server, "GET", "/admin/api/v1/state", cookie=owner_cookie
+        )
+        assert status == 200
+        assert invited_state["invitations"] == [
+            {
+                "id": invitation["id"],
+                "tenant_id": COMPANY,
+                "email": "teammate@example.com",
+                "role": "member",
+                "status": "pending",
+                "expires_at": invitation["expires_at"],
+            }
+        ]
+        status, _, revoked = request(
+            server,
+            "POST",
+            f"/admin/api/v1/invitations/{invitation['id']}/revoke",
+            body={},
+            cookie=owner_cookie,
+            csrf=owner_csrf,
+        )
+        assert status == 200 and revoked["status"] == "revoked"
+        status, _, denied = request(
+            server,
+            "POST",
+            "/admin/api/v1/invitations",
+            body={
+                "tenant_id": COMPANY,
+                "email": "escalation@example.com",
+                "role": "admin",
+            },
+            cookie=admin_cookie,
+            csrf=admin_csrf,
+        )
+        assert status == 403 and denied["error"] == "brain_role_forbidden"
+        status, _, delegated = request(
+            server,
+            "POST",
+            "/admin/api/v1/invitations",
+            body={
+                "tenant_id": COMPANY,
+                "email": "member@example.com",
+                "role": "member",
+            },
+            cookie=admin_cookie,
+            csrf=admin_csrf,
+        )
+        assert status == 201 and delegated["role"] == "member"
+        status, _, revoked = request(
+            server,
+            "POST",
+            f"/admin/api/v1/invitations/{delegated['id']}/revoke",
+            body={},
+            cookie=admin_cookie,
+            csrf=admin_csrf,
+        )
+        assert status == 200 and revoked["status"] == "revoked"
 
         device_body = {
             "connector_id": "local.codex",

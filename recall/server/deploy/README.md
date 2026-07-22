@@ -4,7 +4,8 @@
 
 `RenderPublicMcpAdapter` creates one digest-pinned Render `web_service` with managed HTTPS,
 `/readyz` health checks, bearer authentication, and `RECALL_HTTP_PROFILE=public-mcp`. By
-default the application exposes only `/mcp`, `/healthz`, and `/readyz`; no Tailscale gateway,
+default the application exposes only `/mcp`, its OAuth protected-resource metadata,
+`/healthz`, and `/readyz`; no Tailscale gateway,
 REST ingest route, metrics route, or doctor route is part of this profile. The separately
 gated `RECALL_ADMIN_WEB_ENABLED=1` setting adds only `/admin` assets, authenticated
 `/admin/api/v1` routes, and the one-time OAuth callback described below.
@@ -63,7 +64,7 @@ infrastructure. The example is synthetic; a live manifest belongs in a private m
 location and contains references, never credential values.
 
 The production database gate requires a standard PostgreSQL URL with
-`sslmode=verify-full` and an explicit trust root, schema migrations 1 through 31,
+`sslmode=verify-full` and an explicit trust root, schema migrations 1 through 32,
 pgvector 0.8.0 or newer, and a runtime role without superuser, database/role creation,
 replication, or RLS-bypass privilege:
 
@@ -196,6 +197,7 @@ python -m recall_server.cli brain-provision \
   --tenant tenant:personal --slug personal --owner-principal principal:owner
 python -m recall_server.cli mcp-token-create owner-personal \
   --tenant tenant:personal --principal principal:owner \
+  --principal-kind workload \
   --scopes read,forget \
   --output /approved/private/owner-personal-mcp.json
 ```
@@ -208,6 +210,32 @@ projection. A single principal can hold separate personal and company
 credentials without gaining an implicit cross-brain view. Omit the optional
 `forget` scope for read-only agents; canonical forget also requires an owner
 grant on the exact source.
+
+### Human OAuth and company-brain invitations
+
+Static MCP tokens remain the simplest machine-to-machine option. For people,
+configure one OAuth resource instead of issuing long-lived bearer tokens:
+
+```text
+RECALL_MCP_RESOURCE_URI=https://<public-host>/mcp
+RECALL_AUTHORIZATION_SERVERS=https://<authorization-server>
+RECALL_MCP_AUTH_PROVIDER=oidc
+RECALL_OIDC_ISSUER=https://<authorization-server>
+RECALL_OIDC_JWKS_URI=https://<authorization-server>/.well-known/jwks.json
+```
+
+Set the provider to `descope` for Descope and use the issuer and JWKS URLs shown
+for its MCP resource. Recall needs no Descope management key: the provider owns
+login, MFA, and account recovery; Recall owns invitations, tenant mapping,
+roles, source grants, and revocation. The access token must have the exact
+`RECALL_MCP_RESOURCE_URI` audience, a `read` scope, and a provider-verified email
+for first-time invitation acceptance.
+
+In `/admin`, create a company invitation and send the teammate the displayed
+brain-specific MCP URL. Their MCP client discovers OAuth through RFC 9728,
+logs them in, and activates the pending invitation on the first request. See
+[`docs/authorization-v1.md`](../../docs/authorization-v1.md) for the policy,
+generic OIDC contract, and revocation semantics.
 
 ## Unified connector administration
 

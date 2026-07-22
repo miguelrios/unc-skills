@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .canonical import CanonicalPlane
+from .authorization import decide
 from .db import BrainStore, SearchDeadlineExceeded, bounded_search_text
 from .federation import SOURCE_FAMILIES
 from .projectors import legacy_engine
@@ -46,6 +47,8 @@ class CanonicalRetrieval:
             or not isinstance(principal_id, str)
             or not AUTHORITY_RE.fullmatch(principal_id)
         ):
+            raise PermissionError("canonical MCP authority required")
+        if not decide(principal, "mcp.ping", tenant_id=tenant_id).allowed:
             raise PermissionError("canonical MCP authority required")
         sources = tuple(principal.get("authorized_sources") or ())
         if any(

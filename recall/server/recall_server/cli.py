@@ -132,6 +132,9 @@ def main() -> None:
     create_mcp_token.add_argument("name")
     create_mcp_token.add_argument("--tenant", required=True)
     create_mcp_token.add_argument("--principal", required=True)
+    create_mcp_token.add_argument(
+        "--principal-kind", choices=("human", "workload"), required=True
+    )
     create_mcp_token.add_argument("--scopes", default="read")
     create_mcp_token.add_argument("--expires-in-days", type=int, default=30)
     create_mcp_token.add_argument("--output", required=True)
@@ -416,6 +419,7 @@ def main() -> None:
             args.name,
             tenant_id=args.tenant,
             principal_id=args.principal,
+            principal_kind=args.principal_kind,
             scopes=[
                 scope.strip()
                 for scope in args.scopes.split(",")
