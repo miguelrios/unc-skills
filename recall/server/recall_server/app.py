@@ -13,9 +13,10 @@ import struct
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 from .archive_runtime import build_archive_store
+from .authorization import ExternalIdentityVerifier, OidcJwtVerifier, decide
 from .admin_web import (
     CSRF_COOKIE,
     SESSION_COOKIE,
@@ -51,6 +52,12 @@ ADMIN_INSTALLATION_ACTION = re.compile(
 ADMIN_CONNECTION_REVOKE = re.compile(
     r"/admin/api/v1/connections/([0-9a-f-]{36})/revoke\Z"
 )
+ADMIN_INVITATION_REVOKE = re.compile(
+    r"/admin/api/v1/invitations/([0-9a-f-]{36})/revoke\Z"
+)
+MCP_BRAIN_PATH = re.compile(
+    r"/mcp/brains/([A-Za-z0-9][A-Za-z0-9:._@+-]{1,255})\Z"
+)
 COUNTERS = {
     "http_requests": 0,
     "http_errors": 0,
@@ -69,6 +76,7 @@ class Handler(BaseHTTPRequestHandler):
     canonical_plane: CanonicalPlane | None = None
     canonical_retrieval: CanonicalRetrieval | None = None
     control_plane: ControlPlane | None = None
+    external_identity_verifier: ExternalIdentityVerifier | None = None
 
     def log_message(self, fmt: str, *args) -> None:
         LOG.info(
@@ -194,7 +202,12 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return length
 
-    def authenticate(self, scope: str) -> dict | None:
+    def authenticate(
+        self,
+        scope: str,
+        *,
+        requested_tenant: str | None = None,
+    ) -> dict | None:
         if os.environ.get("RECALL_AUTH_REQUIRED", "0") != "1":
             return {"kind": "development", "name": "unauthenticated"}
         authorization = self.headers.get("Authorization")
@@ -204,9 +217,58 @@ class Handler(BaseHTTPRequestHandler):
             credential = self.store.authenticate_bearer(
                 authorization.removeprefix("Bearer ").strip(), scope
             )
+            if not credential and self.external_identity_verifier is not None:
+                try:
+                    claims = self.external_identity_verifier.verify(
+                        authorization.removeprefix("Bearer ").strip()
+                    )
+                except Exception as error:
+                    LOG.warning(
+                        "external identity verification failed type=%s",
+                        type(error).__name__,
+                    )
+                    return None
+                resource = os.environ.get("RECALL_MCP_RESOURCE_URI", "").rstrip("/")
+                if claims is not None and claims.valid_for(resource):
+                    credential = self.store.resolve_external_identity(
+                        issuer=claims.issuer,
+                        subject=claims.subject,
+                        scopes=list(claims.scopes),
+                        audience=claims.audience,
+                        tenant_id=requested_tenant,
+                    )
+                    if (
+                        credential is None
+                        and claims.email_verified
+                        and claims.email is not None
+                        and self.control_plane is not None
+                    ):
+                        credential = self.store.accept_external_invitation(
+                            issuer=claims.issuer,
+                            subject=claims.subject,
+                            email=claims.email,
+                            email_index=self.control_plane.invitation_email_index(
+                                claims.email
+                            ),
+                            scopes=list(claims.scopes),
+                            audience=claims.audience,
+                            tenant_id=requested_tenant,
+                        )
             if not credential:
                 return None
             credential_kind = credential.get("credential_kind", "collector")
+            if credential_kind == "mcp" and (
+                credential.get("audience") != "recall-mcp"
+                or credential.get("principal_kind") not in {"human", "workload"}
+                or credential.get("role") not in {"owner", "admin", "member"}
+                or not credential.get("tenant_id")
+                or not credential.get("principal_id")
+                or (
+                    requested_tenant is not None
+                    and credential.get("tenant_id") != requested_tenant
+                )
+            ):
+                return None
             if (
                 scope == "read"
                 and os.environ.get("RECALL_CANONICAL_MCP_ENABLED") == "1"
@@ -220,6 +282,8 @@ class Handler(BaseHTTPRequestHandler):
                 "tenant_id": credential.get("tenant_id"),
                 "source_id": credential["source_id"],
                 "principal_id": credential.get("principal_id"),
+                "principal_kind": credential.get("principal_kind"),
+                "role": credential.get("role"),
                 "audience": credential.get("audience"),
                 "capture_origin": credential.get("capture_origin"),
                 "webhook_privacy_mode": credential.get("webhook_privacy_mode"),
@@ -284,14 +348,83 @@ class Handler(BaseHTTPRequestHandler):
             LOG.exception("tailscale identity rejected reason=peer_credential_error")
             return False
 
-    def require(self, scope: str) -> dict | None:
-        principal = self.authenticate(scope)
+    def require(
+        self,
+        scope: str,
+        *,
+        requested_tenant: str | None = None,
+    ) -> dict | None:
+        principal = self.authenticate(scope, requested_tenant=requested_tenant)
         if principal:
             return principal
         with COUNTER_LOCK:
             COUNTERS["auth_denied"] += 1
-        self.send_json(401, {"error": "unauthorized"})
+        headers = None
+        if (
+            urlsplit(self.path).path == "/mcp"
+            or MCP_BRAIN_PATH.fullmatch(urlsplit(self.path).path)
+        ):
+            resource = os.environ.get("RECALL_MCP_RESOURCE_URI", "").rstrip("/")
+            if resource:
+                metadata = self.protected_resource_metadata_uri(resource)
+                headers = [
+                    (
+                        "WWW-Authenticate",
+                        f'Bearer resource_metadata="{metadata}", scope="read"',
+                    )
+                ]
+        self.send_json(401, {"error": "unauthorized"}, headers)
         return None
+
+    @staticmethod
+    def protected_resource_metadata_uri(resource: str) -> str:
+        parsed = urlsplit(resource)
+        suffix = parsed.path.rstrip("/")
+        path = "/.well-known/oauth-protected-resource" + suffix
+        return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+    @staticmethod
+    def protected_resource_metadata() -> dict[str, object]:
+        resource = os.environ.get("RECALL_MCP_RESOURCE_URI", "").rstrip("/")
+        servers = [
+            value.strip().rstrip("/")
+            for value in os.environ.get(
+                "RECALL_AUTHORIZATION_SERVERS", ""
+            ).split(",")
+            if value.strip()
+        ]
+        result: dict[str, object] = {
+            "resource": resource,
+            "scopes_supported": ["read", "forget"],
+            "bearer_methods_supported": ["header"],
+            "resource_name": "Recall brain",
+        }
+        if servers:
+            result["authorization_servers"] = servers
+        return result
+
+    def authorize_mcp(self, principal: dict, action: str) -> bool:
+        decision = decide(
+            principal,
+            action,
+            tenant_id=principal.get("tenant_id"),
+        )
+        audit_action = (
+            action
+            if re.fullmatch(r"mcp\.[a-z_]{1,64}", action)
+            else "mcp.unknown_tool"
+        )
+        self.store.record_authorization_event(
+            principal,
+            action=audit_action,
+            allowed=decision.allowed,
+            reason=decision.reason,
+            policy_version=decision.policy_version,
+        )
+        if not decision.allowed:
+            with COUNTER_LOCK:
+                COUNTERS["auth_denied"] += 1
+        return decision.allowed
 
     def canonical_authority(
         self,
@@ -390,8 +523,20 @@ class Handler(BaseHTTPRequestHandler):
     def hide_non_public_route(self, method: str, path: str) -> bool:
         if not (self.public_mcp_profile() or self.public_edge_profile()):
             return False
-        allowed = (method == "POST" and path == "/mcp") or (
-            method == "GET" and path in {"/mcp", "/healthz", "/readyz"}
+        mcp_path = path == "/mcp" or MCP_BRAIN_PATH.fullmatch(path)
+        resource = os.environ.get("RECALL_MCP_RESOURCE_URI", "").rstrip("/")
+        metadata_path = (
+            urlsplit(self.protected_resource_metadata_uri(resource)).path
+            if resource
+            else None
+        )
+        allowed = (method == "POST" and bool(mcp_path)) or (
+            method == "GET"
+            and (
+                bool(mcp_path)
+                or path in {"/healthz", "/readyz"}
+                or (metadata_path is not None and path == metadata_path)
+            )
         )
         if self.public_edge_profile():
             allowed = allowed or (method == "POST" and path == WEBHOOK_PATH)
@@ -443,6 +588,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
         if self.hide_non_public_route("GET", parsed.path):
+            return
+        resource = os.environ.get("RECALL_MCP_RESOURCE_URI", "").rstrip("/")
+        metadata_path = (
+            urlsplit(self.protected_resource_metadata_uri(resource)).path
+            if resource
+            else None
+        )
+        if metadata_path is not None and parsed.path == metadata_path:
+            self.send_json(200, self.protected_resource_metadata())
             return
         if self.admin_web_enabled():
             configured_asset = admin_asset(parsed.path)
@@ -508,12 +662,16 @@ class Handler(BaseHTTPRequestHandler):
                 except ControlError as error:
                     self.send_json(error.status, {"error": error.code})
                 return
-        if parsed.path == "/mcp":
+        brain_match = MCP_BRAIN_PATH.fullmatch(parsed.path)
+        if parsed.path == "/mcp" or brain_match:
             if not self.valid_mcp_origin():
                 return
             if not self.valid_mcp_accept(get=True):
                 return
-            if not self.require("read"):
+            if not self.require(
+                "read",
+                requested_tenant=brain_match.group(1) if brain_match else None,
+            ):
                 return
             self.send_empty(405, {"Allow": "POST"})
             return
@@ -605,6 +763,51 @@ class Handler(BaseHTTPRequestHandler):
                     routes=body["routes"],
                 )
                 self.send_json(201, result)
+            except ControlError as error:
+                self.send_json(error.status, {"error": error.code})
+            return
+        if self.admin_web_enabled() and path == "/admin/api/v1/invitations":
+            principal = self.admin_principal(csrf=True)
+            if principal is None:
+                return
+            body = self.read_admin_json()
+            if body is None:
+                return
+            if set(body) != {"tenant_id", "email", "role"}:
+                self.send_json(400, {"error": "admin_request_invalid"})
+                return
+            try:
+                result = self.control_plane.create_brain_invitation(
+                    principal_id=principal["principal_id"],
+                    tenant_id=body["tenant_id"],
+                    email=body["email"],
+                    role=body["role"],
+                )
+                self.send_json(201, result)
+            except ControlError as error:
+                self.send_json(error.status, {"error": error.code})
+            return
+        invitation_revoke = (
+            ADMIN_INVITATION_REVOKE.fullmatch(path)
+            if self.admin_web_enabled()
+            else None
+        )
+        if invitation_revoke:
+            principal = self.admin_principal(csrf=True)
+            if principal is None:
+                return
+            body = self.read_admin_json()
+            if body is None:
+                return
+            if body:
+                self.send_json(400, {"error": "admin_request_invalid"})
+                return
+            try:
+                result = self.control_plane.revoke_brain_invitation(
+                    principal_id=principal["principal_id"],
+                    invitation_id=invitation_revoke.group(1),
+                )
+                self.send_json(200, result)
             except ControlError as error:
                 self.send_json(error.status, {"error": error.code})
             return
@@ -871,14 +1074,18 @@ class Handler(BaseHTTPRequestHandler):
                 LOG.error("webhook failed type=%s", type(exc).__name__)
                 self.send_json(500, {"error": "webhook failed"})
             return
-        if path == "/mcp":
+        brain_match = MCP_BRAIN_PATH.fullmatch(path)
+        if path == "/mcp" or brain_match:
             if not self.valid_mcp_origin():
                 return
             if not self.valid_mcp_accept():
                 return
             if not self.valid_mcp_protocol():
                 return
-            principal = self.require("read")
+            principal = self.require(
+                "read",
+                requested_tenant=brain_match.group(1) if brain_match else None,
+            )
             if not principal:
                 return
             content_type = (
@@ -907,7 +1114,12 @@ class Handler(BaseHTTPRequestHandler):
                     if self.canonical_retrieval is None:
                         raise RuntimeError("canonical retrieval unavailable")
                     mcp_store = self.canonical_retrieval.bind(principal)
-                response = dispatch_mcp(mcp_store, principal, body)
+                response = dispatch_mcp(
+                    mcp_store,
+                    principal,
+                    body,
+                    authorize=lambda action: self.authorize_mcp(principal, action),
+                )
             except json.JSONDecodeError:
                 self.send_json(
                     400,
@@ -1103,10 +1315,45 @@ def validate_http_profile() -> None:
             raise RuntimeError("public HTTP profile requires authentication")
         if os.environ.get("RECALL_TRUST_TAILSCALE_HEADERS", "0") == "1":
             raise RuntimeError("public HTTP profile forbids trusted identity headers")
+    if profile == "public-mcp":
+        resource = os.environ.get("RECALL_MCP_RESOURCE_URI", "")
+        authorization_servers = os.environ.get(
+            "RECALL_AUTHORIZATION_SERVERS", ""
+        )
+        auth_provider = os.environ.get("RECALL_MCP_AUTH_PROVIDER", "").strip()
+        oauth_configured = bool(resource or authorization_servers or auth_provider)
+        if oauth_configured:
+            parsed_resource = urlsplit(resource)
+            if (
+                parsed_resource.scheme != "https"
+                or not parsed_resource.hostname
+                or parsed_resource.username
+                or parsed_resource.password
+                or parsed_resource.query
+                or parsed_resource.fragment
+                or parsed_resource.path not in {"", "/mcp"}
+            ):
+                raise RuntimeError(
+                    "OAuth MCP requires an exact HTTPS resource URI"
+                )
+        for server in authorization_servers.split(","):
+            if not server.strip():
+                continue
+            parsed_server = urlsplit(server.strip())
+            if (
+                parsed_server.scheme != "https"
+                or not parsed_server.hostname
+                or parsed_server.username
+                or parsed_server.password
+                or parsed_server.query
+                or parsed_server.fragment
+            ):
+                raise RuntimeError("authorization server URI is invalid")
 
 
 def configure_runtime(dsn: str) -> None:
     Handler.store = BrainStore(dsn, semantic_runtime=SemanticRuntime.from_env())
+    Handler.external_identity_verifier = OidcJwtVerifier.from_env()
     if os.environ.get("RECALL_CANONICAL_V2_ENABLED") == "1":
         Handler.archive_store = build_archive_store()
         Handler.canonical_plane = CanonicalPlane(

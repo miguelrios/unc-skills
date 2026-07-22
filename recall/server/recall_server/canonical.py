@@ -258,6 +258,30 @@ class CanonicalPlane:
                DO UPDATE SET permission='owner'""",
             (tenant_id, principal_id, source_id),
         )
+        conn.execute(
+            """INSERT INTO canonical_source_grants(
+                   tenant_id,principal_id,source_id,permission
+               ) SELECT space.tenant_id,access.principal_id,%s,'read'
+                   FROM brain_spaces space
+                   JOIN brain_memberships source_membership
+                     ON source_membership.organization_id=space.organization_id
+                    AND source_membership.principal_id=%s
+                   JOIN brain_access_grants access
+                     ON access.tenant_id=space.tenant_id
+                    AND access.permission IN ('owner','admin','read')
+                   JOIN brain_invitations invitation
+                     ON invitation.tenant_id=space.tenant_id
+                    AND invitation.accepted_principal_id=access.principal_id
+                    AND invitation.accepted_at IS NOT NULL
+                    AND invitation.revoked_at IS NULL
+                  WHERE space.tenant_id=%s AND space.brain_kind='company'
+               ON CONFLICT(tenant_id,principal_id,source_id)
+               DO UPDATE SET permission=CASE
+                   WHEN canonical_source_grants.permission='owner' THEN 'owner'
+                   ELSE 'read'
+               END""",
+            (source_id, principal_id, tenant_id),
+        )
 
     def ingest_document(
         self,
