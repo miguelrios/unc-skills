@@ -74,11 +74,12 @@ AUTO_BRAIN_TIGHT_PCT = 80.0
 PARABLE_WELCOME_ENV = "PARABLE_WELCOME_MESSAGE"
 PARABLE_WELCOME_PLUGIN = Path(__file__).resolve().parent.parent / "runtime" / "welcome-plugin"
 PARABLE_ASCII = (
-    "          _ __   __ _ _ __ __ _| |__ | | ___",
-    "         | '_ \\ / _` | '__/ _` | '_ \\| |/ _ \\",
-    "         | |_) | (_| | | | (_| | |_) | |  __/",
-    "         | .__/ \\__,_|_|  \\__,_|_.__/|_|\\___|",
-    "         |_|",
+    "                        _     _            _     ",
+    "  _ __   __ _ _ __ __ _| |__ | | ___   ___| |__  ",
+    " | '_ \\ / _` | '__/ _` | '_ \\| |/ _ \\ / __| '_ \\ ",
+    " | |_) | (_| | | | (_| | |_) | |  __/_\\__ \\ | | |",
+    " | .__/ \\__,_|_|  \\__,_|_.__/|_|\\___(_)___/_| |_|",
+    " |_|",
 )
 PARABLE_ANIMALS = {
     "FABLE": "🐢",
@@ -89,6 +90,7 @@ PARABLE_ANIMALS = {
     "OPUS": "🦉",
     "HAIKU": "🐦",
     "GROK": "🐺",
+    "KIMI": "🐯",
 }
 
 # Tier-0 defaults: Claude-native executors need no API keys — they run as
@@ -481,16 +483,28 @@ def fetch_proxy_models(base_url: str, token: str, timeout: float = 5.0) -> set[s
     }
 
 
-def build_claude_launch(cfg: dict, forwarded: list[str], environ: dict[str, str] | None = None
-                        ) -> tuple[list[str], dict[str, str]]:
+def build_claude_launch(cfg: dict, forwarded: list[str], environ: dict[str, str] | None = None,
+                        *, solo: bool = False) -> tuple[list[str], dict[str, str]]:
     claude = cfg["claude"]
     args = list(forwarded)
     if args and args[0] == "--":
         args.pop(0)
-    if any(arg == "--model" or arg.startswith("--model=") for arg in args):
+    option_names = {arg.split("=", 1)[0] for arg in args if arg.startswith("-")}
+    if "--model" in option_names:
         raise ValueError(
-            "Parable owns the Claude brain model; remove --model and use --brain before `--`"
+            "Parable owns the Claude parent model; remove --model and use --brain or --solo"
         )
+    if solo:
+        conflicts = sorted(option_names & {
+            "--agent", "--agents",
+            "--allowedTools", "--allowed-tools",
+            "--disallowedTools", "--disallowed-tools",
+        })
+        if conflicts:
+            raise ValueError(
+                "solo mode owns agent isolation; remove Claude option(s): "
+                + ", ".join(conflicts)
+            )
     source_env = os.environ if environ is None else environ
     token_name = claude["auth_token_env"]
     token = source_env.get(token_name)
@@ -508,19 +522,40 @@ def build_claude_launch(cfg: dict, forwarded: list[str], environ: dict[str, str]
         PARABLE_WELCOME_ENV,
     ):
         launch_env.pop(inherited, None)
-    argv = [claude.get("binary", "claude"), "--model", claude["brain_model"], *args]
+    if solo:
+        launch_env.pop("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", None)
+    isolation = ["--disallowedTools", "Agent"] if solo else []
+    argv = [
+        claude.get("binary", "claude"),
+        "--model", claude["brain_model"],
+        *isolation,
+        *args,
+    ]
     return argv, launch_env
 
 
-def parse_claude_brain_args(forwarded: list[str]) -> tuple[str, list[str]]:
-    """Consume Parable's --brain option before the Claude argument separator."""
+def parse_claude_launch_args(forwarded: list[str]) -> tuple[str, str | None, list[str]]:
+    """Consume Parable's mutually-exclusive --brain/--solo launch options."""
     args = list(forwarded)
     if args and args[0] == "--":
         args.pop(0)
     mode = "config"
-    if args and args[0].startswith("--brain="):
+    brain_explicit = False
+    solo: str | None = None
+    if args and args[0].startswith("--solo="):
+        solo = args.pop(0).split("=", 1)[1]
+        if not solo:
+            raise ValueError("--solo requires a configured alias or exact catalog model")
+    elif args and args[0] == "--solo":
+        args.pop(0)
+        if not args or args[0] == "--" or args[0].startswith("-"):
+            raise ValueError("--solo requires a configured alias or exact catalog model")
+        solo = args.pop(0)
+    elif args and args[0].startswith("--brain="):
+        brain_explicit = True
         mode = args.pop(0).split("=", 1)[1]
     elif args and args[0] == "--brain":
+        brain_explicit = True
         args.pop(0)
         if not args or args[0] == "--":
             raise ValueError("--brain requires auto, fable, sol, or config")
@@ -531,8 +566,25 @@ def parse_claude_brain_args(forwarded: list[str]) -> tuple[str, list[str]]:
         )
     if args and args[0] == "--":
         args.pop(0)
-    if any(arg == "--brain" or arg.startswith("--brain=") for arg in args):
-        raise ValueError("place Parable's --brain option before the `--` Claude argument separator")
+    misplaced_brain = any(arg == "--brain" or arg.startswith("--brain=") for arg in args)
+    misplaced_solo = any(arg == "--solo" or arg.startswith("--solo=") for arg in args)
+    if misplaced_brain or misplaced_solo:
+        if (
+            solo is not None and misplaced_brain
+            or brain_explicit and misplaced_solo
+            or misplaced_brain and misplaced_solo
+        ):
+            raise ValueError("--brain and --solo are mutually exclusive Parable launch options")
+        option = "--brain" if misplaced_brain else "--solo"
+        raise ValueError(f"place Parable's {option} option before the `--` Claude argument separator")
+    return mode, solo, args
+
+
+def parse_claude_brain_args(forwarded: list[str]) -> tuple[str, list[str]]:
+    """Backward-compatible parser for callers that only support brain mode."""
+    mode, solo, args = parse_claude_launch_args(forwarded)
+    if solo is not None:
+        raise ValueError("--solo is not a brain mode")
     return mode, args
 
 
@@ -596,6 +648,48 @@ def resolve_claude_brain(cfg: dict, mode: str, available: set[str],
     return fable, (
         f"both pools are tight; Claude {fable_used:.0f}% is no worse than Sol {sol_used:.0f}%"
     )
+
+
+def _solo_alias_key(value: str) -> str:
+    return re.sub(r"[\s_]+", "-", value.strip().lower())
+
+
+def solo_model_aliases(cfg: dict) -> dict[str, set[str]]:
+    """Map friendly configured executor names to their exact proxy model ids."""
+    aliases: dict[str, set[str]] = {}
+
+    def add(alias: str, model: str) -> None:
+        key = _solo_alias_key(alias)
+        if key:
+            aliases.setdefault(key, set()).add(model)
+
+    for executor_id, executor in custom_claude_executors(cfg).items():
+        model = executor["model"]
+        add(executor_id, model)
+        add(re.sub(r"_exact$", "", executor_id), model)
+        add(_welcome_label(executor_id, model), model)
+        add(model, model)
+    for alias, model in CLAUDE_BRAIN_MODELS.items():
+        add(alias, model)
+    return aliases
+
+
+def resolve_solo_model(cfg: dict, selector: str, available: set[str]) -> tuple[str, str]:
+    """Resolve a configured friendly alias or exact proxy catalog id for solo mode."""
+    if selector in available:
+        return selector, f"exact catalog model {selector}"
+    key = _solo_alias_key(selector)
+    candidates = solo_model_aliases(cfg).get(key, set())
+    if not candidates:
+        known = ", ".join(sorted(solo_model_aliases(cfg)))
+        raise ValueError(f"--solo {selector!r} is unknown (configured aliases: {known})")
+    if len(candidates) != 1:
+        models = ", ".join(sorted(candidates))
+        raise ValueError(f"--solo {selector!r} is ambiguous ({models})")
+    model = next(iter(candidates))
+    if model not in available:
+        raise ValueError(f"proxy model catalog is missing: {model}")
+    return model, f"configured solo alias {selector}"
 
 
 def config_with_claude_brain(cfg: dict, model: str) -> dict:
@@ -664,9 +758,27 @@ def render_claude_welcome(cfg: dict, brain_model: str, decision: str,
     return "\n".join(lines)
 
 
+def render_claude_solo_welcome(cfg: dict, model: str, decision: str) -> str:
+    """Render the single-model launch contract with no cast or delegation cues."""
+    label = model.upper()
+    for executor_id, executor in custom_claude_executors(cfg).items():
+        if executor.get("model") == model:
+            label = _welcome_label(executor_id, model)
+            break
+    lines = [*PARABLE_ASCII]
+    lines.append(f"  {_welcome_animal(label)} SOLO    {label} · {model}")
+    lines.append(f"          {decision}")
+    lines.append("  SOLO CONTRACT")
+    lines.append("          You are the only agent. Work directly from request to verified result.")
+    lines.append("          Do not invoke Agent, subagents, agent teams, delegation, or cast routing.")
+    lines.append("          You own planning, implementation, testing, review, and final judgment.")
+    return "\n".join(lines)
+
+
 def add_claude_welcome(argv: list[str], launch_env: dict[str, str], cfg: dict,
                        brain_model: str, decision: str, available: set[str],
-                       forwarded: list[str]) -> tuple[list[str], dict[str, str]]:
+                       forwarded: list[str], *, solo: bool = False
+                       ) -> tuple[list[str], dict[str, str]]:
     """Inject the in-UI startup card only for interactive Claude sessions."""
     skip_flags = {
         "-h", "--help", "-v", "--version", "-p", "--print", "--bare", "--init-only",
@@ -679,8 +791,9 @@ def add_claude_welcome(argv: list[str], launch_env: dict[str, str], cfg: dict,
     if not all(path.is_file() and not path.is_symlink() for path in (manifest, hook, script)):
         raise ValueError("Parable welcome plugin is missing or unsafe; reinstall Parable")
     env = dict(launch_env)
-    env[PARABLE_WELCOME_ENV] = render_claude_welcome(
-        cfg, brain_model, decision, available
+    env[PARABLE_WELCOME_ENV] = (
+        render_claude_solo_welcome(cfg, brain_model, decision)
+        if solo else render_claude_welcome(cfg, brain_model, decision, available)
     )
     return [argv[0], "--plugin-dir", str(PARABLE_WELCOME_PLUGIN), *argv[1:]], env
 
@@ -776,24 +889,44 @@ def cmd_claude(args: argparse.Namespace) -> int:
     try:
         cfg, _loaded, token = checked_claude_config(root)
         assert token is not None
-        brain_mode, forwarded = parse_claude_brain_args(args.claude_args)
-        available, result = reconcile_claude_cast(root, cfg, token)
-        brain_model, decision = resolve_claude_brain(cfg, brain_mode, available)
-        launch_cfg = config_with_claude_brain(cfg, brain_model)
-        argv, launch_env = build_claude_launch(launch_cfg, forwarded)
-        argv, launch_env = add_claude_welcome(
-            argv, launch_env, cfg, brain_model, decision, available, forwarded
-        )
+        brain_mode, solo_selector, forwarded = parse_claude_launch_args(args.claude_args)
+        if solo_selector is not None:
+            available = fetch_proxy_models(cfg["claude"]["base_url"], token)
+            brain_model, decision = resolve_solo_model(
+                cfg, solo_selector, available
+            )
+            launch_cfg = config_with_claude_brain(cfg, brain_model)
+            argv, launch_env = build_claude_launch(
+                launch_cfg, forwarded, solo=True
+            )
+            argv, launch_env = add_claude_welcome(
+                argv, launch_env, cfg, brain_model, decision, available, forwarded,
+                solo=True,
+            )
+            result = None
+        else:
+            available, result = reconcile_claude_cast(root, cfg, token)
+            brain_model, decision = resolve_claude_brain(cfg, brain_mode, available)
+            launch_cfg = config_with_claude_brain(cfg, brain_model)
+            argv, launch_env = build_claude_launch(launch_cfg, forwarded)
+            argv, launch_env = add_claude_welcome(
+                argv, launch_env, cfg, brain_model, decision, available, forwarded
+            )
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"parable: {exc}", file=sys.stderr)
         return 1
-    print(
-        f"proxy: ready ({len(available)} models); "
-        f"agents: {len(result['changed'])} changed, "
-        f"{len(result['unchanged'])} unchanged, {len(result['removed'])} removed",
-        flush=True,
-    )
-    print(f"brain: {brain_model} ({decision})", flush=True)
+    if solo_selector is not None:
+        print(f"proxy: ready ({len(available)} models); solo agent isolation enabled", flush=True)
+        print(f"solo: {brain_model} ({decision})", flush=True)
+    else:
+        assert result is not None
+        print(
+            f"proxy: ready ({len(available)} models); "
+            f"agents: {len(result['changed'])} changed, "
+            f"{len(result['unchanged'])} unchanged, {len(result['removed'])} removed",
+            flush=True,
+        )
+        print(f"brain: {brain_model} ({decision})", flush=True)
     try:
         os.execvpe(argv[0], argv, launch_env)
     except FileNotFoundError:

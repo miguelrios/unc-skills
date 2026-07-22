@@ -1,5 +1,7 @@
 # Provider recipes
 
+**Note:** This reference applies **only to multi-model Parable mode**. Solo mode (`parable --solo`) does not use any providers documented here—it only works with exact models exposed through the `[claude]` loopback proxy. Codex, pi, cursor, and all metered/API-key providers are unavailable in solo. The provider recipes below are for multi-model casting only.
+
 ## Why "responses" only
 
 codex drives custom providers exclusively over the OpenAI **Responses API**
@@ -171,16 +173,16 @@ parable
 ```
 
 Claude is the baseline pool for the Claude Code harness; interactive setup asks whether
-to add ChatGPT and xAI and offers the pinned build when no proxy is installed.
+to add ChatGPT, xAI, and Kimi subscriptions, and offers the pinned build when no proxy is installed.
 Bare `parable` stays on Fable without ChatGPT. When ChatGPT is selected, it
 prefers Fable while its pool has room and can move to Sol when it is tight. The launcher owns
 proxy start, authenticated readiness, exact catalog sync,
 stock-Claude launch, signal forwarding, and cleanup. It reuses but never stops
-a healthy pre-existing endpoint. `parable proxy start` and
+a healthy existing endpoint. `parable proxy start` and
 `parable setup finalize` remain explicit troubleshooting commands. Headless
 operators can pass `--no-auth`, then use
-`parable auth add chatgpt --device`, `parable auth add claude`, and
-`parable auth add xai` for the vendors they selected. See the
+`parable auth add chatgpt --device`, `parable auth add claude`,
+`parable auth add xai`, and `parable auth add kimi` for the vendors they selected. See the
 [complete first-run guide](../../../docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md).
 
 Claude Code first-run uses `--no-auth` only because its Bash tool cannot write a later OAuth
@@ -211,6 +213,11 @@ use_for = "Implementation through Claude subscription OAuth."
 provider = "claude"
 model = "grok-4.5"
 use_for = "Third-family implementation or review through xAI subscription OAuth."
+
+[executors.kimi]
+provider = "claude"
+model = "kimi-k3"
+use_for = "Implementation through Kimi Code subscription OAuth."
 ```
 
 `parable` checks the authenticated loopback catalog and then
@@ -221,7 +228,8 @@ and never print it. The launcher strips
 `CLAUDE_CODE_SUBAGENT_MODEL`, because Claude Code gives that environment variable priority over
 every agent's own `model:` field and would otherwise silently route all children to the parent.
 The proxy owns provider OAuth. Parable stores no provider credential and does not implement an
-OAuth flow. Kimi is currently paused and is intentionally absent from the proved setup.
+OAuth flow. Kimi Code is supported as a first-class subscription distinct from metered Moonshot/Kimi
+API-key routes via Fireworks or OpenRouter.
 
 ### Verified GPT effort support
 

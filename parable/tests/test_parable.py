@@ -243,6 +243,88 @@ class TestClaudeLaunch(unittest.TestCase):
                 ["--", "--print", "hello", "--brain", "fable"]
             )
 
+    def test_solo_parser_is_explicit_and_mutually_exclusive(self):
+        self.assertEqual(
+            parable.parse_claude_launch_args(
+                ["--", "--solo", "kimi", "--", "--print", "hello"]
+            ),
+            ("config", "kimi", ["--print", "hello"]),
+        )
+        self.assertEqual(
+            parable.parse_claude_launch_args(["--solo=kimi-k3", "--effort", "high"]),
+            ("config", "kimi-k3", ["--effort", "high"]),
+        )
+        with self.assertRaisesRegex(ValueError, "--solo requires"):
+            parable.parse_claude_launch_args(["--solo"])
+        for args in (
+            ["--solo", "kimi", "--brain", "fable"],
+            ["--brain", "fable", "--solo", "kimi"],
+        ):
+            with self.subTest(args=args), self.assertRaisesRegex(ValueError, "mutually exclusive"):
+                parable.parse_claude_launch_args(args)
+
+    def test_solo_model_resolution_accepts_aliases_and_exact_ids(self):
+        cfg = self.auto_cfg()
+        cfg["executors"]["sol_exact"] = {
+            "provider": "claude", "model": "gpt-5.6-sol",
+        }
+        available = {"gpt-5.6-sol", "claude-fable-5", "kimi-k3"}
+        self.assertEqual(parable.resolve_solo_model(cfg, "kimi", available)[0], "kimi-k3")
+        self.assertEqual(parable.resolve_solo_model(cfg, "kimi-k3", available)[0], "kimi-k3")
+        self.assertEqual(parable.resolve_solo_model(cfg, "sol", available)[0], "gpt-5.6-sol")
+        self.assertEqual(
+            parable.resolve_solo_model(cfg, "sol_exact", available)[0], "gpt-5.6-sol"
+        )
+        with self.assertRaisesRegex(ValueError, "unknown"):
+            parable.resolve_solo_model(cfg, "not-a-model", available)
+        with self.assertRaisesRegex(ValueError, "catalog is missing"):
+            parable.resolve_solo_model(cfg, "kimi", {"gpt-5.6-sol"})
+        cfg["executors"]["kimi_exact"] = {
+            "provider": "claude", "model": "other-kimi-model",
+        }
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
+            parable.resolve_solo_model(
+                cfg, "kimi", {"kimi-k3", "other-kimi-model"}
+            )
+
+    def test_solo_launch_disables_agent_delegation_and_teams(self):
+        source = {
+            "CLIPROXY_API_KEY": "local-token",
+            "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+        }
+        cfg = parable.config_with_claude_brain(self.cfg(), "kimi-k3")
+        argv, env = parable.build_claude_launch(
+            cfg, ["--effort", "high", "--print", "hello"], source, solo=True
+        )
+        self.assertEqual(
+            argv,
+            [
+                "claude", "--model", "kimi-k3", "--disallowedTools", "Agent",
+                "--effort", "high", "--print", "hello",
+            ],
+        )
+        self.assertNotIn("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", env)
+        for option in (
+            "--agent", "--agents", "--allowedTools", "--allowed-tools",
+            "--disallowedTools", "--disallowed-tools",
+        ):
+            with self.subTest(option=option), self.assertRaisesRegex(ValueError, "owns agent isolation"):
+                parable.build_claude_launch(
+                    cfg, [option, "value"], source, solo=True
+                )
+
+    def test_solo_welcome_has_no_cast_or_delegation_cues(self):
+        card = parable.render_claude_solo_welcome(
+            self.cfg(), "kimi-k3", "configured solo alias kimi"
+        )
+        self.assertTrue(card.startswith(parable.PARABLE_ASCII[0]))
+        self.assertIn("SOLO    KIMI · kimi-k3", card)
+        self.assertIn("You are the only agent", card)
+        self.assertIn("Do not invoke Agent", card)
+        self.assertNotIn("BRAIN", card)
+        self.assertNotIn("CAST", card)
+        self.assertNotIn("the road ahead", card)
+
     def test_auto_brain_is_fable_first_then_falls_back_on_usage(self):
         cfg = self.auto_cfg()
         available = {"gpt-5.6-sol", "claude-fable-5", "kimi-k3"}

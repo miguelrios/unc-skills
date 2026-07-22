@@ -61,6 +61,7 @@ capture = {
             "ANTHROPIC_API_KEY",
             "CLAUDE_CODE_OAUTH_TOKEN",
             "CLAUDE_CODE_SUBAGENT_MODEL",
+            "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
         )
     },
 }
@@ -257,6 +258,7 @@ class TestClaudeSubscriptionLauncher(unittest.TestCase):
             "ANTHROPIC_API_KEY": "must-not-survive",
             "CLAUDE_CODE_OAUTH_TOKEN": "must-not-survive",
             "CLAUDE_CODE_SUBAGENT_MODEL": "gpt-5.6-sol",
+            "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
         }
 
     def test_launcher_routes_sol_forwards_args_and_scrubs_global_override(self):
@@ -293,6 +295,7 @@ class TestClaudeSubscriptionLauncher(unittest.TestCase):
                     "ANTHROPIC_API_KEY": False,
                     "CLAUDE_CODE_OAUTH_TOKEN": False,
                     "CLAUDE_CODE_SUBAGENT_MODEL": False,
+                    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": True,
                 },
             )
             self.assertEqual(settings.read_bytes(), before)
@@ -420,14 +423,14 @@ exit 0
         self.assertIn("request_user_input", skill)
         self.assertIn("do not silently infer paid subscriptions", skill)
         self.assertIn("--non-interactive", skill)
-        self.assertIn("--vendors claude[,chatgpt][,xai]", skill)
+        self.assertIn("--vendors claude[,chatgpt][,xai][,kimi]", skill)
         self.assertIn("--build-proxy", skill)
         self.assertIn("Claude Code's `Bash` tool is the exception", skill)
         self.assertIn("open a new terminal and run exactly", skill)
         self.assertIn("parable auth login", skill)
         self.assertIn("Do not run it through", skill)
         self.assertIn("Do not give the user three separate `auth add` commands", skill)
-        self.assertIn("should never be handed three separate provider commands", readme)
+        self.assertIn("should never be handed separate per-provider commands", readme)
         self.assertIn("inside Claude Code", readme)
         self.assertIn("user-only", skill)
 
@@ -491,7 +494,7 @@ exit 0
             self.assertEqual(first.stdout.count(handoff), 1)
             self.assertIn(launch, first.stdout)
 
-            installed = home / ".local" / "share" / "parable" / "0.1.16"
+            installed = home / ".local" / "share" / "parable" / "0.1.18"
             durable = home / ".local" / "bin" / "parable"
             self.assertTrue((installed / "bin" / "parable.js").is_file())
             self.assertTrue((installed / "lib" / "onboarding.js").is_file())
@@ -809,13 +812,29 @@ class TestFirstRunSetup(unittest.TestCase):
             interactive = self.run_cli(
                 interactive_home,
                 "setup", "--proxy-bin", str(proxy), "--no-auth",
-                input_text="n\nn\n",
+                input_text="n\nn\nn\n",
             )
             self.assertEqual(interactive.returncode, 0, interactive.stdout + interactive.stderr)
+            self.assertIn("Add Kimi Code subscription (Kimi K3)?", interactive.stdout)
             interactive_manifest = json.loads(
                 (interactive_home / ".config" / "parable" / "setup.json").read_text()
             )
             self.assertEqual(interactive_manifest["vendors"], ["claude"])
+
+            interactive_kimi_home = root / "interactive-kimi"
+            interactive_kimi_home.mkdir()
+            interactive_kimi = self.run_cli(
+                interactive_kimi_home,
+                "setup", "--proxy-bin", str(proxy), "--no-auth",
+                input_text="n\nn\ny\n",
+            )
+            self.assertEqual(
+                interactive_kimi.returncode, 0, interactive_kimi.stdout + interactive_kimi.stderr,
+            )
+            interactive_kimi_manifest = json.loads(
+                (interactive_kimi_home / ".config" / "parable" / "setup.json").read_text()
+            )
+            self.assertEqual(interactive_kimi_manifest["vendors"], ["claude", "kimi"])
 
             claude_xai_home = root / "claude-xai"
             claude_xai_home.mkdir()
@@ -841,13 +860,13 @@ class TestFirstRunSetup(unittest.TestCase):
             all_vendors = self.run_cli(
                 all_home,
                 "setup", "--non-interactive",
-                "--vendors", "xai,chatgpt,claude",
+                "--vendors", "xai,chatgpt,claude,kimi",
                 "--proxy-bin", str(proxy), "--port", "9123", "--no-auth",
             )
             self.assertEqual(all_vendors.returncode, 0, all_vendors.stdout + all_vendors.stderr)
             config_dir = all_home / ".config" / "parable"
             manifest = json.loads((config_dir / "setup.json").read_text())
-            self.assertEqual(manifest["vendors"], ["claude", "chatgpt", "xai"])
+            self.assertEqual(manifest["vendors"], ["claude", "chatgpt", "xai", "kimi"])
             self.assertEqual(manifest["port"], 9123)
             config = (config_dir / "parable.toml").read_text()
             for model in (
@@ -859,6 +878,7 @@ class TestFirstRunSetup(unittest.TestCase):
                 "claude-opus-4-8",
                 "claude-haiku-4-5-20251001",
                 "grok-4.5",
+                "kimi-k3",
             ):
                 self.assertIn(model, config)
             self.assertIn('effort = "xhigh"', config)
@@ -872,7 +892,8 @@ class TestFirstRunSetup(unittest.TestCase):
                 'architecture=["fable_exact","opus_exact","sol_exact"]',
                 config.replace(" ", ""),
             )
-            self.assertNotIn("kimi", config.lower())
+            self.assertNotIn("kimi", config.replace(" ", "").split("architecture=")[1].split("]")[0])
+            self.assertNotIn("kimi", claude_xai_config.lower())
 
     def test_setup_rejects_selection_binary_and_unsafe_state_without_writes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -893,7 +914,7 @@ class TestFirstRunSetup(unittest.TestCase):
 
             proxy = self.make_proxy(root / "tools")
             for vendors, message in (("chatgpt", "must include claude"),
-                                     ("claude,kimi", "unsupported vendor")):
+                                     ("claude,glm", "unsupported vendor")):
                 home = root / vendors.replace(",", "-")
                 home.mkdir()
                 rejected = self.run_cli(
@@ -1023,6 +1044,239 @@ class TestFirstRunSetup(unittest.TestCase):
             manifest = json.loads((path_home / ".config" / "parable" / "setup.json").read_text())
             self.assertEqual(manifest["proxyBinary"], str(path_first.resolve()))
 
+    def test_add_vendors_extends_existing_setup_in_place(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            home.mkdir()
+            proxy = self.make_proxy(root / "tools")
+
+            base = self.run_cli(
+                home,
+                "setup", "--non-interactive", "--vendors", "claude,xai",
+                "--proxy-bin", str(proxy), "--no-auth",
+            )
+            self.assertEqual(base.returncode, 0, base.stdout + base.stderr)
+            setup_json = home / ".config" / "parable" / "setup.json"
+            parable_toml = home / ".config" / "parable" / "parable.toml"
+            cliproxy_yaml = home / ".config" / "parable" / "cliproxy.yaml"
+            cliproxy_env = home / ".config" / "parable" / "cliproxy.env"
+
+            # An existing OAuth credential record must survive an additive upgrade byte-
+            # for-byte and untouched on disk (add-vendors never writes to the auth dir).
+            auth_dir = home / ".cli-proxy-api"
+            auth_dir.mkdir(parents=True, exist_ok=True)
+            auth_record = auth_dir / "existing-claude.json"
+            auth_record.write_text('{"type":"claude","refresh_token":"SECRET-CLAUDE"}\n')
+            auth_record.chmod(0o600)
+
+            watched = {
+                "cliproxy.yaml": cliproxy_yaml,
+                "cliproxy.env": cliproxy_env,
+                "proxy binary": proxy,
+                "auth record": auth_record,
+            }
+            before_bytes = {name: target.read_bytes() for name, target in watched.items()}
+            before_stat = {name: target.stat() for name, target in watched.items()}
+            # Force the filesystem mtime clock forward so an accidental rewrite (even one
+            # that reproduces identical bytes) would be caught by an mtime comparison.
+            time.sleep(1.1)
+
+            added = self.run_cli(home, "setup", "--add-vendors", "kimi", "--no-auth")
+            self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
+            self.assertIn("added vendors: kimi", added.stdout)
+            manifest = json.loads(setup_json.read_text())
+            self.assertEqual(manifest["vendors"], ["claude", "xai", "kimi"])
+            self.assertIn("kimi-k3", parable_toml.read_text())
+
+            # cliproxy yaml/env, the proxy binary, and the auth record must be untouched
+            # by an additive upgrade -- verified by both content bytes and mtime/inode
+            # metadata, not just a text-content comparison.
+            for name, target in watched.items():
+                self.assertEqual(target.read_bytes(), before_bytes[name], name)
+                after_stat = target.stat()
+                self.assertEqual(after_stat.st_mtime_ns, before_stat[name].st_mtime_ns, name)
+                self.assertEqual(after_stat.st_ino, before_stat[name].st_ino, name)
+
+            # Idempotent no-op: re-running with the same (now-already-included) vendor changes nothing.
+            noop = self.run_cli(home, "setup", "--add-vendors", "kimi", "--no-auth")
+            self.assertEqual(noop.returncode, 0, noop.stdout + noop.stderr)
+            self.assertIn("no-op", noop.stdout)
+            self.assertEqual(
+                json.loads(setup_json.read_text())["vendors"], ["claude", "xai", "kimi"]
+            )
+            for name, target in watched.items():
+                self.assertEqual(target.read_bytes(), before_bytes[name], name)
+
+            # After the additive upgrade, plain `--no-auth`-less runs only need to authorize
+            # providers that are actually still missing -- covered functionally by the
+            # dedicated skip-present auth test in TestVendorAuthAndProxyLifecycle.
+
+    def test_add_vendors_rejects_conflicting_flags_and_missing_setup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proxy = self.make_proxy(root / "tools")
+
+            missing_home = root / "missing"
+            missing_home.mkdir()
+            missing = self.run_cli(missing_home, "setup", "--add-vendors", "kimi", "--no-auth")
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn("existing complete setup", missing.stdout + missing.stderr)
+
+            home = root / "home"
+            home.mkdir()
+            base = self.run_cli(
+                home,
+                "setup", "--non-interactive", "--vendors", "claude",
+                "--proxy-bin", str(proxy), "--no-auth",
+            )
+            self.assertEqual(base.returncode, 0, base.stdout + base.stderr)
+
+            conflicts = (
+                (("--vendors", "claude,kimi"), "--vendors"),
+                (("--port", "9999"), "--port"),
+                (("--proxy-bin", str(proxy)), "--proxy-bin"),
+                (("--build-proxy",), "--build-proxy"),
+            )
+            for extra_args, flag in conflicts:
+                proc = self.run_cli(
+                    home, "setup", "--add-vendors", "kimi", "--no-auth", *extra_args
+                )
+                self.assertNotEqual(proc.returncode, 0, f"{flag} should have been rejected")
+                self.assertIn(flag, proc.stdout + proc.stderr)
+            manifest = json.loads(
+                (home / ".config" / "parable" / "setup.json").read_text()
+            )
+            self.assertEqual(manifest["vendors"], ["claude"])
+
+    def test_add_vendors_honors_config_dir_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            home.mkdir()
+            proxy = self.make_proxy(root / "tools")
+            config_dir = root / "custom-config"
+
+            base = self.run_cli(
+                home,
+                "setup", "--non-interactive", "--vendors", "claude",
+                "--proxy-bin", str(proxy), "--config-dir", str(config_dir), "--no-auth",
+            )
+            self.assertEqual(base.returncode, 0, base.stdout + base.stderr)
+            self.assertTrue((config_dir / "setup.json").exists())
+
+            added = self.run_cli(
+                home, "setup", "--add-vendors", "kimi", "--config-dir", str(config_dir), "--no-auth",
+            )
+            self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
+            manifest = json.loads((config_dir / "setup.json").read_text())
+            self.assertEqual(manifest["vendors"], ["claude", "kimi"])
+            self.assertIn("kimi-k3", (config_dir / "parable.toml").read_text())
+
+    def test_add_vendors_rejects_drift_and_recovers_from_stale_half_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            proxy = self.make_proxy(root / "tools")
+
+            def fresh_claude_home(name: str) -> Path:
+                home = root / name
+                home.mkdir()
+                base = self.run_cli(
+                    home,
+                    "setup", "--non-interactive", "--vendors", "claude",
+                    "--proxy-bin", str(proxy), "--no-auth",
+                )
+                self.assertEqual(base.returncode, 0, base.stdout + base.stderr)
+                return home
+
+            # --- Arbitrary drift (not a canonical old/new pair) must still fail closed. ---
+            drift_home = fresh_claude_home("drift")
+            parable_toml = drift_home / ".config" / "parable" / "parable.toml"
+            tampered = parable_toml.read_text() + "\n# tampered\n"
+            parable_toml.write_text(tampered)
+            drifted = self.run_cli(drift_home, "setup", "--add-vendors", "kimi", "--no-auth")
+            self.assertNotEqual(drifted.returncode, 0)
+            self.assertIn("refusing to overwrite", drifted.stdout + drifted.stderr)
+            # Nothing should have been rewritten on top of the drifted content.
+            self.assertEqual(parable_toml.read_text(), tampered)
+
+            # --- Arbitrary garbage ".next" temp files (not real crash artifacts) must
+            # also fail closed rather than being treated as recoverable state. ---
+            garbage_home = fresh_claude_home("garbage")
+            garbage_config_dir = garbage_home / ".config" / "parable"
+            (garbage_config_dir / ".parable.toml.next").write_text("stale-half-write")
+            (garbage_config_dir / ".setup.json.next").write_text("stale-half-write")
+            garbage = self.run_cli(garbage_home, "setup", "--add-vendors", "kimi", "--no-auth")
+            self.assertNotEqual(garbage.returncode, 0)
+            self.assertEqual(
+                json.loads((garbage_config_dir / "setup.json").read_text())["vendors"], ["claude"],
+            )
+
+            # Produce the real canonical NEW file contents by running a genuine, complete
+            # --add-vendors upgrade once, so the half-state fixtures below use byte-exact
+            # old/new content instead of hand-authored approximations.
+            golden_home = fresh_claude_home("golden")
+            golden_config_dir = golden_home / ".config" / "parable"
+            old_toml = (golden_config_dir / "parable.toml").read_text()
+            old_manifest = (golden_config_dir / "setup.json").read_text()
+            golden_added = self.run_cli(golden_home, "setup", "--add-vendors", "kimi", "--no-auth")
+            self.assertEqual(golden_added.returncode, 0, golden_added.stdout + golden_added.stderr)
+            new_toml = (golden_config_dir / "parable.toml").read_text()
+            golden_new_manifest = (golden_config_dir / "setup.json").read_text()
+            self.assertNotEqual(old_toml, new_toml)
+            self.assertNotEqual(old_manifest, golden_new_manifest)
+
+            def new_manifest_for(config_dir: Path) -> str:
+                manifest = json.loads((config_dir / "setup.json").read_text())
+                manifest["vendors"] = ["claude", "kimi"]
+                return json.dumps(manifest, indent=2) + "\n"
+
+            # --- (a) rename completed for parable.toml (new) but not yet for setup.json
+            # (old, with its ".next" sibling still holding the new manifest content). ---
+            case_a_home = fresh_claude_home("case-a")
+            case_a_config_dir = case_a_home / ".config" / "parable"
+            case_a_new_manifest = new_manifest_for(case_a_config_dir)
+            (case_a_config_dir / "parable.toml").write_text(new_toml)
+            (case_a_config_dir / ".setup.json.next").write_text(case_a_new_manifest)
+            recovered_a = self.run_cli(case_a_home, "setup", "--add-vendors", "kimi", "--no-auth")
+            self.assertEqual(recovered_a.returncode, 0, recovered_a.stdout + recovered_a.stderr)
+            self.assertEqual((case_a_config_dir / "parable.toml").read_text(), new_toml)
+            self.assertEqual((case_a_config_dir / "setup.json").read_text(), case_a_new_manifest)
+            manifest_a = json.loads((case_a_config_dir / "setup.json").read_text())
+            self.assertEqual(manifest_a["vendors"], ["claude", "kimi"])
+            self.assertFalse((case_a_config_dir / ".parable.toml.next").exists())
+            self.assertFalse((case_a_config_dir / ".setup.json.next").exists())
+
+            # --- (b) rename completed for setup.json (new) but not yet for parable.toml
+            # (old, with its ".next" sibling still holding the new toml content). ---
+            case_b_home = fresh_claude_home("case-b")
+            case_b_config_dir = case_b_home / ".config" / "parable"
+            case_b_new_manifest = new_manifest_for(case_b_config_dir)
+            (case_b_config_dir / "setup.json").write_text(case_b_new_manifest)
+            (case_b_config_dir / ".parable.toml.next").write_text(new_toml)
+            recovered_b = self.run_cli(case_b_home, "setup", "--add-vendors", "kimi", "--no-auth")
+            self.assertEqual(recovered_b.returncode, 0, recovered_b.stdout + recovered_b.stderr)
+            self.assertEqual((case_b_config_dir / "parable.toml").read_text(), new_toml)
+            self.assertEqual((case_b_config_dir / "setup.json").read_text(), case_b_new_manifest)
+            manifest_b = json.loads((case_b_config_dir / "setup.json").read_text())
+            self.assertEqual(manifest_b["vendors"], ["claude", "kimi"])
+            self.assertFalse((case_b_config_dir / ".parable.toml.next").exists())
+            self.assertFalse((case_b_config_dir / ".setup.json.next").exists())
+
+            # --- The old canonical ".next"-files-only shape (both targets still old,
+            # both ".next" siblings hold the new content) must also still recover. ---
+            recovery_home = fresh_claude_home("recovery")
+            recovery_config_dir = recovery_home / ".config" / "parable"
+            recovery_new_manifest = new_manifest_for(recovery_config_dir)
+            (recovery_config_dir / ".parable.toml.next").write_text(new_toml)
+            (recovery_config_dir / ".setup.json.next").write_text(recovery_new_manifest)
+            recovered = self.run_cli(recovery_home, "setup", "--add-vendors", "kimi", "--no-auth")
+            self.assertEqual(recovered.returncode, 0, recovered.stdout + recovered.stderr)
+            manifest = json.loads((recovery_config_dir / "setup.json").read_text())
+            self.assertEqual(manifest["vendors"], ["claude", "kimi"])
+            self.assertFalse((recovery_config_dir / ".parable.toml.next").exists())
+            self.assertFalse((recovery_config_dir / ".setup.json.next").exists())
+
 
 class TestManagedProxyBuild(unittest.TestCase):
     def make_tools(self, root: Path) -> tuple[Path, Path, Path]:
@@ -1123,7 +1377,7 @@ if args and args[0] == "build":
                 [NODE, str(REPO / "bin" / "parable.js"), "setup", "--no-auth"],
                 cwd=home,
                 env=env,
-                input="n\nn\nn\n",
+                input="n\nn\nn\nn\n",
                 capture_output=True,
                 text=True,
                 timeout=60,
@@ -1150,7 +1404,7 @@ if args and args[0] == "build":
                 [NODE, str(REPO / "bin" / "parable.js"), "setup", "--no-auth"],
                 cwd=home,
                 env=env,
-                input="n\nn\ny\n",
+                input="n\nn\nn\ny\n",
                 capture_output=True,
                 text=True,
                 timeout=60,
@@ -1273,6 +1527,7 @@ mapping = {
     "--codex-device-login": ("chatgpt", "codex"),
     "--claude-login": ("claude", "claude"),
     "--xai-login": ("xai", "xai"),
+    "--kimi-login": ("kimi", "kimi"),
 }
 for flag, (vendor, record_type) in mapping.items():
     if flag in sys.argv and os.environ.get("FAKE_PROXY_SKIP_AUTH") != vendor:
@@ -1446,6 +1701,46 @@ raise SystemExit(int(os.environ.get("FAKE_PROXY_EXIT", "0")))
                 "In a new terminal, open your project and run:"
             ), 1)
 
+    def test_add_vendors_auth_only_authorizes_newly_missing_providers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            proxy, capture = self.make_proxy(home / "tools")
+            setup = self.setup(home, proxy, capture, vendors="claude,xai")
+            self.assertEqual(setup.returncode, 0, setup.stdout + setup.stderr)
+            # Authorize claude and xai up front so the post-upgrade auth pass has nothing
+            # to do for them, and must only reach for the newly-added kimi vendor.
+            for vendor, flag in (("claude", "--claude-login"), ("xai", "--xai-login")):
+                pre = self.run_cli(home, proxy, capture, "auth", "add", vendor)
+                self.assertEqual(pre.returncode, 0, pre.stdout + pre.stderr)
+            capture.write_text("")
+
+            added = self.run_cli(home, proxy, capture, "setup", "--add-vendors", "kimi")
+            self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
+            config = home / ".config" / "parable" / "cliproxy.yaml"
+            self.assertEqual(self.calls(capture), [
+                ["--config", str(config), "--kimi-login", "--no-browser"],
+            ])
+            self.assertIn("claude: already authorized", added.stdout)
+            self.assertIn("xai: already authorized", added.stdout)
+            self.assertIn("authorization complete", added.stdout)
+            manifest = json.loads(
+                (home / ".config" / "parable" / "setup.json").read_text()
+            )
+            self.assertEqual(manifest["vendors"], ["claude", "xai", "kimi"])
+
+    def test_add_vendors_no_auth_defers_authorization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            proxy, capture = self.make_proxy(home / "tools")
+            setup = self.setup(home, proxy, capture, vendors="claude")
+            self.assertEqual(setup.returncode, 0, setup.stdout + setup.stderr)
+            added = self.run_cli(
+                home, proxy, capture, "setup", "--add-vendors", "kimi", "--no-auth"
+            )
+            self.assertEqual(added.returncode, 0, added.stdout + added.stderr)
+            self.assertEqual(self.calls(capture), [])
+            self.assertIn("authorize each newly selected subscription", added.stdout)
+
     def test_auth_rejects_zero_exit_without_a_provider_record(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -1470,7 +1765,8 @@ raise SystemExit(int(os.environ.get("FAKE_PROXY_EXIT", "0")))
             self.assertEqual(setup.returncode, 0, setup.stdout + setup.stderr)
             rejected = (
                 (("auth", "add", "xai"), "not selected"),
-                (("auth", "add", "kimi"), "unsupported auth vendor"),
+                (("auth", "add", "kimi"), "not selected"),
+                (("auth", "add", "glm"), "unsupported auth vendor"),
                 (("auth", "add", "claude", "--device"), "only for chatgpt"),
             )
             for command, message in rejected:
@@ -1506,7 +1802,8 @@ raise SystemExit(int(os.environ.get("FAKE_PROXY_EXIT", "0")))
                                        "email": "private@example.invalid"},
                 "account-beta.json": {"type": "claude", "refresh_token": "SECRET-CLAUDE"},
                 "account-gamma.json": {"type": "xai", "id_token": "SECRET-XAI"},
-                "other.json": {"type": "kimi", "access_token": "SECRET-KIMI"},
+                "account-delta.json": {"type": "kimi", "access_token": "SECRET-KIMI"},
+                "other.json": {"type": "glm", "access_token": "SECRET-GLM"},
             }
             for name, value in records.items():
                 target = auth_dir / name
@@ -1532,10 +1829,11 @@ raise SystemExit(int(os.environ.get("FAKE_PROXY_EXIT", "0")))
                 "chatgpt": {"present": True, "recordCount": 1},
                 "claude": {"present": True, "recordCount": 1},
                 "xai": {"present": True, "recordCount": 1},
+                "kimi": {"present": True, "recordCount": 1},
             })
             self.assertEqual(status["records"], {
-                "total": 7,
-                "userOnly": 4,
+                "total": 8,
+                "userOnly": 5,
                 "invalidMode": 2,
                 "parseErrors": 1,
                 "unrecognized": 1,
@@ -1546,7 +1844,7 @@ raise SystemExit(int(os.environ.get("FAKE_PROXY_EXIT", "0")))
             self.assertEqual(stat.S_IMODE(bad_mode.stat().st_mode), 0o644)
             forbidden = [
                 "SECRET-", "private@example.invalid", "account-alpha", "bad-mode",
-                "linked.json", str(auth_dir), str(outside), "kimi",
+                "linked.json", str(auth_dir), str(outside),
             ]
             for value in forbidden:
                 self.assertNotIn(value, status_proc.stdout + status_proc.stderr)
@@ -1610,6 +1908,7 @@ mapping = {
     "--codex-login": ("chatgpt", "codex"),
     "--claude-login": ("claude", "claude"),
     "--xai-login": ("xai", "xai"),
+    "--kimi-login": ("kimi", "kimi"),
 }
 for flag, (vendor, record_type) in mapping.items():
     if flag in sys.argv:
@@ -1648,6 +1947,7 @@ for flag, (vendor, record_type) in mapping.items():
             "CLAUDE_CONFIG_DIR": str(home / ".claude-native"),
             "CODEX_HOME": str(home / ".codex-native"),
             "PARABLE_USAGE_CACHE": str(home / "usage-cache.json"),
+            "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
         }
         for name in (
             "PARABLE_CONFIG",
@@ -1689,6 +1989,7 @@ for flag, (vendor, record_type) in mapping.items():
             "claude-opus-4-8",
             "claude-haiku-4-5-20251001",
             "grok-4.5",
+            "kimi-k3",
         ]
         expected_agents = {
             "parable-sol-exact": "gpt-5.6-sol",
@@ -1699,6 +2000,7 @@ for flag, (vendor, record_type) in mapping.items():
             "parable-opus-exact": "claude-opus-4-8",
             "parable-haiku-exact": "claude-haiku-4-5-20251001",
             "parable-grok": "grok-4.5",
+            "parable-kimi": "kimi-k3",
         }
         with tempfile.TemporaryDirectory() as tmp, model_server(
             exact_models + ["unrelated-model"]
@@ -1717,7 +2019,7 @@ for flag, (vendor, record_type) in mapping.items():
             setup = self.run_cli(
                 repo,
                 env,
-                "setup", "--non-interactive", "--vendors", "chatgpt,claude,xai",
+                "setup", "--non-interactive", "--vendors", "chatgpt,claude,xai,kimi",
                 "--proxy-bin", str(proxy), "--port", port,
             )
             self.assertEqual(setup.returncode, 0, setup.stdout + setup.stderr)
@@ -1729,6 +2031,7 @@ for flag, (vendor, record_type) in mapping.items():
                 ["--config", str(config_path), "--claude-login", "--no-browser"],
                 ["--config", str(config_path), "--codex-login"],
                 ["--config", str(config_path), "--xai-login", "--no-browser"],
+                ["--config", str(config_path), "--kimi-login", "--no-browser"],
             ])
 
             finalized = self.run_cli(repo, env, "setup", "finalize", "--json")
@@ -1742,7 +2045,7 @@ for flag, (vendor, record_type) in mapping.items():
                 {item["name"]: item["model"] for item in report["agents"]},
                 expected_agents,
             )
-            self.assertEqual(report["catalog"]["requiredCount"], 8)
+            self.assertEqual(report["catalog"]["requiredCount"], 9)
             self.assertEqual(
                 report["next"],
                 "parable",
@@ -1770,7 +2073,7 @@ for flag, (vendor, record_type) in mapping.items():
             confirmed_report = json.loads(confirmed.stdout)
             self.assertEqual(confirmed_report["sync"], {
                 "changed": 0,
-                "unchanged": 8,
+                "unchanged": 9,
                 "removed": 0,
             })
             for path, snapshot in before.items():
@@ -1825,6 +2128,64 @@ for flag, (vendor, record_type) in mapping.items():
                 ],
             )
             self.assertIn("explicit fable parent", captured["welcome_message"])
+
+            solo_before = {
+                path: (path.read_bytes(), path.stat().st_mtime_ns)
+                for path in agents_dir.glob("parable-*.md")
+            }
+            solo = self.run_cli(repo, env, "--solo", "kimi")
+            self.assertEqual(solo.returncode, 0, solo.stdout + solo.stderr)
+            self.assertIn("solo: kimi-k3", solo.stdout)
+            self.assertNotIn("agents:", solo.stdout)
+            captured = json.loads(claude_capture.read_text())
+            self.assertEqual(
+                captured["argv"],
+                [
+                    "--plugin-dir", str(welcome_plugin),
+                    "--model", "kimi-k3", "--disallowedTools", "Agent",
+                    "--effort", "high",
+                ],
+            )
+            self.assertFalse(
+                captured["inherited"]["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"]
+            )
+            self.assertIn("SOLO    KIMI · kimi-k3", captured["welcome_message"])
+            self.assertIn("You are the only agent", captured["welcome_message"])
+            self.assertNotIn("BRAIN", captured["welcome_message"])
+            self.assertNotIn("CAST", captured["welcome_message"])
+            for path, snapshot in solo_before.items():
+                self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), snapshot)
+
+            solo_exact = self.run_cli(
+                repo, env, "--solo=kimi-k3", "--print", "solo-exact"
+            )
+            self.assertEqual(
+                solo_exact.returncode, 0, solo_exact.stdout + solo_exact.stderr
+            )
+            captured = json.loads(claude_capture.read_text())
+            self.assertEqual(
+                captured["argv"],
+                [
+                    "--model", "kimi-k3", "--disallowedTools", "Agent",
+                    "--effort", "high", "--print", "solo-exact",
+                ],
+            )
+            self.assertIsNone(captured["welcome_message"])
+
+            legacy_solo = self.run_cli(
+                repo, env, "claude", "--solo", "kimi", "--", "--print", "legacy-solo"
+            )
+            self.assertEqual(
+                legacy_solo.returncode, 0, legacy_solo.stdout + legacy_solo.stderr
+            )
+            captured = json.loads(claude_capture.read_text())
+            self.assertEqual(
+                captured["argv"],
+                [
+                    "--model", "kimi-k3", "--disallowedTools", "Agent",
+                    "--print", "legacy-solo",
+                ],
+            )
 
             direct = self.run_cli(
                 repo, env, "--dangerously-skip-permissions", "--effort", "low",

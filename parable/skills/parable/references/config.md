@@ -1,5 +1,21 @@
 # parable.toml schema reference
 
+## Multi-model mode vs. solo mode
+
+This schema reference covers **multi-model Parable mode**. When running in solo mode (`parable --solo`), many config sections are ignored. **Solo requires `[claude]` configured and only works with loopback proxy models** (not codex, pi, cursor). See the table below.
+
+| Section | Multi-model | Solo | Notes |
+|---------|-----------|------|-------|
+| `[parable]` | Used | Used | Except `default_executor`, `default_reviewer` |
+| `[claude]` | Used | **Required** | Proxy and catalog checks required; solo exits if missing |
+| `[providers.*]` | Used | Validated; subagent types aid aliases* | Codex/pi/cursor providers are not dispatched in solo |
+| `[executors.*]` | Used | Validated; enabled exact subagent models aid aliases* | No executor is dispatched and no agent file is written |
+| `[checks.*]` | Used | Used | Verification still runs |
+| `[research]` | Used | Used | If in-session research tools are invoked |
+| `[routing]` | **Used** | Ignored | Solo has no routing logic |
+
+*The complete merged config is still parsed and validated. Solo reads enabled exact-model executors only to resolve friendly names, then launches the selected model directly.
+
 ## Resolution and merging
 
 Files load lowest-precedence first; later files win:
@@ -64,6 +80,11 @@ brain with `parable --brain fable --effort high`. An optional `--` can separate 
 option from Claude arguments. Interactive sessions show this selection and the usable executor
 cast in Claude Code via a user-only startup system message; the model does not receive the card.
 
+`parable --solo <alias|exact-model>` instead requires only the selected exact catalog id, skips
+agent synchronization, launches that model as the parent, removes agent-team enablement, and passes
+`--disallowedTools Agent` to Claude Code. It rejects `--brain`, `--model`, `--agent`, `--agents`,
+and caller-supplied allowed/disallowed-tool overrides so the single-agent contract cannot be weakened.
+
 For a custom executor id such as `kimi`, `parable agents sync` creates the native Claude agent
 name `parable-kimi` with the exact configured model id. Only files carrying Parable's generated
 marker are updated or removed; unrelated user agents, including files that happen to begin with
@@ -118,7 +139,9 @@ Unknown `type` values fail validation loudly (future harnesses will extend this 
 |---|---|---|
 | `provider` | `grep.ai` | `grep.ai` or `claude`. What it governs and the scope boundary live in SKILL.md's research section. Whole-table merge, repo wins. |
 
-## `[routing]`
+## `[routing]` (Multi-model mode only)
+
+**This section is ignored in solo mode.** It is used only when running Parable in multi-model mode (bare `parable` or `parable --brain`).
 
 Keys are task classes such as `mechanical`, `data_transform`, `frontend`, `feature`,
 `refactor_wide`, `gnarly`, `review`, `smoke_test`, and `architecture`. Their executor-id lists
