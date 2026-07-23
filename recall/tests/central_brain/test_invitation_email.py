@@ -142,6 +142,7 @@ class InvitationSenderTest(unittest.TestCase):
         self.assertFalse(body["sendSMS"])
         self.assertNotIn("brain_url", body)
         self.assertNotIn("synthetic-management-secret", request.data.decode())
+        self.assertEqual(request.headers["User-agent"], "recall-core/1")
         self.assertEqual(timeout, 10.0)
 
     def test_resend_email_contains_both_clients_and_idempotency_key(self) -> None:
@@ -158,6 +159,7 @@ class InvitationSenderTest(unittest.TestCase):
         self.assertIn("npm install -g @openai/codex", body["text"])
         self.assertIn("npm install -g @anthropic-ai/claude-code", body["text"])
         self.assertNotIn("synthetic-api-secret", request.data.decode())
+        self.assertEqual(request.headers["User-agent"], "recall-core/1")
         self.assertEqual(
             request.headers["Idempotency-key"],
             "recall-invitation/11111111-2222-4333-8444-555555555555",

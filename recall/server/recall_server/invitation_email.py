@@ -241,6 +241,7 @@ class DescopeInvitationEmailSender:
             headers={
                 "Authorization": (f"Bearer {self.project_id}:{self.management_key}"),
                 "Content-Type": "application/json",
+                "User-Agent": "recall-core/1",
                 "X-Descope-Project-Id": self.project_id,
             },
             method="POST",
@@ -298,6 +299,7 @@ class ResendInvitationEmailSender:
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
                 "Idempotency-Key": f"recall-invitation/{invitation.invitation_id}",
+                "User-Agent": "recall-core/1",
             },
             method="POST",
         )
