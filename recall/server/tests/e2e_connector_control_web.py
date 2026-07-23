@@ -134,6 +134,16 @@ class FakeComposio:
         self.revoked = True
 
 
+class FakeInvitationEmailSender:
+    provider = "synthetic"
+
+    def __init__(self):
+        self.messages = []
+
+    def send(self, invitation):
+        self.messages.append(invitation)
+
+
 def request(server, method, path, *, body=None, cookie=None, csrf=None):
     payload = None if body is None else json.dumps(body).encode()
     headers = {"Accept": "application/json"}
@@ -227,11 +237,14 @@ def main():
 
     provider = FakeGoogle()
     composio = FakeComposio()
+    invitation_email_sender = FakeInvitationEmailSender()
     box = SecretBox(b"e" * 32)
     control = ControlPlane(
         store,
         box,
         {"google": provider, "composio": composio},
+        invitation_email_sender=invitation_email_sender,
+        mcp_resource_uri="https://recall.synthetic.invalid/mcp",
     )
     owner_token = control.create_admin_token(
         "owner-control-e2e",
@@ -354,6 +367,33 @@ def main():
         assert status == 201
         assert invitation["email"] == "teammate@example.com"
         assert invitation["status"] == "pending"
+        assert invitation["delivery"] == {
+            "status": "sent",
+            "provider": "synthetic",
+        }
+        assert len(invitation_email_sender.messages) == 1
+        delivered = invitation_email_sender.messages[0]
+        assert delivered.recipient == "teammate@example.com"
+        assert delivered.organization_name == "Synthetic Company"
+        assert (
+            delivered.brain_url
+            == "https://recall.synthetic.invalid/mcp/brains/"
+            "tenant:company:e2e-control"
+        )
+        status, headers, onboarding = request(
+            server,
+            "GET",
+            f"/join/{invitation['id']}",
+        )
+        assert status == 200
+        assert b"npm install -g @openai/codex" in onboarding
+        assert b"npm install -g @anthropic-ai/claude-code" in onboarding
+        assert b"codex mcp login recall-company-control" in onboarding
+        assert b"claude mcp login recall-company-control" in onboarding
+        assert b"teammate@example.com" not in onboarding
+        security = dict(headers)
+        assert security["Referrer-Policy"] == "no-referrer"
+        assert security["X-Frame-Options"] == "DENY"
         status, _, denied = request(
             server,
             "POST",
@@ -397,6 +437,12 @@ def main():
             csrf=owner_csrf,
         )
         assert status == 200 and revoked["status"] == "revoked"
+        status, _, hidden = request(
+            server,
+            "GET",
+            f"/join/{invitation['id']}",
+        )
+        assert status == 404 and hidden["error"] == "not found"
         status, _, denied = request(
             server,
             "POST",
@@ -423,6 +469,8 @@ def main():
             csrf=admin_csrf,
         )
         assert status == 201 and delegated["role"] == "member"
+        assert delegated["delivery"]["status"] == "sent"
+        assert len(invitation_email_sender.messages) == 2
         status, _, revoked = request(
             server,
             "POST",
@@ -802,6 +850,7 @@ def main():
                 "plaintext_secret_renders": 0,
                 "encrypted_secret_wiped_on_revoke": True,
                 "browser_assets": 3,
+                "invitation_emails": len(invitation_email_sender.messages),
             },
             sort_keys=True,
         )

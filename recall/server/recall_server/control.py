@@ -6,6 +6,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import secrets
@@ -22,6 +23,13 @@ import urllib.request
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from .authorization import normalize_verified_email
+from .invitation_email import (
+    InvitationEmail,
+    InvitationEmailError,
+    InvitationEmailSender,
+    invitation_urls,
+    sender_from_env,
+)
 from connectors.composio_workspace_rail import (
     ComposioWorkspaceRail,
     toolkit_for_connector,
@@ -74,6 +82,7 @@ COMPOSIO_PROBE_RETRY_DELAYS = (1.0, 2.0, 4.0, 8.0, 15.0, 15.0)
 COMPOSIO_TRANSIENT_PROBE_ERRORS = frozenset(
     {"authority_forbidden", "transport_unavailable", "upstream_error"}
 )
+LOG = logging.getLogger("recall.control")
 
 
 class ControlError(RuntimeError):
@@ -743,10 +752,14 @@ class ControlPlane:
         store: Any,
         secret_box: SecretBox,
         providers: dict[str, OAuthProvider],
+        invitation_email_sender: InvitationEmailSender | None = None,
+        mcp_resource_uri: str = "",
     ):
         self.store = store
         self.secret_box = secret_box
         self.providers = dict(providers)
+        self.invitation_email_sender = invitation_email_sender
+        self.mcp_resource_uri = mcp_resource_uri
 
     @classmethod
     def from_env(cls, store: Any) -> "ControlPlane":
@@ -768,7 +781,17 @@ class ControlPlane:
             providers["google"] = GoogleOAuthProvider.from_env()
         if all(composio_values):
             providers["composio"] = ComposioConnectionBroker.from_env()
-        return cls(store, SecretBox.from_env(), providers)
+        try:
+            invitation_email_sender = sender_from_env()
+        except InvitationEmailError:
+            raise ControlError("invitation_email_configuration_invalid", 500) from None
+        return cls(
+            store,
+            SecretBox.from_env(),
+            providers,
+            invitation_email_sender=invitation_email_sender,
+            mcp_resource_uri=os.environ.get("RECALL_MCP_RESOURCE_URI", ""),
+        )
 
     def create_admin_token(
         self,
@@ -921,9 +944,11 @@ class ControlPlane:
         tenant_id: str,
     ) -> dict[str, Any]:
         row = connection.execute(
-            """SELECT space.organization_id,space.brain_kind,
+            """SELECT space.organization_id,space.brain_kind,space.slug,
+                      organization.display_name,
                       membership.role,access.permission
                FROM brain_spaces space
+               JOIN brain_organizations organization USING(organization_id)
                JOIN brain_access_grants access
                  ON access.tenant_id=space.tenant_id
                 AND access.principal_id=%s
@@ -1015,6 +1040,40 @@ class ControlPlane:
                        ) VALUES (%s,%s,'brain.invitation.create','success',%s)""",
                     (uuid.uuid4(), principal_id, _digest(str(invitation_id))),
                 )
+        delivery = {"status": "disabled"}
+        if self.invitation_email_sender is not None:
+            try:
+                brain_url, onboarding_url = invitation_urls(
+                    self.mcp_resource_uri,
+                    tenant_id=tenant_id,
+                    invitation_id=str(invitation_id),
+                )
+                self.invitation_email_sender.send(
+                    InvitationEmail(
+                        invitation_id=str(invitation_id),
+                        recipient=normalized_email,
+                        organization_name=admin["display_name"],
+                        brain_slug=admin["slug"],
+                        role=role,
+                        expires_at=expires_at,
+                        brain_url=brain_url,
+                        onboarding_url=onboarding_url,
+                    )
+                )
+                delivery = {
+                    "status": "sent",
+                    "provider": self.invitation_email_sender.provider,
+                }
+            except InvitationEmailError:
+                LOG.error(
+                    "invitation email delivery failed provider=%s target=%s",
+                    self.invitation_email_sender.provider,
+                    _digest(str(invitation_id)),
+                )
+                delivery = {
+                    "status": "failed",
+                    "provider": self.invitation_email_sender.provider,
+                }
         return {
             "id": str(invitation_id),
             "tenant_id": tenant_id,
@@ -1022,7 +1081,50 @@ class ControlPlane:
             "role": role,
             "status": "pending",
             "expires_at": expires_at.isoformat(),
+            "delivery": delivery,
         }
+
+    def invitation_onboarding(self, invitation_id: str) -> InvitationEmail:
+        try:
+            parsed_id = uuid.UUID(invitation_id)
+        except (TypeError, ValueError, AttributeError):
+            raise ControlError("brain_invitation_not_found", 404) from None
+        with self.store.connect() as connection:
+            row = connection.execute(
+                """SELECT invitation.tenant_id,invitation.role,
+                          invitation.expires_at,invitation.accepted_at,
+                          invitation.revoked_at,space.slug,
+                          organization.display_name
+                   FROM brain_invitations invitation
+                   JOIN brain_spaces space USING(tenant_id)
+                   JOIN brain_organizations organization USING(organization_id)
+                   WHERE invitation.id=%s""",
+                (parsed_id,),
+            ).fetchone()
+        if (
+            row is None
+            or row["revoked_at"] is not None
+            or (row["accepted_at"] is None and row["expires_at"] <= _now())
+        ):
+            raise ControlError("brain_invitation_not_found", 404)
+        try:
+            brain_url, onboarding_url = invitation_urls(
+                self.mcp_resource_uri,
+                tenant_id=row["tenant_id"],
+                invitation_id=str(parsed_id),
+            )
+        except InvitationEmailError:
+            raise ControlError("invitation_email_configuration_invalid", 500) from None
+        return InvitationEmail(
+            invitation_id=str(parsed_id),
+            recipient="",
+            organization_name=row["display_name"],
+            brain_slug=row["slug"],
+            role=row["role"],
+            expires_at=row["expires_at"],
+            brain_url=brain_url,
+            onboarding_url=onboarding_url,
+        )
 
     def invitation_email_index(self, email: str) -> str:
         normalized_email = normalize_verified_email(email)
