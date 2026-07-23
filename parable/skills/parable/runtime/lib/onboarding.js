@@ -38,16 +38,18 @@ const PROXY_BINARY_NAME = "parable-cliproxy-api";
 const DEFAULT_PROXY_READY_TIMEOUT_MS = 15_000;
 const PROXY_PROBE_TIMEOUT_MS = 750;
 const PROXY_STOP_TIMEOUT_MS = 2_000;
-const VENDOR_ORDER = Object.freeze(["claude", "chatgpt", "xai"]);
+const VENDOR_ORDER = Object.freeze(["claude", "chatgpt", "xai", "kimi"]);
 const AUTH_FLAGS = Object.freeze({
   chatgpt: Object.freeze({ browser: "--codex-login", device: "--codex-device-login" }),
   claude: Object.freeze({ browser: "--claude-login", extra: "--no-browser" }),
   xai: Object.freeze({ browser: "--xai-login", extra: "--no-browser" }),
+  kimi: Object.freeze({ browser: "--kimi-login", extra: "--no-browser" }),
 });
 const AUTH_RECORD_TYPES = Object.freeze({
   chatgpt: "codex",
   claude: "claude",
   xai: "xai",
+  kimi: "kimi",
 });
 const VENDORS = Object.freeze({
   chatgpt: Object.freeze({
@@ -62,6 +64,7 @@ const VENDORS = Object.freeze({
     ]),
   }),
   xai: Object.freeze({ models: Object.freeze(["grok-4.5"]) }),
+  kimi: Object.freeze({ models: Object.freeze(["kimi-k3"]) }),
 });
 
 class OnboardingError extends Error {
@@ -169,7 +172,7 @@ function parseOptions(argv, valueNames, booleanNames) {
 function parseSetupOptions(argv) {
   const options = parseOptions(
     argv,
-    new Set(["--vendors", "--proxy-bin", "--config-dir", "--port"]),
+    new Set(["--vendors", "--proxy-bin", "--config-dir", "--port", "--add-vendors"]),
     new Set(["--build-proxy", "--no-auth", "--non-interactive", "--help"]),
   );
   if (options._.length) {
@@ -177,6 +180,20 @@ function parseSetupOptions(argv) {
   }
   if (options.proxy_bin && options.build_proxy) {
     throw new OnboardingError("--proxy-bin and --build-proxy are mutually exclusive");
+  }
+  if (options.add_vendors !== undefined) {
+    if (options.vendors !== undefined) {
+      throw new OnboardingError("--add-vendors and --vendors are mutually exclusive");
+    }
+    if (options.port !== undefined) {
+      throw new OnboardingError("--add-vendors and --port are mutually exclusive");
+    }
+    if (options.proxy_bin !== undefined) {
+      throw new OnboardingError("--add-vendors and --proxy-bin are mutually exclusive");
+    }
+    if (options.build_proxy) {
+      throw new OnboardingError("--add-vendors and --build-proxy are mutually exclusive");
+    }
   }
   if (options.port !== undefined) {
     if (!/^[0-9]+$/.test(options.port)) {
@@ -204,15 +221,20 @@ function parseBuildOptions(argv) {
 
 function setupUsage() {
   return [
-    "usage: parable setup [--vendors claude[,chatgpt][,xai]] [--proxy-bin PATH]",
+    "usage: parable setup [--vendors claude[,chatgpt][,xai][,kimi]] [--proxy-bin PATH]",
     "                     [--config-dir DIR] [--port PORT] [--build-proxy]",
     "                     [--no-auth] [--non-interactive]",
+    "       parable setup --add-vendors kimi [--config-dir DIR] [--no-auth]",
     "       parable setup finalize [--json]",
     "",
     "Create a private, loopback-only Parable + CLIProxyAPI configuration.",
     "Claude is the baseline subscription for the Claude Code harness.",
     "ChatGPT adds optional Sol/Terra/Luna models and the Sol fallback parent.",
+    "xAI adds the Grok 4.5 subscription; Kimi adds the Kimi K3 subscription.",
     "Interactive setup offers the pinned managed build when no proxy is installed.",
+    "--add-vendors extends an existing complete setup in place without touching",
+    "its proxy token, binary, or credentials; it cannot combine with --vendors,",
+    "--port, --proxy-bin, or --build-proxy, but does support --config-dir.",
     "Ordinary next step: run `parable` in the working repository.",
   ].join("\n");
 }
@@ -244,6 +266,25 @@ function parseVendors(raw) {
   return VENDOR_ORDER.filter((vendor) => unique.has(vendor));
 }
 
+// Like parseVendors, but for `--add-vendors`: the list names vendors to graft onto an
+// existing setup, so it must not require "claude" (claude is already present in any
+// complete setup) and must reject vendors that are not real supported vendor ids.
+function parseAddVendors(raw) {
+  const parts = String(raw).split(",").map((value) => value.trim()).filter(Boolean);
+  if (!parts.length) throw new OnboardingError("--add-vendors cannot be empty");
+  const unique = new Set();
+  for (const vendor of parts) {
+    if (!Object.hasOwn(VENDORS, vendor)) {
+      throw new OnboardingError(
+        `unsupported vendor '${vendor}' (supported: ${VENDOR_ORDER.join(", ")})`,
+      );
+    }
+    if (unique.has(vendor)) throw new OnboardingError(`duplicate vendor '${vendor}'`);
+    unique.add(vendor);
+  }
+  return VENDOR_ORDER.filter((vendor) => unique.has(vendor));
+}
+
 async function askYesNo(prompt, question) {
   const answer = (await prompt.ask(`${question} [y/N] `)).trim().toLowerCase();
   return answer === "y" || answer === "yes";
@@ -260,6 +301,7 @@ async function selectVendors(options, existingManifest, prompt) {
     vendors.push("chatgpt");
   }
   if (await askYesNo(prompt, "Add xAI Grok 4.5 subscription?")) vendors.push("xai");
+  if (await askYesNo(prompt, "Add Kimi Code subscription (Kimi K3)?")) vendors.push("kimi");
   return VENDOR_ORDER.filter((vendor) => vendors.includes(vendor));
 }
 
@@ -440,6 +482,15 @@ function renderParableToml(port, vendors) {
       ),
     );
   }
+  if (selected.has("kimi")) {
+    lines.push(
+      ...executorBlock(
+        "kimi", "kimi-k3", "high", ["implementer", "fourth-family", "subscription"],
+        "Bounded feature implementation and cross-family smoke testing outside the primary provider families.",
+        "Sole final factual review, orchestration, ambiguous product architecture, or reviewing its own diff.",
+      ),
+    );
+  }
 
   const mechanical = hasChatGPT ? ["luna", "haiku_exact"] : ["haiku_exact"];
   const dataTransform = hasChatGPT
@@ -449,19 +500,23 @@ function renderParableToml(port, vendors) {
   const feature = hasChatGPT
     ? ["terra", "sol_exact", "sonnet_exact"] : ["sonnet_exact"];
   if (selected.has("xai")) feature.push("grok");
+  if (selected.has("kimi")) feature.push("kimi");
   const refactorWide = hasChatGPT
     ? ["sol_exact", "sonnet_exact", "opus_exact", "fable_exact"]
     : ["sonnet_exact", "opus_exact", "fable_exact"];
   if (selected.has("xai")) refactorWide.push("grok");
+  if (selected.has("kimi")) refactorWide.push("kimi");
   const gnarly = hasChatGPT
     ? ["sol_exact", "opus_exact", "fable_exact"] : ["opus_exact", "fable_exact"];
   if (selected.has("xai")) gnarly.push("grok");
+  if (selected.has("kimi")) gnarly.push("kimi");
   const review = hasChatGPT
     ? [reviewer, "sol_exact", "terra", "sonnet_exact"]
     : [reviewer, "sonnet_exact"];
   if (selected.has("xai")) review.push("grok");
   const smoke = hasChatGPT ? ["sol_exact", "luna", "sonnet_exact"] : ["sonnet_exact"];
   if (selected.has("xai")) smoke.unshift("grok");
+  if (selected.has("kimi")) smoke.unshift("kimi");
   const architecture = hasChatGPT
     ? ["fable_exact", "opus_exact", "sol_exact"] : ["fable_exact", "opus_exact"];
   lines.push(
@@ -551,6 +606,25 @@ function validateExistingSetup(configDir, authDir, paths, desired, options = {})
   }
 }
 
+// Validate the setup surfaces that never change during an additive vendor upgrade.
+// The two replaceable files are checked separately against explicit old/new candidates.
+function validateExistingSetupEnvelope(configDir, authDir, paths, manifest) {
+  requirePrivateDirectory(configDir, "configuration directory");
+  requirePrivateDirectory(authDir, "CLIProxyAPI auth directory");
+  for (const [name, target] of Object.entries(paths)) requirePrivateFile(target, name);
+  const token = readExistingToken(paths);
+  const expected = new Map([
+    [paths.proxyConfig, renderProxyYaml(manifest.port, authDir, token)],
+    [paths.proxyEnv, renderProxyEnv(token)],
+  ]);
+  for (const [target, content] of expected) {
+    if (fs.readFileSync(target, "utf8") !== content) {
+      throw new OnboardingError(`generated setup file has changed; refusing to overwrite: ${target}`);
+    }
+  }
+  requireExecutable(manifest.proxyBinary, "configured proxy binary");
+}
+
 function writePrivateFileSet(entries) {
   const temporary = [];
   const created = [];
@@ -585,6 +659,110 @@ function writePrivateFileSet(entries) {
       try { fs.unlinkSync(temp); } catch { /* already linked or best-effort cleanup */ }
     }
   }
+}
+
+function replacementTempPath(target) {
+  return path.join(path.dirname(target), `.${path.basename(target)}.next`);
+}
+
+// Atomically replaces each existing target's content in place (mode 0600), used by
+// `parable setup --add-vendors` to rewrite only parable.toml + setup.json while leaving
+// every other setup file (proxy config/token/binary, OAuth credentials) untouched.
+//
+// Recovery contract: each target's temp sibling has a fixed canonical name
+// (".<basename>.next"), not a pid/random one, so a process that crashes between writing
+// the temp file and renaming it over the target leaves exactly one recognizable artifact
+// per target. A later run of the same operation always starts by discarding any leftover
+// ".next" files for its own targets (removeReplacementArtifacts) before writing fresh
+// ones, so it always recovers from that one canonical half-transition shape. Any other
+// unexpected file in the config directory is left alone and is never treated as
+// recoverable state.
+function removeReplacementArtifacts(entries) {
+  for (const [target] of entries) {
+    try { fs.unlinkSync(replacementTempPath(target)); } catch { /* nothing to clean up */ }
+  }
+}
+
+// Durably commit directory-entry changes (temp creation, rename, cleanup) so a
+// host crash after a rename cannot resurface a state the recovery contract does
+// not recognize. Best-effort on platforms that reject directory fsync.
+function fsyncDirectory(directory) {
+  let descriptor;
+  try {
+    descriptor = fs.openSync(directory, "r");
+  } catch {
+    return;
+  }
+  try {
+    fs.fsyncSync(descriptor);
+  } catch { /* some platforms cannot fsync directories */ } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function replacePrivateFileSet(entries) {
+  const directories = new Set(entries.map(([target]) => path.dirname(target)));
+  removeReplacementArtifacts(entries);
+  const temporary = [];
+  try {
+    for (const [target, content] of entries) {
+      const temp = replacementTempPath(target);
+      const descriptor = fs.openSync(temp, "wx", 0o600);
+      try {
+        fs.writeFileSync(descriptor, content, "utf8");
+        fs.fsyncSync(descriptor);
+      } finally {
+        fs.closeSync(descriptor);
+      }
+      fs.chmodSync(temp, 0o600);
+      temporary.push(temp);
+    }
+    directories.forEach(fsyncDirectory);
+    entries.forEach(([target], index) => {
+      fs.renameSync(temporary[index], target);
+      fsyncDirectory(path.dirname(target));
+    });
+  } finally {
+    removeReplacementArtifacts(entries);
+    directories.forEach(fsyncDirectory);
+  }
+}
+
+// A `replacePrivateFileSet` batch renames one target at a time, so a crash between the
+// first and last rename can leave targets split between the old and new canonical content.
+// A target that has not yet been renamed may also retain its exact new content in the
+// fixed `.next` sibling. Return null for any content outside that closed old/new set.
+function inspectReplacementState(oldEntries, newEntries) {
+  const oldByTarget = new Map(oldEntries);
+  const newByTarget = new Map(newEntries);
+  let sawNew = false;
+  let sawOld = false;
+  let sawNext = false;
+  for (const [target] of newEntries) {
+    const oldContent = oldByTarget.get(target);
+    const newContent = newByTarget.get(target);
+    const actual = fs.readFileSync(target, "utf8");
+    const nextPath = replacementTempPath(target);
+    const nextContent = lstatOrNull(nextPath) ? fs.readFileSync(nextPath, "utf8") : null;
+    if (nextContent !== null) {
+      sawNext = true;
+      if (nextContent !== newContent) return null;
+    }
+    if (actual === oldContent) sawOld = true;
+    else if (actual === newContent) sawNew = true;
+    else return null;
+  }
+  return { sawNew, sawOld, sawNext };
+}
+
+function reconcileReplacementHalfState(oldEntries, newEntries) {
+  const state = inspectReplacementState(oldEntries, newEntries);
+  if (!state) {
+    throw new OnboardingError("generated setup replacement state is not canonical; refusing to overwrite");
+  }
+  if (!state.sawNew && !state.sawNext) return "current";
+  replacePrivateFileSet(newEntries);
+  return "recovered";
 }
 
 function validateParableConfig(configPath, configDir) {
@@ -793,6 +971,7 @@ function authUsage() {
     "       parable auth add chatgpt [--device]",
     "       parable auth add claude",
     "       parable auth add xai",
+    "       parable auth add kimi",
     "       parable auth status [--json]",
   ].join("\n");
 }
@@ -866,7 +1045,9 @@ async function runAuthAdd(argv, log) {
     return;
   }
   if (options._.length !== 1) {
-    throw new OnboardingError("auth add requires exactly one vendor: chatgpt, claude, or xai");
+    throw new OnboardingError(
+      `auth add requires exactly one vendor: ${VENDOR_ORDER.join(", ")}`,
+    );
   }
   const vendor = options._[0];
   if (!Object.hasOwn(AUTH_FLAGS, vendor)) {
@@ -890,6 +1071,7 @@ function emptyAuthStatus(directoryModeValid) {
       chatgpt: { present: false, recordCount: 0 },
       claude: { present: false, recordCount: 0 },
       xai: { present: false, recordCount: 0 },
+      kimi: { present: false, recordCount: 0 },
     },
     records: {
       total: 0,
@@ -977,7 +1159,7 @@ function scanAuthStatus(authDir) {
     status.scanned = false;
     return status;
   }
-  const providerByType = { codex: "chatgpt", claude: "claude", xai: "xai" };
+  const providerByType = { codex: "chatgpt", claude: "claude", xai: "xai", kimi: "kimi" };
   for (const entry of fs.readdirSync(authDir, { withFileTypes: true })) {
     if (!entry.name.endsWith(".json")) continue;
     status.records.total += 1;
@@ -1430,11 +1612,177 @@ async function runClaude(argv, log) {
   return runManagedClient(context, token, () => spawnClaude(argv, env), "Claude", log);
 }
 
+// `parable setup --add-vendors kimi [--no-auth]`: extends an already-complete, canonical
+// setup with additional vendors without touching the proxy token, binary, or any OAuth
+// credential file. Only parable.toml and setup.json are rewritten, and only via an atomic
+// replace (see replacePrivateFileSet). Requires an existing complete setup that matches its
+// own recorded manifest byte-for-byte (validateExistingSetup) before anything is written,
+// so arbitrary drift is rejected the same way the ordinary `parable setup` re-run is.
+//
+// --config-dir is honored the same way plain `parable setup` honors it (an explicit
+// override of the active setup directory); when absent, the active directory is resolved
+// from PARABLE_CONFIG / the default ~/.config/parable exactly as activeSetupDirectory does.
+async function runSetupAddVendors(options, log) {
+  const configDir = path.resolve(options.config_dir || activeSetupDirectory());
+  const authDir = path.resolve(path.join(os.homedir(), ".cli-proxy-api"));
+  const paths = setupPaths(configDir);
+  if (stateOf(paths) !== "complete") {
+    throw new OnboardingError("--add-vendors requires an existing complete setup; run `parable setup` first");
+  }
+
+  const addVendors = parseAddVendors(options.add_vendors);
+  const manifestOnDisk = existingManifestSkeleton(configDir, paths);
+  let vendorsOnDisk;
+  try {
+    vendorsOnDisk = parseVendors(manifestOnDisk.vendors.join(","));
+  } catch {
+    throw new OnboardingError("setup.json contains an invalid vendor selection");
+  }
+  if (manifestOnDisk.port < 1 || manifestOnDisk.port > 65535) {
+    throw new OnboardingError("setup.json contains an invalid proxy port");
+  }
+
+  const manifestForVendors = (vendors) => manifestFor(
+    configDir, authDir, paths, vendors, manifestOnDisk.proxyBinary, manifestOnDisk.port,
+  );
+  const entriesForVendors = (vendors) => [
+    [paths.parableConfig, renderParableToml(manifestOnDisk.port, vendors)],
+    [paths.manifest, renderManifest(manifestForVendors(vendors))],
+  ];
+  const currentDesired = manifestForVendors(vendorsOnDisk);
+  const currentEntries = entriesForVendors(vendorsOnDisk);
+  const nextVendors = VENDOR_ORDER.filter(
+    (vendor) => vendorsOnDisk.includes(vendor) || addVendors.includes(vendor),
+  );
+  const nextDesired = manifestForVendors(nextVendors);
+  const nextEntries = entriesForVendors(nextVendors);
+
+  // The ordinary state is checked first. If it is canonical, any `.next` artifacts
+  // must also match this exact requested upgrade before they may be completed or removed.
+  let currentValidationError = null;
+  try {
+    validateExistingSetup(configDir, authDir, paths, currentDesired);
+  } catch (error) {
+    currentValidationError = error;
+  }
+  if (!currentValidationError) {
+    const outcome = reconcileReplacementHalfState(currentEntries, nextEntries);
+    if (outcome === "recovered") {
+      validateExistingSetup(configDir, authDir, paths, nextDesired);
+      validateParableConfig(paths.parableConfig, configDir);
+      log(`setup already includes: ${nextVendors.join(", ")}`);
+      log(`no-op -> ${configDir}`);
+      return { configDir, authDir, paths, manifest: nextDesired, vendors: nextVendors };
+    }
+    validateParableConfig(paths.parableConfig, configDir);
+    if (nextVendors.length === vendorsOnDisk.length) {
+      log(`setup already includes: ${vendorsOnDisk.join(", ")}`);
+      log(`no-op -> ${configDir}`);
+      return { configDir, authDir, paths, manifest: currentDesired, vendors: vendorsOnDisk };
+    }
+  } else {
+    // A process can stop after either target rename. Validate the invariant envelope,
+    // then accept only a byte-exact old/new pair for this requested additive operation.
+    validateExistingSetupEnvelope(configDir, authDir, paths, manifestOnDisk);
+    const candidates = [];
+    if (nextVendors.length !== vendorsOnDisk.length) {
+      candidates.push({
+        oldVendors: vendorsOnDisk,
+        newVendors: nextVendors,
+        oldEntries: currentEntries,
+        newEntries: nextEntries,
+      });
+    }
+
+    // If setup.json was renamed first, it already lists the final vendors. Enumerate
+    // which requested vendors were newly added and find the unique prior TOML by exact
+    // generated bytes. The vendor set is bounded, so exhaustive subsets stay trivial.
+    const removable = addVendors.filter(
+      (vendor) => vendor !== "claude" && vendorsOnDisk.includes(vendor),
+    );
+    for (let mask = 1; mask < (1 << removable.length); mask += 1) {
+      const removed = new Set(
+        removable.filter((_vendor, index) => (mask & (1 << index)) !== 0),
+      );
+      const oldVendors = VENDOR_ORDER.filter(
+        (vendor) => vendorsOnDisk.includes(vendor) && !removed.has(vendor),
+      );
+      if (!oldVendors.includes("claude")) continue;
+      candidates.push({
+        oldVendors,
+        newVendors: vendorsOnDisk,
+        oldEntries: entriesForVendors(oldVendors),
+        newEntries: currentEntries,
+      });
+    }
+
+    const recoverable = candidates.filter((candidate) => {
+      const state = inspectReplacementState(candidate.oldEntries, candidate.newEntries);
+      return state && (state.sawNew || state.sawNext);
+    });
+    const uniqueFinals = new Map();
+    for (const candidate of recoverable) {
+      const key = candidate.newEntries.map(([, content]) => content).join("\u0000");
+      uniqueFinals.set(key, candidate);
+    }
+    if (uniqueFinals.size !== 1) throw currentValidationError;
+
+    const recovered = [...uniqueFinals.values()][0];
+    replacePrivateFileSet(recovered.newEntries);
+    const recoveredDesired = manifestForVendors(recovered.newVendors);
+    validateExistingSetup(configDir, authDir, paths, recoveredDesired);
+    validateParableConfig(paths.parableConfig, configDir);
+    log(`setup already includes: ${recovered.newVendors.join(", ")}`);
+    log(`no-op -> ${configDir}`);
+    return {
+      configDir,
+      authDir,
+      paths,
+      manifest: recoveredDesired,
+      vendors: recovered.newVendors,
+    };
+  }
+
+  replacePrivateFileSet(nextEntries);
+  try {
+    validateExistingSetup(configDir, authDir, paths, nextDesired);
+    validateParableConfig(paths.parableConfig, configDir);
+  } catch (error) {
+    // Roll back to the last-known-good, still-canonical state rather than leaving a
+    // parable.toml that fails validation on disk.
+    replacePrivateFileSet(currentEntries);
+    throw error;
+  }
+  const added = nextVendors.filter((vendor) => !vendorsOnDisk.includes(vendor));
+  log(`updated private setup -> ${configDir}`);
+  log(`added vendors: ${added.join(", ")}`);
+  log(`selected vendors: ${nextVendors.join(", ")}`);
+  return { configDir, authDir, paths, manifest: nextDesired, vendors: nextVendors };
+}
+
 async function runSetup(argv, log) {
   const options = parseSetupOptions(argv);
   if (options.help) {
     log(setupUsage());
     return;
+  }
+  if (options.add_vendors !== undefined) {
+    const context = await runSetupAddVendors(options, log);
+    if (!options.no_auth) {
+      let status = scanAuthStatus(context.authDir);
+      for (const vendor of context.vendors) {
+        if (status.providers[vendor].present) {
+          log(`${vendor}: already authorized`);
+          continue;
+        }
+        runNativeAuth(context, vendor, false, log);
+        status = scanAuthStatus(context.authDir);
+      }
+      log("authorization complete; next: parable");
+    } else {
+      log("next: authorize each newly selected subscription, then run parable");
+    }
+    return context;
   }
   const configDir = path.resolve(options.config_dir || path.join(os.homedir(), ".config", "parable"));
   const authDir = path.resolve(path.join(os.homedir(), ".cli-proxy-api"));
