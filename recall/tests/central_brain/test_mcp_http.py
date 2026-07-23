@@ -297,22 +297,42 @@ class RemoteMcpContractTest(unittest.TestCase):
                 "RECALL_MCP_RESOURCE_URI": resource,
                 "RECALL_AUTHORIZATION_SERVERS":
                     "https://identity.synthetic.invalid/oauth",
+                "RECALL_HTTP_PROFILE": "public-mcp",
             },
             clear=False,
         ):
             store = PolicyStore()
             with McpHttpServer(store) as server:
-                metadata_path = "/.well-known/oauth-protected-resource/mcp"
-                status, _, raw = server.request(
-                    "GET", path=metadata_path, token=None
+                for metadata_path in (
+                    "/.well-known/oauth-protected-resource",
+                    "/.well-known/oauth-protected-resource/mcp",
+                    (
+                        "/.well-known/oauth-protected-resource/mcp/brains/"
+                        "tenant:company:parcha"
+                    ),
+                ):
+                    with self.subTest(metadata_path=metadata_path):
+                        status, _, raw = server.request(
+                            "GET", path=metadata_path, token=None
+                        )
+                        self.assertEqual(status, 200)
+                        metadata = json.loads(raw)
+                        self.assertEqual(metadata["resource"], resource)
+                        self.assertEqual(metadata["scopes_supported"], ["read"])
+                        self.assertEqual(
+                            metadata["authorization_servers"],
+                            ["https://identity.synthetic.invalid/oauth"],
+                        )
+
+                status, _, _ = server.request(
+                    "GET",
+                    path=(
+                        "/.well-known/oauth-protected-resource/mcp/brains/"
+                        "invalid/extra"
+                    ),
+                    token=None,
                 )
-                self.assertEqual(status, 200)
-                metadata = json.loads(raw)
-                self.assertEqual(metadata["resource"], resource)
-                self.assertEqual(
-                    metadata["authorization_servers"],
-                    ["https://identity.synthetic.invalid/oauth"],
-                )
+                self.assertEqual(status, 404)
 
                 status, headers, _ = server.request(
                     "POST", request("ping"), token=None
