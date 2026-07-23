@@ -231,9 +231,29 @@ roles, source grants, and revocation. The access token must have the exact
 `RECALL_MCP_RESOURCE_URI` audience, a `read` scope, and a provider-verified email
 for first-time invitation acceptance.
 
-In `/admin`, create a company invitation and send the teammate the displayed
-brain-specific MCP URL. Their MCP client discovers OAuth through RFC 9728,
-logs them in, and activates the pending invitation on the first request. See
+In `/admin`, create a company invitation. By default Recall displays the
+brain-specific MCP URL for manual sharing. To send an onboarding email with a
+brain-specific setup page, enable one server-side delivery provider:
+
+```text
+# Use the same isolated Descope project that authenticates Recall users.
+RECALL_INVITATION_EMAIL_PROVIDER=descope
+RECALL_DESCOPE_PROJECT_ID=P_replace_me
+RECALL_DESCOPE_MGMT_KEY=<server-side management key>
+
+# Or use a provider-neutral transactional email account.
+RECALL_INVITATION_EMAIL_PROVIDER=resend
+RECALL_INVITATION_EMAIL_FROM=Recall <recall@example.com>
+RECALL_INVITATION_EMAIL_API_KEY=<server-side API key>
+```
+
+Configuration is explicit and all-or-none. Recall never renders or logs either
+secret. A delivery failure leaves the email-bound authorization pending and is
+shown in the admin UI; re-inviting the same address safely replaces the pending
+invitation and retries delivery. The setup page contains current Codex and
+Claude Code install, MCP registration, and OAuth login commands. Their MCP
+client discovers OAuth through RFC 9728, logs them in, and activates the
+pending invitation on the first request. See
 [`docs/authorization-v1.md`](../../docs/authorization-v1.md) for the policy,
 generic OIDC contract, and revocation semantics.
 

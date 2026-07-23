@@ -227,7 +227,7 @@ function render() {
 $("#invite-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
-    await api("/admin/api/v1/invitations", {
+    const invitation = await api("/admin/api/v1/invitations", {
       method: "POST",
       body: JSON.stringify({
         tenant_id: $("#invite-brain").value,
@@ -236,7 +236,13 @@ $("#invite-form").addEventListener("submit", async (event) => {
       }),
     });
     $("#invite-email").value = "";
-    toast("Invitation ready. OAuth activates it automatically.");
+    if (invitation.delivery?.status === "sent") {
+      toast("Invitation emailed. OAuth activates access automatically.");
+    } else if (invitation.delivery?.status === "failed") {
+      toast("Invitation created, but email delivery failed. Re-invite to retry.");
+    } else {
+      toast("Invitation ready. Email delivery is not configured; copy the endpoint.");
+    }
     await load();
   } catch (error) {
     toast(`Invitation unchanged: ${error.message}`);

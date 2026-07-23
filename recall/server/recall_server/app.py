@@ -32,6 +32,7 @@ from .canonical import (
 from .canonical_retrieval import CanonicalRetrieval
 from .control import ControlError, ControlPlane
 from .db import BrainStore, IdempotencyConflict
+from .invitation_email import onboarding_page
 from .mcp import (
     SUPPORTED_PROTOCOL_VERSIONS,
     McpProtocolError,
@@ -55,6 +56,7 @@ ADMIN_CONNECTION_REVOKE = re.compile(
 ADMIN_INVITATION_REVOKE = re.compile(
     r"/admin/api/v1/invitations/([0-9a-f-]{36})/revoke\Z"
 )
+INVITATION_ONBOARDING = re.compile(r"/join/([0-9a-f-]{36})\Z")
 MCP_BRAIN_PATH = re.compile(
     r"/mcp/brains/([A-Za-z0-9][A-Za-z0-9:._@+-]{1,255})\Z"
 )
@@ -123,6 +125,22 @@ class Handler(BaseHTTPRequestHandler):
             "default-src 'none'; script-src 'self'; style-src 'self'; "
             "img-src 'self' data:; connect-src 'self'; form-action 'self'; "
             "base-uri 'none'; frame-ancestors 'none'",
+        )
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_public_html(self, body: bytes) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'none'; style-src 'unsafe-inline'; "
+            "base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
         )
         self.end_headers()
         self.wfile.write(body)
@@ -541,7 +559,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.public_edge_profile():
             allowed = allowed or (method == "POST" and path == WEBHOOK_PATH)
         if self.admin_web_enabled():
-            allowed = allowed or path == "/admin" or path.startswith("/admin/")
+            allowed = (
+                allowed
+                or path == "/admin"
+                or path.startswith("/admin/")
+                or bool(INVITATION_ONBOARDING.fullmatch(path))
+            )
         if os.environ.get("RECALL_CANONICAL_INGEST_PUBLIC") == "1":
             allowed = allowed or (
                 method == "POST"
@@ -599,6 +622,19 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(200, self.protected_resource_metadata())
             return
         if self.admin_web_enabled():
+            invitation_onboarding = INVITATION_ONBOARDING.fullmatch(parsed.path)
+            if invitation_onboarding:
+                if self.control_plane is None:
+                    self.send_json(404, {"error": "not found"})
+                    return
+                try:
+                    invitation = self.control_plane.invitation_onboarding(
+                        invitation_onboarding.group(1)
+                    )
+                    self.send_public_html(onboarding_page(invitation))
+                except ControlError as error:
+                    self.send_json(error.status, {"error": "not found"})
+                return
             configured_asset = admin_asset(parsed.path)
             if configured_asset is not None:
                 self.send_asset(*configured_asset)
