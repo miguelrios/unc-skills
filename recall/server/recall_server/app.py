@@ -402,6 +402,21 @@ class Handler(BaseHTTPRequestHandler):
         return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
     @staticmethod
+    def is_protected_resource_metadata_path(path: str, resource: str) -> bool:
+        if not resource:
+            return False
+        prefix = "/.well-known/oauth-protected-resource"
+        if path == prefix:
+            return True
+        if not path.startswith(prefix):
+            return False
+        resource_path = path[len(prefix) :]
+        configured_path = urlsplit(resource).path.rstrip("/")
+        return resource_path == configured_path or bool(
+            MCP_BRAIN_PATH.fullmatch(resource_path)
+        )
+
+    @staticmethod
     def protected_resource_metadata() -> dict[str, object]:
         resource = os.environ.get("RECALL_MCP_RESOURCE_URI", "").rstrip("/")
         servers = [
@@ -413,7 +428,7 @@ class Handler(BaseHTTPRequestHandler):
         ]
         result: dict[str, object] = {
             "resource": resource,
-            "scopes_supported": ["read", "forget"],
+            "scopes_supported": ["read"],
             "bearer_methods_supported": ["header"],
             "resource_name": "Recall brain",
         }
@@ -543,17 +558,13 @@ class Handler(BaseHTTPRequestHandler):
             return False
         mcp_path = path == "/mcp" or MCP_BRAIN_PATH.fullmatch(path)
         resource = os.environ.get("RECALL_MCP_RESOURCE_URI", "").rstrip("/")
-        metadata_path = (
-            urlsplit(self.protected_resource_metadata_uri(resource)).path
-            if resource
-            else None
-        )
+        metadata_path = self.is_protected_resource_metadata_path(path, resource)
         allowed = (method == "POST" and bool(mcp_path)) or (
             method == "GET"
             and (
                 bool(mcp_path)
                 or path in {"/healthz", "/readyz"}
-                or (metadata_path is not None and path == metadata_path)
+                or metadata_path
             )
         )
         if self.public_edge_profile():
@@ -613,12 +624,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.hide_non_public_route("GET", parsed.path):
             return
         resource = os.environ.get("RECALL_MCP_RESOURCE_URI", "").rstrip("/")
-        metadata_path = (
-            urlsplit(self.protected_resource_metadata_uri(resource)).path
-            if resource
-            else None
-        )
-        if metadata_path is not None and parsed.path == metadata_path:
+        if self.is_protected_resource_metadata_path(parsed.path, resource):
             self.send_json(200, self.protected_resource_metadata())
             return
         if self.admin_web_enabled():
