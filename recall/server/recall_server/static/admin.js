@@ -98,8 +98,13 @@ function escapeText(value) {
 }
 
 function brainOptions() {
-  return state.data.brains.map((brain) =>
-    `<option value="${escapeText(brain.tenant_id)}">${escapeText(brain.display_name)}</option>`
+  const brains = [...state.data.brains].sort((left, right) => {
+    const leftRank = left.brain_kind === "personal" ? 0 : 1;
+    const rightRank = right.brain_kind === "personal" ? 0 : 1;
+    return leftRank - rightRank || left.display_name.localeCompare(right.display_name);
+  });
+  return brains.map((brain) =>
+    `<option value="${escapeText(brain.tenant_id)}">${escapeText(brain.display_name)} · ${escapeText(brain.brain_kind)}</option>`
   ).join("");
 }
 
@@ -314,8 +319,17 @@ $("#google-form").addEventListener("submit", async (event) => {
       tenant_id: row.querySelector("select").value,
       privacy_mode: "scrub",
       selectors: {},
-    }));
+  }));
   if (!routes.length) return toast("Switch on at least one Google source.");
+  const brainKinds = new Map(
+    state.data.brains.map((brain) => [brain.tenant_id, brain.brain_kind])
+  );
+  if (
+    routes.some((route) => brainKinds.get(route.tenant_id) === "company")
+    && !window.confirm(
+      "Company brains are shared. Selected Google content will be available to authorized company members. Continue?"
+    )
+  ) return;
   const provider = $("#google-auth-provider").value;
   if (provider === "composio" && routes.length !== 1) {
     return toast("Hosted connections authorize one Google source at a time.");
