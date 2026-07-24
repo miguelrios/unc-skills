@@ -509,6 +509,66 @@ class CollectorTest(unittest.TestCase):
         ))
         collector.close()
 
+    def test_bulk_manifest_mode_does_not_raw_archive_dead_payloads(self) -> None:
+        transcript = self.root / "session.jsonl"
+        transcript.write_text(claude_line("oversized"))
+        archived = []
+
+        class Archive:
+            def put_raw(self, **kwargs):
+                archived.append(kwargs)
+                digest = hashlib.sha256(kwargs["payload"]).hexdigest()
+                return {
+                    "contract": "recall.artifact-ref.v1",
+                    "schema_version": 1,
+                    "tenant_id": kwargs["tenant_id"],
+                    "source_id": kwargs["source_id"],
+                    "artifact_id": "art_" + digest[:32],
+                    "storage_backend": "s3",
+                    "object_key": "objects/aa/" + digest,
+                    "content_sha256": digest,
+                    "size_bytes": len(kwargs["payload"]),
+                    "media_type": kwargs["media_type"],
+                    "encryption": "sse-s3",
+                    "version_id": "synthetic-version",
+                    "created_at": kwargs["created_at"],
+                }
+
+        class Writer:
+            def ingest(self, _events):
+                raise AssertionError("dead payload must not reach ingestion")
+
+        collector = Collector(
+            root=self.root,
+            harness="claude",
+            source_id="claude:linux:test",
+            spool_path=self.spool,
+            endpoint=self.endpoint,
+            token="test-token-not-a-secret",
+            archive=Archive(),
+            brain_writer=Writer(),
+            tenant_id="tenant:personal",
+            bulk_manifest_archive=True,
+        )
+        collector.scan()
+        archived_before_recovery = len(archived)
+        collector.db.execute(
+            "UPDATE outbox SET state='dead',envelope_json='{}'"
+        )
+        collector.db.commit()
+
+        result = collector.flush()
+
+        self.assertEqual(result["recovered"], 0)
+        self.assertEqual(result["unrecoverable"], 1)
+        self.assertEqual(result["errors"], 0)
+        self.assertEqual(len(archived), archived_before_recovery)
+        self.assertEqual(
+            collector.doctor(include_dead_letters=False)["dead"],
+            1,
+        )
+        collector.close()
+
     def test_canonical_flush_repairs_and_bounds_legacy_pending_rows(self) -> None:
         (self.root / "session.jsonl").write_text(
             "".join(claude_line(f"legacy pending row {index}") for index in range(51))

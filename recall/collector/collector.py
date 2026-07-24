@@ -761,6 +761,16 @@ class Collector:
         """Fault-injection boundary after a durable remote commit and before local ACK."""
 
     def recover_dead_payloads(self) -> dict:
+        if self.bulk_manifest_archive:
+            # Bulk mode deliberately archives only content-free manifests. A
+            # dead payload cannot be reconstructed through the legacy
+            # per-record raw archive path without violating that contract.
+            # Leave it classified for operator-visible follow-up instead of
+            # retrying the same impossible repair on every scan.
+            dead = self.db.execute(
+                "SELECT count(*) AS n FROM outbox WHERE state='dead'"
+            ).fetchone()["n"]
+            return {"recovered": 0, "unrecoverable": dead}
         result = {"recovered": 0, "unrecoverable": 0}
         rows = list(self.db.execute("SELECT * FROM outbox WHERE state='dead' ORDER BY id"))
         for row in rows:
