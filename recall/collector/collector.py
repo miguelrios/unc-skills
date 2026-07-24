@@ -253,7 +253,12 @@ class Collector:
         if not self.root.exists():
             return []
         pattern = "rollout-*.jsonl" if self.harness == "codex" else "*.jsonl"
-        return sorted(path for path in self.root.rglob(pattern) if path.is_file())
+        paths = [path for path in self.root.rglob(pattern) if path.is_file()]
+        return sorted(
+            paths,
+            key=lambda path: (path.stat().st_mtime_ns, str(path)),
+            reverse=True,
+        )
 
     def _file_key(self, path: Path) -> str:
         relative = str(path.relative_to(self.root))
