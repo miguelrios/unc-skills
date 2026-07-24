@@ -22,8 +22,13 @@ Each scan invocation is resumably bounded to 1,000 complete JSONL records or 20
 seconds by default. Override these closed deployment bounds with
 `--max-scan-records` and `--max-scan-seconds`. A bounded slice retains its exact
 byte checkpoint and scan membership, never infers deletion from unvisited files,
-and resumes before it advances to later work. An unchanged rerun reads no record
-bodies and queues no versions.
+and resumes before it advances to later work. Newest-modified sessions are
+visited first so a fresh installation becomes useful while older history
+backfills. An unchanged rerun reads no record bodies and queues no versions.
+
+Canonical archive writes use two concurrent workers by default. Operators can
+set `RECALL_ARCHIVE_WORKERS` or pass `--archive-workers` from 1 through 16 for a
+temporary backfill, subject to the archive and ingest service capacity.
 
 `doctor` reports file coverage, parse/dead-letter rate, pending/acked records,
 committed files, acknowledgement latency p95, last successful Brain ACK, bounded

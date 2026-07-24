@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import tempfile
 import threading
 import time
@@ -90,6 +91,17 @@ class CollectorTest(unittest.TestCase):
     def test_default_archive_concurrency_leaves_capacity_for_ingest(self) -> None:
         collector = self.collector()
         self.assertEqual(collector.archive_workers, 2)
+        collector.close()
+
+    def test_discovery_prioritizes_newest_sessions_for_backfill_freshness(self) -> None:
+        older = self.root / "older.jsonl"
+        newer = self.root / "newer.jsonl"
+        older.write_text(claude_line("older"))
+        newer.write_text(claude_line("newer"))
+        os.utime(older, ns=(1_000_000_000, 1_000_000_000))
+        os.utime(newer, ns=(2_000_000_000, 2_000_000_000))
+        collector = self.collector()
+        self.assertEqual(collector.discover(), [newer, older])
         collector.close()
 
     def test_committed_cursor_waits_for_ack_and_survives_restart(self) -> None:
