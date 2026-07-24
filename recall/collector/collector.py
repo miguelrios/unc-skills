@@ -21,6 +21,7 @@ MAX_BATCH_BYTES = 8_000_000
 MAX_CANONICAL_BATCH_EVENTS = 500
 DEFAULT_MAX_SCAN_RECORDS = 1_000
 DEFAULT_MAX_SCAN_SECONDS = 20.0
+OVERSIZED_PROJECTION_TEXT_CHARS = 250_000
 SENSITIVE_KEY = re.compile(r"(?:litellm.*master.*key|api[_-]?key|password|secret|authorization|bearer|access[_-]?token|refresh[_-]?token|token)$", re.I)
 SENSITIVE_LINE = re.compile(
     r"(?i)\b(LITELLM_MASTER_KEY|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|password|secret|authorization|bearer|access[_-]?token|refresh[_-]?token|token|key)"
@@ -384,6 +385,78 @@ class Collector:
             for record in records
         ]
 
+    def _bounded_record_envelope(
+        self,
+        *,
+        path: Path,
+        native_id: str,
+        content: dict[str, Any],
+        occurred_at: str,
+        start: int,
+        end: int,
+        artifact_ref: dict[str, Any] | None = None,
+        artifact_member: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        envelope = self._envelope(
+            path,
+            native_id,
+            "transcript_record",
+            content,
+            occurred_at,
+            start,
+            end,
+            artifact_ref,
+            artifact_member,
+        )
+        target_bytes = max(1_024, int(MAX_BATCH_BYTES * 0.9))
+        if len(canonical_json(envelope)) <= target_bytes or self.archive is None:
+            return envelope
+
+        full_payload = canonical_json(sanitize(content))
+        full_digest = hashlib.sha256(full_payload).hexdigest()
+        full_artifact = self._archive_raw(
+            native_id=native_id + ":full",
+            payload=full_payload,
+            occurred_at=occurred_at,
+            media_type="application/json",
+        )
+        if full_artifact is None:
+            return envelope
+
+        rendered = full_payload.decode("utf-8")
+        text_chars = min(
+            OVERSIZED_PROJECTION_TEXT_CHARS,
+            max(0, target_bytes // 4),
+        )
+        while True:
+            projection = {
+                "contract": "recall.oversized-projection.v1",
+                "schema_version": 1,
+                "_recall_collector_generation": content.get(
+                    "_recall_collector_generation",
+                    0,
+                ),
+                "content_fidelity": "head_tail",
+                "full_record_available": True,
+                "full_content_sha256": full_digest,
+                "full_size_bytes": len(full_payload),
+                "head": rendered[:text_chars],
+                "tail": rendered[-text_chars:] if text_chars else "",
+            }
+            candidate = self._envelope(
+                path,
+                native_id,
+                "transcript_record",
+                projection,
+                occurred_at,
+                start,
+                end,
+                full_artifact,
+            )
+            if len(canonical_json(candidate)) <= target_bytes or text_chars == 0:
+                return candidate
+            text_chars //= 2
+
     def _versioned_record_content(self, native_id: str, content: dict, *, was_active: bool) -> dict:
         clean = sanitize(content)
         base_sha = hashlib.sha256(canonical_json(clean)).hexdigest()
@@ -521,16 +594,15 @@ class Collector:
                         content,
                         was_active=native_id in old_active,
                     )
-                    envelope = self._envelope(
-                        path,
-                        native_id,
-                        "transcript_record",
-                        versioned_content,
-                        occurred_at,
-                        line_start,
-                        line_end,
-                        artifact_ref,
-                        artifact_member,
+                    envelope = self._bounded_record_envelope(
+                        path=path,
+                        native_id=native_id,
+                        content=versioned_content,
+                        occurred_at=occurred_at,
+                        start=line_start,
+                        end=line_end,
+                        artifact_ref=artifact_ref,
+                        artifact_member=artifact_member,
                     )
                     if self._queue(path, envelope, line_end):
                         summary["records_queued"] += 1
@@ -761,16 +833,6 @@ class Collector:
         """Fault-injection boundary after a durable remote commit and before local ACK."""
 
     def recover_dead_payloads(self) -> dict:
-        if self.bulk_manifest_archive:
-            # Bulk mode deliberately archives only content-free manifests. A
-            # dead payload cannot be reconstructed through the legacy
-            # per-record raw archive path without violating that contract.
-            # Leave it classified for operator-visible follow-up instead of
-            # retrying the same impossible repair on every scan.
-            dead = self.db.execute(
-                "SELECT count(*) AS n FROM outbox WHERE state='dead'"
-            ).fetchone()["n"]
-            return {"recovered": 0, "unrecoverable": dead}
         result = {"recovered": 0, "unrecoverable": 0}
         rows = list(self.db.execute("SELECT * FROM outbox WHERE state='dead' ORDER BY id"))
         for row in rows:
@@ -794,19 +856,28 @@ class Collector:
                     content.get("timestamp"),
                     path.stat().st_mtime,
                 )
-                artifact_ref = self._archive_raw(
+                envelope = self._bounded_record_envelope(
+                    path=path,
                     native_id=row["native_id"],
-                    payload=raw,
+                    content=versioned,
                     occurred_at=occurred_at,
-                )
-                envelope = self._envelope(
-                    path, row["native_id"], "transcript_record", versioned,
-                    occurred_at, row["start_offset"], row["end_offset"],
-                    artifact_ref,
+                    start=row["start_offset"],
+                    end=row["end_offset"],
                 )
                 self.db.execute(
                     "UPDATE outbox SET state='pending',content_sha256=?,envelope_json=?,queued_at=?,acked_at=NULL,receipt=NULL WHERE id=?",
                     (envelope["content_sha256"], canonical_json(envelope).decode(), time.time(), row["id"]),
+                )
+                self.db.execute(
+                    """UPDATE active_records
+                       SET content_sha256=?,receipt=NULL
+                       WHERE path=? AND native_id=? AND content_sha256=?""",
+                    (
+                        envelope["content_sha256"],
+                        row["path"],
+                        row["native_id"],
+                        row["content_sha256"],
+                    ),
                 )
                 self.db.execute(
                     "DELETE FROM dead_letters WHERE path=? AND error_code='PayloadTooLarge'",
