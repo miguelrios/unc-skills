@@ -509,10 +509,18 @@ class CollectorTest(unittest.TestCase):
         ))
         collector.close()
 
-    def test_bulk_manifest_mode_does_not_raw_archive_dead_payloads(self) -> None:
+    def test_bulk_manifest_mode_recovers_oversized_dead_payload(self) -> None:
         transcript = self.root / "session.jsonl"
-        transcript.write_text(claude_line("oversized"))
+        canary = "synthetic-secret-value-1234567890"
+        transcript.write_text(
+            claude_line(
+                "keep-start api_key=" + canary + " "
+                + ("x" * 10_000)
+                + " keep-end"
+            )
+        )
         archived = []
+        ingested = []
 
         class Archive:
             def put_raw(self, **kwargs):
@@ -535,8 +543,18 @@ class CollectorTest(unittest.TestCase):
                 }
 
         class Writer:
-            def ingest(self, _events):
-                raise AssertionError("dead payload must not reach ingestion")
+            def ingest(self, events):
+                ingested.extend(events)
+                return {
+                    "status": "committed",
+                    "inserted": len(events),
+                    "duplicate_events": 0,
+                    "receipts": [
+                        f"recall://{event['source_id']}/{event['native_id']}?rev=1"
+                        for event in events
+                    ],
+                    "replay": False,
+                }
 
         collector = Collector(
             root=self.root,
@@ -549,6 +567,7 @@ class CollectorTest(unittest.TestCase):
             brain_writer=Writer(),
             tenant_id="tenant:personal",
             bulk_manifest_archive=True,
+            privacy=PrivacyPolicy(mode="scrub"),
         )
         collector.scan()
         archived_before_recovery = len(archived)
@@ -557,16 +576,45 @@ class CollectorTest(unittest.TestCase):
         )
         collector.db.commit()
 
-        result = collector.flush()
+        with (
+            mock.patch("collector.collector.MAX_BATCH_BYTES", 4_000),
+            mock.patch(
+                "collector.collector.OVERSIZED_PROJECTION_TEXT_CHARS",
+                100,
+            ),
+        ):
+            result = collector.flush()
 
-        self.assertEqual(result["recovered"], 0)
-        self.assertEqual(result["unrecoverable"], 1)
+        self.assertEqual(result["recovered"], 1)
+        self.assertEqual(result["unrecoverable"], 0)
         self.assertEqual(result["errors"], 0)
-        self.assertEqual(len(archived), archived_before_recovery)
+        self.assertEqual(len(archived), archived_before_recovery + 1)
+        full = archived[-1]
+        self.assertEqual(full["media_type"], "application/json")
+        self.assertNotIn(canary.encode(), full["payload"])
+        self.assertIn(b"keep-start", full["payload"])
+        self.assertIn(b"keep-end", full["payload"])
+        self.assertEqual(len(ingested), 1)
+        event = ingested[0]
+        self.assertEqual(
+            event["content"]["contract"],
+            "recall.oversized-projection.v1",
+        )
+        self.assertIn("keep-start", event["content"]["head"])
+        self.assertIn("keep-end", event["content"]["tail"])
+        self.assertEqual(
+            event["provenance"]["artifact_ref"]["artifact_id"],
+            "art_" + hashlib.sha256(full["payload"]).hexdigest()[:32],
+        )
         self.assertEqual(
             collector.doctor(include_dead_letters=False)["dead"],
-            1,
+            0,
         )
+        active = collector.db.execute(
+            "SELECT content_sha256,receipt FROM active_records"
+        ).fetchone()
+        self.assertEqual(active["content_sha256"], event["content_sha256"])
+        self.assertIsNotNone(active["receipt"])
         collector.close()
 
     def test_canonical_flush_repairs_and_bounds_legacy_pending_rows(self) -> None:
