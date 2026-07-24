@@ -367,7 +367,7 @@ class CollectorTest(unittest.TestCase):
         self.assertNotIn(canary, json.dumps(AckServer.received))
         collector.close()
 
-    def test_canonical_runtime_archives_raw_before_safe_spool_and_ack(self) -> None:
+    def test_canonical_runtime_scrubs_before_archive_spool_and_ack(self) -> None:
         canary = "synthetic-canonical-collector-canary-96"
         (self.root / "session.jsonl").write_text(
             claude_line(f"keep context api_key={canary} after")
@@ -424,11 +424,89 @@ class CollectorTest(unittest.TestCase):
         self.assertEqual(collector.scan()["records_queued"], 1)
         self.assertEqual(collector.flush()["acked"], 1)
         self.assertEqual(len(archived), 1)
-        self.assertIn(canary.encode(), archived[0]["payload"])
+        self.assertNotIn(canary.encode(), archived[0]["payload"])
+        self.assertIn(b"keep context", archived[0]["payload"])
         self.assertEqual(len(ingested), 1)
         self.assertIn("artifact_ref", ingested[0]["provenance"])
         self.assertNotIn(canary, json.dumps(ingested))
         self.assertNotIn(canary.encode(), self.spool.read_bytes())
+        collector.close()
+
+    def test_bulk_manifest_archive_is_content_free_and_amortized(self) -> None:
+        (self.root / "session.jsonl").write_text(
+            "".join(claude_line(f"private-record-{index}") for index in range(120))
+        )
+        archived = []
+        ingested = []
+
+        class Archive:
+            def put_raw(self, **kwargs):
+                archived.append(kwargs)
+                digest = hashlib.sha256(kwargs["payload"]).hexdigest()
+                return {
+                    "contract": "recall.artifact-ref.v1",
+                    "schema_version": 1,
+                    "tenant_id": kwargs["tenant_id"],
+                    "source_id": kwargs["source_id"],
+                    "artifact_id": "art_" + digest[:32],
+                    "storage_backend": "s3",
+                    "object_key": "objects/aa/" + digest,
+                    "content_sha256": digest,
+                    "size_bytes": len(kwargs["payload"]),
+                    "media_type": kwargs["media_type"],
+                    "encryption": "sse-s3",
+                    "version_id": "synthetic-version",
+                    "created_at": kwargs["created_at"],
+                }
+
+        class Writer:
+            def ingest(self, events):
+                ingested.extend(events)
+                return {
+                    "status": "committed",
+                    "inserted": len(events),
+                    "duplicate_events": 0,
+                    "receipts": [
+                        f"recall://{event['source_id']}/{event['native_id']}?rev=1"
+                        for event in events
+                    ],
+                    "replay": False,
+                }
+
+        collector = Collector(
+            root=self.root,
+            harness="claude",
+            source_id="claude:linux:test",
+            spool_path=self.spool,
+            endpoint=self.endpoint,
+            token="test-token-not-a-secret",
+            principal_id="owner",
+            privacy=PrivacyPolicy(mode="scrub"),
+            brain_writer=Writer(),
+            archive=Archive(),
+            tenant_id="tenant:personal",
+            bulk_manifest_archive=True,
+            bulk_bundle_records=50,
+        )
+        self.assertEqual(collector.scan()["records_queued"], 120)
+        self.assertEqual(collector.flush()["acked"], 120)
+        self.assertEqual(len(archived), 3)
+        self.assertEqual(len(ingested), 120)
+        for item in archived:
+            self.assertEqual(
+                item["media_type"],
+                "application/vnd.recall.bulk-manifest+json",
+            )
+            self.assertNotIn(b"private-record", item["payload"])
+        artifact_ids = {
+            event["provenance"]["artifact_ref"]["artifact_id"]
+            for event in ingested
+        }
+        self.assertEqual(len(artifact_ids), 3)
+        self.assertTrue(all(
+            event["provenance"]["artifact_member"]["content_sha256"]
+            for event in ingested
+        ))
         collector.close()
 
     def test_canonical_flush_repairs_and_bounds_legacy_pending_rows(self) -> None:
@@ -503,7 +581,7 @@ class CollectorTest(unittest.TestCase):
         self.assertEqual(canonical.flush()["acked"], 51)
         self.assertEqual(len(archived), 51)
         self.assertEqual(len(ingested), 51)
-        self.assertEqual(batch_sizes, [50, 1])
+        self.assertEqual(batch_sizes, [51])
         self.assertTrue(all(
             "artifact_ref" in event["provenance"]
             for event in ingested
