@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from typing import Any, Protocol
 from urllib.parse import unquote, urlsplit
@@ -292,6 +293,7 @@ class CanonicalPlane:
         artifact_ref: dict[str, Any],
         envelope: dict[str, Any],
         text_redacted: str,
+        _connection: Any | None = None,
     ) -> dict[str, Any]:
         self._validate_host_identity(tenant_id, principal_id, envelope.get("source_id"))
         if not isinstance(connector_id, str) or not IDENTITY_RE.fullmatch(connector_id):
@@ -319,8 +321,9 @@ class CanonicalPlane:
         ):
             raise CanonicalLifecycleError("canonical_lineage_invalid")
         raw_sha256 = artifact["content_sha256"]
+        event_sha256 = event["content_sha256"]
         identity_sha256 = _identity_sha256(tenant_id, source_id, native_id)
-        event_id = _opaque("evt", tenant_id, source_id, native_id, raw_sha256)
+        event_id = _opaque("evt", tenant_id, source_id, native_id, event_sha256)
         job_id = _opaque("job", tenant_id, source_id, connector_id, event_id)
         document_id = _opaque("doc", tenant_id, source_id, event_id)
         text_sha256 = hashlib.sha256(text_redacted.encode()).hexdigest()
@@ -330,8 +333,18 @@ class CanonicalPlane:
             else canonical_text_chunks(text_redacted)
         )
 
-        with self.store.connect() as conn:
-            with conn.transaction():
+        connection_context = (
+            self.store.connect()
+            if _connection is None
+            else nullcontext(_connection)
+        )
+        with connection_context as conn:
+            transaction_context = (
+                conn.transaction()
+                if _connection is None
+                else nullcontext()
+            )
+            with transaction_context:
                 self._register_source(
                     conn,
                     tenant_id=tenant_id,
@@ -391,7 +404,7 @@ class CanonicalPlane:
                     """SELECT revision FROM canonical_events
                        WHERE tenant_id=%s AND source_id=%s
                          AND native_id=%s AND content_sha256=%s""",
-                    (tenant_id, source_id, native_id, raw_sha256),
+                    (tenant_id, source_id, native_id, event_sha256),
                 ).fetchone()
                 if existing:
                     revision = existing["revision"]
@@ -430,7 +443,7 @@ class CanonicalPlane:
                     (
                         tenant_id, source_id, event_id, native_id,
                         event.get("native_parent_id"), artifact["artifact_id"], job_id,
-                        event["kind"], raw_sha256, revision, event["occurred_at"],
+                        event["kind"], event_sha256, revision, event["occurred_at"],
                         event["observed_at"], is_tombstone, json.dumps(event),
                     ),
                 )
@@ -473,7 +486,7 @@ class CanonicalPlane:
                            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,true,%s,%s)""",
                         (
                             tenant_id, source_id, document_id, event_id,
-                            artifact["artifact_id"], native_id, raw_sha256, revision,
+                            artifact["artifact_id"], native_id, event_sha256, revision,
                             text_redacted, text_sha256,
                         ),
                     )
@@ -536,25 +549,32 @@ class CanonicalPlane:
         if not isinstance(events, list) or not 1 <= len(events) <= 500:
             raise CanonicalLifecycleError("canonical_batch_invalid")
         results = []
-        for envelope in events:
-            provenance = envelope.get("provenance", {})
-            connector_id = provenance.get("connector_id")
-            artifact_ref = provenance.get("artifact_ref")
-            text_redacted = json.dumps(
-                envelope.get("content"),
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-                allow_nan=False,
-            )
-            results.append(self.ingest_document(
-                tenant_id=tenant_id,
-                principal_id=principal_id,
-                connector_id=connector_id,
-                artifact_ref=artifact_ref,
-                envelope=envelope,
-                text_redacted="" if envelope.get("kind") == "tombstone" else text_redacted,
-            ))
+        with self.store.connect() as connection:
+            with connection.transaction():
+                for envelope in events:
+                    provenance = envelope.get("provenance", {})
+                    connector_id = provenance.get("connector_id")
+                    artifact_ref = provenance.get("artifact_ref")
+                    text_redacted = json.dumps(
+                        envelope.get("content"),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                        allow_nan=False,
+                    )
+                    results.append(self.ingest_document(
+                        tenant_id=tenant_id,
+                        principal_id=principal_id,
+                        connector_id=connector_id,
+                        artifact_ref=artifact_ref,
+                        envelope=envelope,
+                        text_redacted=(
+                            ""
+                            if envelope.get("kind") == "tombstone"
+                            else text_redacted
+                        ),
+                        _connection=connection,
+                    ))
         return {
             "status": "committed",
             "inserted": sum(result["inserted"] for result in results),
@@ -583,8 +603,15 @@ class CanonicalPlane:
                  USING(tenant_id,source_id,artifact_id)
                WHERE event.tenant_id=%s AND event.source_id=%s
                  AND event.native_id=ANY(%s)
+                 AND NOT EXISTS (
+                     SELECT 1 FROM canonical_events retained
+                     WHERE retained.tenant_id=event.tenant_id
+                       AND retained.source_id=event.source_id
+                       AND retained.artifact_id=event.artifact_id
+                       AND NOT (retained.native_id=ANY(%s))
+                 )
                ORDER BY artifact.artifact_id""",
-            (tenant_id, source_id, native_ids),
+            (tenant_id, source_id, native_ids, native_ids),
         ).fetchall()
         return [
             {
@@ -741,8 +768,15 @@ class CanonicalPlane:
                          AND artifact.source_id=event.source_id
                          AND artifact.artifact_id=event.artifact_id
                          AND event.tenant_id=%s AND event.source_id=%s
-                         AND event.native_id=ANY(%s) AND artifact.state='live'""",
-                    (tenant_id, source_id, native_ids),
+                         AND event.native_id=ANY(%s) AND artifact.state='live'
+                         AND NOT EXISTS (
+                             SELECT 1 FROM canonical_events retained
+                             WHERE retained.tenant_id=event.tenant_id
+                               AND retained.source_id=event.source_id
+                               AND retained.artifact_id=event.artifact_id
+                               AND NOT (retained.native_id=ANY(%s))
+                         )""",
+                    (tenant_id, source_id, native_ids, native_ids),
                 )
 
         try:
