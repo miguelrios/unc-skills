@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import os
@@ -414,11 +415,16 @@ class Collector:
 
         full_payload = canonical_json(sanitize(content))
         full_digest = hashlib.sha256(full_payload).hexdigest()
+        compressed_payload = gzip.compress(
+            full_payload,
+            compresslevel=6,
+            mtime=0,
+        )
         full_artifact = self._archive_raw(
             native_id=native_id + ":full",
-            payload=full_payload,
+            payload=compressed_payload,
             occurred_at=occurred_at,
-            media_type="application/json",
+            media_type="application/vnd.recall.oversized-record+gzip",
         )
         if full_artifact is None:
             return envelope
@@ -440,6 +446,8 @@ class Collector:
                 "full_record_available": True,
                 "full_content_sha256": full_digest,
                 "full_size_bytes": len(full_payload),
+                "archive_encoding": "gzip",
+                "archive_size_bytes": len(compressed_payload),
                 "head": rendered[:text_chars],
                 "tail": rendered[-text_chars:] if text_chars else "",
             }

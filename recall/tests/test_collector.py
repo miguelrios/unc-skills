@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 import hashlib
 import os
@@ -590,10 +591,14 @@ class CollectorTest(unittest.TestCase):
         self.assertEqual(result["errors"], 0)
         self.assertEqual(len(archived), archived_before_recovery + 1)
         full = archived[-1]
-        self.assertEqual(full["media_type"], "application/json")
-        self.assertNotIn(canary.encode(), full["payload"])
-        self.assertIn(b"keep-start", full["payload"])
-        self.assertIn(b"keep-end", full["payload"])
+        self.assertEqual(
+            full["media_type"],
+            "application/vnd.recall.oversized-record+gzip",
+        )
+        uncompressed = gzip.decompress(full["payload"])
+        self.assertNotIn(canary.encode(), uncompressed)
+        self.assertIn(b"keep-start", uncompressed)
+        self.assertIn(b"keep-end", uncompressed)
         self.assertEqual(len(ingested), 1)
         event = ingested[0]
         self.assertEqual(
@@ -602,6 +607,15 @@ class CollectorTest(unittest.TestCase):
         )
         self.assertIn("keep-start", event["content"]["head"])
         self.assertIn("keep-end", event["content"]["tail"])
+        self.assertEqual(event["content"]["archive_encoding"], "gzip")
+        self.assertEqual(
+            event["content"]["full_content_sha256"],
+            hashlib.sha256(uncompressed).hexdigest(),
+        )
+        self.assertEqual(
+            event["content"]["archive_size_bytes"],
+            len(full["payload"]),
+        )
         self.assertEqual(
             event["provenance"]["artifact_ref"]["artifact_id"],
             "art_" + hashlib.sha256(full["payload"]).hexdigest()[:32],
