@@ -18,21 +18,20 @@ Miguel's collection of portable Agent Skills for Claude Code, Codex, and pi.
 The skill payloads are canonical `skills/<name>/SKILL.md` directories. Harness-specific
 manifests package those same files; there are no Claude/Codex/pi forks to drift apart.
 
-## Instruction snippets (not skills)
+## Instruction snippets
 
 [`snippets/`](snippets/) contains harness-neutral blocks for always-loaded agent
-instruction files (`AGENTS.md`, `CLAUDE.md`). They are not skills: nothing
-discovers or invokes them, and none of the install commands below apply. A
-snippet shapes every session's behavior unconditionally — use one when a rule
-must hold even in sessions where no skill is loaded.
+instruction files (`AGENTS.md`, `CLAUDE.md`). Skills load on demand through
+discovery or invocation; a snippet applies to every session unconditionally.
+Use a snippet when a rule must hold even in sessions where no skill is loaded.
 
 | Snippet | Purpose |
 |---|---|
 | [`effective-comms`](snippets/effective-comms/) | Makes responses answer-first, concrete, structured, and brief by default, and bans marketing rhetoric in technical writing, while preserving safety and completeness exceptions. |
 
-Install by pasting the snippet's `AGENTS.md` block near the top of your root
-instruction file. Keep the `<!-- name:start/end -->` markers so tooling can
-update the block in place.
+The install commands below cover skills only. To install a snippet, paste its
+`AGENTS.md` block near the top of your root instruction file and keep the
+`<!-- name:start/end -->` markers so tooling can update the block in place.
 
 ## Install with skills.sh
 
