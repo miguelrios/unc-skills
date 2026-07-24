@@ -367,6 +367,13 @@ the durable canonical chunk table is the queue and the unique embedding key is
 the acknowledgement. Give this worker the same database and embedding settings
 as the API service, but no collector or MCP credentials.
 
+Managed providers can parallelize document batches with
+`RECALL_EMBEDDING_WORKERS=2` through `8`; the default is `1`, and the local TEI
+sidecar remains deliberately single-request. Results are reassembled in input
+order before their idempotent database write. Keep query embedding on the
+ordinary bounded path and raise worker concurrency only within the provider's
+document rate limits.
+
 `RECALL_DATABASE_URL` must be a PlanetScale application role URL with
 `sslmode=verify-full` and an explicit trust root. Prefer
 `sslrootcert=/etc/ssl/certs/ca-certificates.crt` in the pinned Linux container;

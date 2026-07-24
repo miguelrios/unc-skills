@@ -254,6 +254,7 @@ class SemanticRuntimeContractTest(unittest.TestCase):
         self.assertEqual(runtime.embedding_protocol, "voyage")
         self.assertEqual(runtime.revision, "voyage-synthetic")
         self.assertEqual(runtime.embedding_batch_size, 64)
+        self.assertEqual(runtime.embedding_workers, 1)
         self.assertEqual(runtime.query_prefix, "")
 
     def test_query_embedding_has_a_hard_wall_clock_deadline(self) -> None:
@@ -307,6 +308,65 @@ class SemanticRuntimeContractTest(unittest.TestCase):
                 revision="voyage-synthetic-v1",
                 dimensions=512,
                 embedding_batch_size=513,
+            )
+
+    def test_managed_document_batches_run_concurrently_and_keep_order(
+        self,
+    ) -> None:
+        runtime = SemanticRuntime(
+            embedding_protocol="voyage",
+            embedding_url="https://api.voyage.example",
+            embedding_approved_url="https://api.voyage.example",
+            embedding_key_env="VOYAGE_API_KEY",
+            model="voyage-synthetic",
+            revision="voyage-synthetic-v1",
+            dimensions=64,
+            embedding_batch_size=1,
+            embedding_workers=2,
+        )
+        barrier = threading.Barrier(2)
+
+        def concurrent_batch(batch, *, input_type, headers):
+            barrier.wait(timeout=1)
+            return [[float(batch[0])] * 64]
+
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"VOYAGE_API_KEY": "short-lived-synthetic-embedding-key"},
+            ),
+            mock.patch.object(
+                runtime,
+                "_embed_managed_batch",
+                side_effect=concurrent_batch,
+            ),
+        ):
+            vectors = runtime.embed_documents(["1", "2"])
+
+        self.assertEqual(vectors[0][0], 1.0)
+        self.assertEqual(vectors[1][0], 2.0)
+
+    def test_embedding_worker_concurrency_is_closed_and_managed_only(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(ValueError, "between 1 and 8"):
+            SemanticRuntime(
+                embedding_protocol="voyage",
+                embedding_url="https://api.voyage.example",
+                embedding_approved_url="https://api.voyage.example",
+                embedding_key_env="VOYAGE_API_KEY",
+                model="voyage-synthetic",
+                revision="voyage-synthetic-v1",
+                dimensions=512,
+                embedding_workers=9,
+            )
+        with self.assertRaisesRegex(ValueError, "must be one"):
+            SemanticRuntime(
+                embedding_url="http://127.0.0.1:8081",
+                model="synthetic-embedding",
+                revision=DEFAULT_EMBEDDING_REVISION,
+                dimensions=512,
+                embedding_workers=2,
             )
 
     def test_managed_embedding_batch_splits_bounded_upstream_failures(self) -> None:
