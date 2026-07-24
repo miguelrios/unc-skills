@@ -16,6 +16,7 @@ from .canonical_retrieval import CanonicalRetrieval
 from .control import ControlPlane, SecretBox
 from .db import BrainStore
 from .deployment import DeploymentManifestError, load_manifest, preview
+from .embedding_worker import run_canonical_embedding_worker
 from .federation import QUALITY_SCORES, SOURCE_FAMILIES
 from .live_providers import (
     LiveProviderError,
@@ -88,6 +89,16 @@ def main() -> None:
     canonical_embeddings.add_argument("--tenant")
     canonical_embeddings.add_argument("--batch-size", type=int, default=100)
     canonical_embeddings.add_argument("--max-batches", type=int, default=10)
+    canonical_embedding_worker = sub.add_parser("canonical-embedding-worker")
+    canonical_embedding_worker.add_argument("--tenant")
+    canonical_embedding_worker.add_argument("--batch-size", type=int, default=128)
+    canonical_embedding_worker.add_argument(
+        "--max-batches-per-cycle", type=int, default=10
+    )
+    canonical_embedding_worker.add_argument(
+        "--interval-seconds", type=float, default=5
+    )
+    canonical_embedding_worker.add_argument("--once", action="store_true")
     sub.add_parser("export")
     conformance = sub.add_parser("mcp-conformance")
     conformance.add_argument("--config", type=Path, required=True)
@@ -370,6 +381,20 @@ def main() -> None:
                     tenant_id=args.tenant,
                     batch_size=args.batch_size,
                     max_batches=args.max_batches,
+                ),
+                sort_keys=True,
+            )
+        )
+    elif args.command == "canonical-embedding-worker":
+        print(
+            json.dumps(
+                run_canonical_embedding_worker(
+                    CanonicalRetrieval(store),
+                    tenant_id=args.tenant,
+                    batch_size=args.batch_size,
+                    max_batches_per_cycle=args.max_batches_per_cycle,
+                    interval_seconds=args.interval_seconds,
+                    once=args.once,
                 ),
                 sort_keys=True,
             )

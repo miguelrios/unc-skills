@@ -352,6 +352,21 @@ spools survive image restarts. Every worker replica must receive the same
 database, R2, embedding, and control-encryption settings as the API service; it
 does not listen on a network port.
 
+Run canonical embeddings as a separate worker from that same immutable image:
+
+```bash
+python -m recall_server.cli canonical-embedding-worker \
+  --tenant tenant:company:example \
+  --batch-size 128 --max-batches-per-cycle 10 --interval-seconds 5
+```
+
+Canonical ingest commits do not call an embedding provider. The worker drains
+unembedded current chunks in bounded, idempotent cycles, so provider latency or
+an outage cannot delay or fail source ingestion. Restarting the worker is safe:
+the durable canonical chunk table is the queue and the unique embedding key is
+the acknowledgement. Give this worker the same database and embedding settings
+as the API service, but no collector or MCP credentials.
+
 `RECALL_DATABASE_URL` must be a PlanetScale application role URL with
 `sslmode=verify-full` and an explicit trust root. Prefer
 `sslrootcert=/etc/ssl/certs/ca-certificates.crt` in the pinned Linux container;

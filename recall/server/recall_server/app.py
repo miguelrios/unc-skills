@@ -1027,18 +1027,6 @@ class Handler(BaseHTTPRequestHandler):
                     principal_id=principal_id,
                     events=events,
                 )
-                if self.canonical_retrieval is not None:
-                    try:
-                        self.canonical_retrieval.embed_pending(
-                            tenant_id=tenant_id,
-                            batch_size=min(500, max(1, len(events))),
-                            max_batches=1,
-                        )
-                    except Exception as exc:
-                        LOG.warning(
-                            "canonical embedding deferred type=%s",
-                            type(exc).__name__,
-                        )
                 with COUNTER_LOCK:
                     COUNTERS[
                         "ingest_replays"
