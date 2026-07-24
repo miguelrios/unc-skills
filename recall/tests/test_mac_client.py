@@ -19,8 +19,10 @@ from client.mac import (
     CanonicalBrainWriter,
     CanonicalClientError,
     ExportImporter,
+    MAX_INGEST_BYTES,
     MemoryClient,
     PrivacyError,
+    canonical_json,
     dry_run_manifest,
     load_file_token,
 )
@@ -271,6 +273,23 @@ class CanonicalV2ClientTest(unittest.TestCase):
         }
         archive = CanonicalArchiveClient(**common)
         writer = CanonicalBrainWriter(**common)
+        maximum_events_payload = writer.max_events_payload_bytes()
+        empty_body = canonical_json({
+            "tenant_id": common["tenant_id"],
+            "principal_id": common["principal_id"],
+            "source_id": common["source_id"],
+            "events_base64": "",
+        })
+        self.assertLessEqual(
+            len(empty_body)
+            + len(base64.b64encode(b"x" * maximum_events_payload)),
+            MAX_INGEST_BYTES,
+        )
+        self.assertGreater(
+            len(empty_body)
+            + len(base64.b64encode(b"x" * (maximum_events_payload + 1))),
+            MAX_INGEST_BYTES,
+        )
         with mock.patch("client.mac.open_no_redirect", side_effect=open_request):
             reference = archive.put_raw(
                 tenant_id="tenant:personal",

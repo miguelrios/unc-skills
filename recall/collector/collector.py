@@ -409,7 +409,7 @@ class Collector:
             artifact_ref,
             artifact_member,
         )
-        target_bytes = max(1_024, int(MAX_BATCH_BYTES * 0.9))
+        target_bytes = max(1_024, int(self._max_batch_bytes() * 0.9))
         if len(canonical_json(envelope)) <= target_bytes or self.archive is None:
             return envelope
 
@@ -1045,6 +1045,7 @@ class Collector:
     def flush(self) -> dict:
         recovery = self.recover_dead_payloads() if self.shard_index == 0 else {"recovered": 0, "unrecoverable": 0}
         result = {"batches": 0, "acked": 0, "replayed_batches": 0, "errors": 0, **recovery}
+        max_batch_bytes = self._max_batch_bytes()
         while True:
             raw_candidates = list(self.db.execute(
                 "SELECT * FROM outbox WHERE state='pending' AND (shard_key % ?) = ? ORDER BY id LIMIT ?",
@@ -1062,16 +1063,16 @@ class Collector:
             body_size = len(b'{"events":[]}')
             for candidate in candidates:
                 event_size = len(candidate["envelope_json"].encode()) + 1
-                if not rows and event_size > MAX_BATCH_BYTES:
+                if not rows and event_size > max_batch_bytes:
                     with self.db:
                         self.db.execute("UPDATE outbox SET state='dead',envelope_json='{}' WHERE id=?", (candidate["id"],))
                         self.db.execute(
                             "INSERT OR IGNORE INTO dead_letters(path,byte_offset,error_code,error_summary,created_at) VALUES (?,?,?,?,?)",
-                            (candidate["path"], candidate["start_offset"], "PayloadTooLarge", f"sanitized envelope exceeds {MAX_BATCH_BYTES} bytes", time.time()),
+                            (candidate["path"], candidate["start_offset"], "PayloadTooLarge", f"sanitized envelope exceeds {max_batch_bytes} bytes", time.time()),
                         )
                     result["errors"] += 1
                     continue
-                if rows and body_size + event_size > MAX_BATCH_BYTES:
+                if rows and body_size + event_size > max_batch_bytes:
                     break
                 rows.append(candidate)
                 body_size += event_size
@@ -1115,6 +1116,10 @@ class Collector:
                 except PermissionError:
                     result["errors"] += 1
                     self._record_error("brain_unauthorized")
+                    return result
+                except ValueError:
+                    result["errors"] += 1
+                    self._record_error("brain_rejected")
                     return result
                 except (OSError, urllib.error.URLError):
                     result["errors"] += 1
@@ -1162,6 +1167,16 @@ class Collector:
             result["acked"] += len(rows)
             result["replayed_batches"] += int(bool(acknowledgement.get("replay")))
         return result
+
+    def _max_batch_bytes(self) -> int:
+        maximum = MAX_BATCH_BYTES
+        provider = getattr(self.brain_writer, "max_events_payload_bytes", None)
+        if callable(provider):
+            advertised = provider()
+            if type(advertised) is not int or advertised < 1:
+                raise ValueError("brain writer returned an invalid batch byte limit")
+            maximum = min(maximum, advertised)
+        return maximum
 
     def doctor(self, *, include_dead_letters: bool = True) -> dict:
         disk = {str(path) for path in self.discover()}
