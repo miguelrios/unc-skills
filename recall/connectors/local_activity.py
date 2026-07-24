@@ -288,6 +288,7 @@ class BrowserActivityConnector(_SnapshotConnector):
             occurred_at=occurred_at,
             content={
                 "kind": "document.v1",
+                "content_fidelity": "complete",
                 "document_id": native_id,
                 "mime_type": "text/uri-list",
                 "modified_at": occurred_at,
@@ -610,6 +611,8 @@ class AppleNotesConnector(_SnapshotConnector):
             native_id = _hash("apple-note", identifier)
             content = {
                 "kind": "document.v1",
+                "content_fidelity": "partial",
+                "content_omissions": ["note_body_not_fetched"],
                 "document_id": native_id,
                 "mime_type": "text/plain",
                 "modified_at": modified,
@@ -784,6 +787,7 @@ class HermesSessionConnector(_SnapshotConnector):
             text = row["content"]
             if not isinstance(text, str) or not text:
                 continue
+            truncated = len(text) > MAX_TEXT_CHARS
             if len(text) > MAX_TEXT_CHARS:
                 text = text[:MAX_TEXT_CHARS]
             role = row["role"]
@@ -797,6 +801,7 @@ class HermesSessionConnector(_SnapshotConnector):
                 )
             content = {
                 "kind": "communication_message.v1",
+                "content_fidelity": "partial" if truncated else "complete",
                 "conversation_id": conversation_id,
                 "direction": "outbound" if role == "user" else "inbound",
                 "format": "hermes-session-v22",
@@ -806,6 +811,8 @@ class HermesSessionConnector(_SnapshotConnector):
                 "surface": f"hermes-{source}",
                 "text": text,
             }
+            if truncated:
+                content["content_omissions"] = ["body_truncated"]
             title = row["title"]
             if isinstance(title, str) and title:
                 content["subject"] = title[:10_000]

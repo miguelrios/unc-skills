@@ -370,6 +370,11 @@ class ContainerContractTest(unittest.TestCase):
             r"^FROM python:3\.12-slim-bookworm@sha256:[0-9a-f]{64}$",
         )
         self.assertIn("USER 10001:10001", dockerfile)
+        self.assertIn(
+            "COMPOSIO_CACHE_DIR=/tmp/recall-composio-cache",
+            dockerfile,
+        )
+        self.assertIn("/tmp/recall-composio-cache", dockerfile)
         self.assertIn('ENTRYPOINT ["python", "-m", "recall_server.cli"]', dockerfile)
         self.assertIn(
             'CMD ["serve", "--host", "0.0.0.0", "--port", "8788", "--require-auth", '

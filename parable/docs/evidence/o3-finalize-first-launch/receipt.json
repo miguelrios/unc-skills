@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "loop": "O3",
+  "captured_at": "2026-07-20T22:59:38Z",
+  "status": "complete",
+  "command": "parable setup finalize --json",
+  "reconcile": {
+    "catalog_endpoint": "/v1/models",
+    "membership": "exact string equality",
+    "shared_by_finalize_and_launch": true,
+    "alias_or_regex_fallback": false,
+    "catalog_payload_persisted": false,
+    "next_command": "parable claude -- --effort high"
+  },
+  "all_vendor_e2e": {
+    "steps": [
+      "private setup",
+      "three native auth wrappers",
+      "authorized loopback catalog",
+      "exact cast finalize",
+      "idempotent cast confirmation",
+      "fake stock Claude launch"
+    ],
+    "parent_model": "gpt-5.6-sol",
+    "required_model_count": 7,
+    "named_agents": {
+      "parable-terra": "gpt-5.6-terra",
+      "parable-luna": "gpt-5.6-luna",
+      "parable-sonnet-exact": "claude-sonnet-5",
+      "parable-opus-exact": "claude-opus-4-8",
+      "parable-haiku-exact": "claude-haiku-4-5-20251001",
+      "parable-grok": "grok-4.5"
+    },
+    "generated_agents": 6,
+    "second_finalize": {
+      "changed": 0,
+      "unchanged": 6,
+      "removed": 0
+    },
+    "claude_parent_argv_exact": true,
+    "local_token_authorized_catalog": true,
+    "local_token_in_output_or_agent": false,
+    "source_token_in_claude_environment": false
+  },
+  "subset_e2e": {
+    "vendors": [
+      "chatgpt"
+    ],
+    "required_models": [
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna"
+    ],
+    "named_agents": {
+      "parable-terra": "gpt-5.6-terra",
+      "parable-luna": "gpt-5.6-luna"
+    }
+  },
+  "missing_exact_id": {
+    "missing": "grok-4.5",
+    "misleading_ids_present": [
+      "grok-4.5-latest",
+      "GROK-4.5"
+    ],
+    "accepted": false,
+    "generated_agents_before_failure": 0,
+    "claude_invocations": 0
+  },
+  "preservation": {
+    "unrelated_agent_preserved": true,
+    "unowned_parable_prefixed_agent_preserved": true,
+    "project_config_modified": false
+  },
+  "proof": {
+    "focused_finalize_e2e_tests": "2/2",
+    "complete_package_tests": "98/98",
+    "npm_pack_dry_run": "pass",
+    "packed_files": 33,
+    "diff_check": "pass",
+    "provider_turns": 0,
+    "oauth_flows": 0,
+    "live_provider_calls": 0
+  },
+  "bounds": {
+    "evidence_failures": 0,
+    "instrument_failures": 0,
+    "review_rounds": 1,
+    "review_round_limit": 3
+  },
+  "privacy": {
+    "contains_raw_token": false,
+    "contains_oauth_url_or_callback": false,
+    "contains_account_identifier": false,
+    "contains_catalog_payload": false,
+    "contains_private_path": false,
+    "contains_transcript": false
+  }
+}

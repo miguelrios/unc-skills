@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-07-20T23:57:04Z",
+  "providerTurns": 0,
+  "oauthFlows": 0,
+  "externalListenersMutated": 0,
+  "targetedLifecycleCasesPassed": 7,
+  "signalsProved": ["SIGINT", "SIGTERM", "SIGHUP"],
+  "lifecycle": {
+    "interactiveBuildAfterConsentWithoutFlag": true,
+    "ownedProxyStarted": true,
+    "authenticatedReadinessRequired": true,
+    "exactCatalogGateBeforeClaude": true,
+    "claudeExitPreserved": 23,
+    "ownedProxyStoppedAfterClaude": true,
+    "healthyExistingProxyReused": true,
+    "healthyExistingProxyStopped": false,
+    "wrongListenerRejected": true,
+    "earlyProxyExitPreserved": 17,
+    "readinessTimeoutRejected": true,
+    "midSessionProxyExitPreserved": 19,
+    "orphanProcesses": 0,
+    "tokenObservedInOutputOrCapture": false
+  },
+  "completeSuite": {
+    "testsPassed": 106,
+    "testsFailed": 0,
+    "packageFiles": 33,
+    "packageDryRunPassed": true
+  },
+  "bound": {
+    "evidenceFailures": 0,
+    "instrumentFailures": 1,
+    "reviewRounds": 2
+  }
+}

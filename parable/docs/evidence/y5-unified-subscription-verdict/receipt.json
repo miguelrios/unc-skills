@@ -1,0 +1,144 @@
+{
+  "schema_version": 1,
+  "loop": "Y5",
+  "captured_at_utc": "2026-07-20T17:37:40Z",
+  "parable_baseline_head": "e53d30a3b1303d80779bf8ed3204c30ae829c8a5",
+  "inherited_live_evidence": [
+    {
+      "lane": "grok",
+      "cells": 5,
+      "receipt": "docs/evidence/x3-sol-grok-named-subagent/receipt.json",
+      "focused_pr": 158,
+      "verified_merged_main": "63e715f8e6b2baf16d8782d0426970eec3dd7347"
+    },
+    {
+      "lane": "terra_luna",
+      "cells": 10,
+      "receipt": "docs/evidence/y1-sol-terra-luna/receipt.json",
+      "focused_pr": 165,
+      "verified_merged_main": "a73fc5e34545439102b0c41ad08a733ca13427b3"
+    },
+    {
+      "lane": "sonnet_opus_haiku",
+      "cells": 15,
+      "receipt": "docs/evidence/y4-sol-claude-children/receipt.json",
+      "focused_pr": 183,
+      "verified_merged_main": "3e3baf7475c10c05da775618d101c29d2eeedc3e"
+    }
+  ],
+  "matrix": {
+    "parent_model": "gpt-5.6-sol",
+    "parent_efforts": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ],
+    "cells_passed": "30/30",
+    "children": [
+      {
+        "agent": "parable-terra",
+        "model": "gpt-5.6-terra",
+        "oauth_route": "chatgpt",
+        "cells": "5/5",
+        "effort_behavior": "exact_5_of_5"
+      },
+      {
+        "agent": "parable-luna",
+        "model": "gpt-5.6-luna",
+        "oauth_route": "chatgpt",
+        "cells": "5/5",
+        "effort_behavior": "exact_5_of_5"
+      },
+      {
+        "agent": "parable-grok",
+        "model": "grok-4.5",
+        "oauth_route": "xai",
+        "cells": "5/5",
+        "effort_behavior": "low_medium_high_exact_xhigh_max_clamp_high"
+      },
+      {
+        "agent": "parable-sonnet-exact",
+        "model": "claude-sonnet-5",
+        "oauth_route": "claude",
+        "cells": "5/5",
+        "effort_behavior": "exact_adaptive_5_of_5"
+      },
+      {
+        "agent": "parable-opus-exact",
+        "model": "claude-opus-4-8",
+        "oauth_route": "claude",
+        "cells": "5/5",
+        "effort_behavior": "exact_adaptive_5_of_5"
+      },
+      {
+        "agent": "parable-haiku-exact",
+        "model": "claude-haiku-4-5-20251001",
+        "oauth_route": "claude",
+        "cells": "5/5",
+        "effort_behavior": "all_normalize_enabled_budget_31999"
+      }
+    ],
+    "exact_named_child_model_cells": "30/30",
+    "deterministic_child_tool_artifacts": "30/30",
+    "deterministic_parent_consumption": "30/30",
+    "provider_fallback_observed": false
+  },
+  "delivery": {
+    "guide": "docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md",
+    "provider_reference": "skills/parable/references/providers.md",
+    "example": "examples/parable.claude-subscriptions.toml",
+    "example_config_valid": true,
+    "generated_exact_agents": {
+      "parable-terra": "gpt-5.6-terra",
+      "parable-luna": "gpt-5.6-luna",
+      "parable-grok": "grok-4.5",
+      "parable-sonnet-exact": "claude-sonnet-5",
+      "parable-opus-exact": "claude-opus-4-8",
+      "parable-haiku-exact": "claude-haiku-4-5-20251001"
+    },
+    "kimi_status": "paused_absent",
+    "broker_required": false,
+    "shared_deployment_required": false,
+    "per_user_loopback_oauth": true
+  },
+  "verification": {
+    "complete_parable_suite": "PASS_81_OF_81",
+    "package_dry_run": "PASS",
+    "package_version": "0.1.9",
+    "package_files": 32,
+    "package_size_kb": 63.5,
+    "unpacked_size_kb": 201.2,
+    "diff_check": "PASS",
+    "content_boundary": "PASS",
+    "local_review": "PASS_5_OF_5"
+  },
+  "bounds": {
+    "correctly_wired_documentation_proofs": "1/2",
+    "evidence_failures": 0,
+    "instrument_failures": 2,
+    "review_rounds": "1/3",
+    "y5_model_turns": 0,
+    "y5_oauth_probes": 0
+  },
+  "instrumentation_events": [
+    {
+      "event": "The first temporary validation command requested destructive cleanup and was rejected before execution.",
+      "resolution": "Validation reran in a unique additive temporary directory and passed."
+    },
+    {
+      "event": "A final test-output assertion inspected stdout while unittest emitted its PASS summary on stderr.",
+      "resolution": "The test process had passed; the verification reran with combined output and passed."
+    }
+  ],
+  "safety": {
+    "credential_material_committed": false,
+    "oauth_state_committed": false,
+    "account_identifier_committed": false,
+    "raw_prompt_or_response_committed": false,
+    "raw_proxy_log_committed": false,
+    "callback_url_committed": false,
+    "private_path_committed": false
+  }
+}

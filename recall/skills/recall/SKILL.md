@@ -1,19 +1,40 @@
 ---
 name: recall
-description: Find prior Claude Code and Codex sessions with an indexed local search engine, then continue the work, repeat it with fresh inputs, or distill it into a skill. Runs from Claude Code, Codex, or pi; the current index covers Claude Code and Codex transcripts. Use when the user names Recall, says "find that conversation where…", "what did we do last time about…", "continue what we did yesterday on X", "what did codex do on this branch", "turn what we did about Y into a skill", or "remember when you…". Not for searching code (use grep on the repo) or for facts already in MEMORY.md.
+description: Find prior work through a configured central brain or a disposable local session index, then continue it, repeat it with fresh inputs, or distill it into a skill. Runs from Claude Code, Codex, or pi. Use when the user names Recall, says "find that conversation where…", "what did we do last time about…", "continue what we did yesterday on X", "what did codex do on this branch", "turn what we did about Y into a skill", or "remember when you…". Not for searching code (use grep on the repo) or for facts already in MEMORY.md.
 ---
 
 # /recall — session memory engine
 
-Claude Code and Codex sessions on this machine are indexed into a local
-SQLite engine. You do not grep transcripts; you query the index and read only
-the winning session. All commands go through one CLI:
+Recall queries the configured central brain when a client profile or `RECALL_URL`
+is present. A disposable local SQLite index remains available only for local-only
+installations and deliberate rollback. You do not grep transcripts; you query Recall
+and read only the winning session. All commands go through one CLI:
 
 ```bash
 python3 scripts/recall.py <command>       # relative to this skill directory
 ```
 
 ## Local, central, and shadow modes
+
+### First-run choice
+
+When installing or configuring Recall and no valid client profile exists, do not infer a mode.
+Use the harness's native structured question tool—`AskUserQuestion` in Claude Code or
+`request_user_input` in Codex—to ask one blocking question with exactly these choices:
+
+- **Hosted brain (Recommended):** configure the supplied HTTPS `/mcp` endpoint and private
+  token-file reference.
+- **Local-only:** use the disposable on-device SQLite index without a network service.
+
+Ask: **Where should Recall search?** Do not auto-resolve or silently default to local. If the
+structured question tool is unavailable, ask the same blocking question in the conversation.
+Do not ask again when a valid profile already exists unless the user requests reconfiguration.
+
+After applying the choice, run `python3 scripts/recall.py doctor`. Accept hosted setup only when
+it reports `OK remote`; accept local-only setup only when it reports local index health. A failed
+hosted check stays remote and fails closed—it never falls back to SQLite. If hosted was selected
+but the endpoint or token-file reference is unavailable, ask for the missing reference without
+searching unrelated credential stores or rendering secret values.
 
 With no central configuration, every command behaves exactly as the local engine described below.
 Setting `RECALL_URL` selects the tailnet central service for read commands (`search`, `show`,
@@ -34,6 +55,11 @@ For a persistent per-device read profile, use a mode-0600 regular file at
 must also be a non-symlink mode-0600 regular file. Environment variables override
 the profile field by field; `RECALL_MODE=local` remains the instant rollback.
 Neither config validation nor transport errors render either private path.
+
+Before searching, run `doctor` once when the active mode is uncertain. If it reports
+`OK remote`, use the central service. Never set `RECALL_MODE=local` or run `index` to
+repair a stale or slow central query; diagnose the remote service and collectors instead.
+Use local rollback only when the user explicitly requests it.
 
 Remote search can route explicitly without weakening credential scope:
 
@@ -57,8 +83,9 @@ Use `RECALL_MODE=local|remote|shadow` when the mode must be explicit:
 
 Interactive tailnet access uses the Tailscale identity boundary. If a scoped bearer is required,
 set `RECALL_TOKEN_FILE` to a mode-`0600` JSON file containing `{"token":"..."}`. Never put a token
-in `RECALL_URL`, shell history, a repository, or evidence. `index` remains local in every mode, so
-switching read modes cannot rewrite either the local SQLite index or central canonical events.
+in `RECALL_URL`, shell history, a repository, or evidence. `index` is a local-only maintenance
+command and never refreshes central data. On a device with a central profile it fails closed unless
+the operator adds `--allow-local-index`; switching read modes cannot rewrite central canonical events.
 
 ## Deliberate memory writes
 
@@ -297,9 +324,15 @@ dates) → invoke the available skill creator with the recipe and a proposed
 ## Index health
 
 ```bash
-python3 scripts/recall.py index      # incremental; run if results look stale
-python3 scripts/recall.py doctor     # coverage, index age, retention watchdog
+python3 scripts/recall.py doctor     # reports remote health or local index health
+python3 scripts/recall.py index      # local-only installation: incremental maintenance
 ```
+
+If `doctor` reports `OK remote`, do not run `index`: it operates only the disposable
+SQLite fallback and cannot improve central freshness. Inspect collector/service health.
+On a centrally configured device, intentional fallback maintenance additionally requires
+`--allow-local-index`. Never run `index --rebuild` without the user's explicit request;
+large session histories can require gigabytes of temporary WAL and substantial CPU time.
 
 `doctor` warning about `cleanupPeriodDays` means transcript retention got
 re-enabled — surface that to the user immediately; history is being deleted.

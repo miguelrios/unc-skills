@@ -68,6 +68,11 @@ OPERATIONS = {
         frozenset({"userId", "id", "format", "metadataHeaders"}),
         frozenset({"id", "threadId", "labelIds", "snippet", "historyId", "internalDate", "payload", "sizeEstimate", "raw"}),
     ),
+    "gmail.messages.attachments.get": Operation(
+        ("gmail", "users", "messages", "attachments", "get"),
+        frozenset({"userId", "messageId", "id"}),
+        frozenset({"size", "data"}),
+    ),
     "gmail.history.list": Operation(
         ("gmail", "users", "history", "list"),
         frozenset({"userId", "startHistoryId", "maxResults", "pageToken", "historyTypes", "labelId"}),

@@ -1,258 +1,277 @@
-# GPT and Grok subscription models in stock Claude Code
+# GPT, Claude, and Grok subscriptions in one Claude Code session
 
-This is the reproducible OSS path for running stock Claude Code with
-`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, and `grok-4.5` through a
-local CLIProxyAPI process and the user's own subscription OAuth.
-
-No broker or shared deployment is involved:
+Parable can run stock Claude Code with exact Fable or `gpt-5.6-sol` as the parent and
+exact GPT, Claude, and Grok named agents through one user-owned, loopback-only
+CLIProxyAPI process.
 
 ```text
-                                      ┌→ ChatGPT subscription OAuth
-Claude Code → loopback CLIProxyAPI ───┤
-                                      └→ xAI subscription OAuth
+                                      ┌→ this user's ChatGPT subscription
+stock Claude Code → localhost proxy ──┼→ this user's Claude subscription
+                                      └→ this user's xAI subscription
 ```
 
-## Support state
+There is no broker, shared deployment, provider API key, or copied Claude Code
+credential in this mode. CLIProxyAPI owns each native OAuth flow and record.
+Parable creates local configuration, delegates to those native flows, checks
+the authenticated model catalog, and generates exact project agents.
 
-Released CLIProxyAPI `v7.2.88` can transport all three models, but it maps
-every Claude Code effort setting to upstream `medium`. The patch shipped in
-this repository fixes that protocol translation and has been live-proved for
-all 15 combinations of:
+Kimi is paused and is not a setup option.
 
-- model: `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`
-- effort: `low`, `medium`, `high`, `xhigh`, `max`
+## Start here
 
-The result was 15/15 exact GPT effort pass-through and 3/3 tool canaries.
-The same build also completed all five Claude Code effort flags with Grok 4.5
-and 3/3 real Grok tool canaries through xAI OAuth:
+Install the Parable skill with skills.sh or the Claude Code plugin marketplace:
 
-- Grok `low`, `medium`, and `high` are exact end to end.
-- Claude's `xhigh` and `max` reach CLIProxyAPI intact, then clamp to Grok's
-  supported `high`.
-- A Sol parent invoked exact named agent `parable-grok` at all five parent
-  efforts. Claude Code inherited each parent effort into the child; Grok
-  applied the same `xhigh|max → high` clamp.
+```bash
+npx skills add miguelrios/unc-skills --skill parable
 
-The patch is **not** an upstream CLIProxyAPI release. It is pinned to:
+# or
+claude plugin marketplace add miguelrios/unc-skills
+claude plugin install parable@unc-skills
+```
+
+Then ask Claude Code to **Set up Parable**. For a plugin install, the explicit
+skill invocation is `/parable:parable install`; for a standalone skill it is
+`/parable install`. The skill runs its bundled `parable.sh`, which installs an
+immutable versioned runtime, creates `~/.local/bin/parable`, adds that directory
+to the appropriate shell startup file when necessary, and enters setup/auth.
+It does not download CLI code.
+
+Before running the shell bootstrap, the skill uses the harness's native structured-question
+UI—`AskUserQuestion` in Claude Code, `request_user_input` when the active Codex mode permits it,
+or the equivalent elsewhere—to ask whether to add ChatGPT and xAI. It falls back to one concise
+question when structured input is unavailable. Claude is the baseline pool. ChatGPT optionally
+adds Sol/Terra/Luna and enables Sol as an automatic fallback; without it, `auto` stays on Fable. If no proxy is
+available, it asks once for consent to install missing build prerequisites and build the pinned,
+patched proxy. It then passes those decisions to one non-interactive `parable.sh` invocation, so
+the user never answers the same question again in a terminal prompt.
+
+Claude Code's Bash tool cannot write a later callback into a running command's stdin, and its
+command view may clip long authorization URLs. In that harness only, the skill stages setup with
+`--no-auth`, then tells the user to open a new terminal and run:
+
+```text
+parable auth login
+```
+
+That command authorizes every selected missing provider in order and prints the final launch
+command. Keep it running until the selected flows complete. It replaces, rather than precedes,
+three separate `auth add` commands. Harnesses with a controllable foreground PTY run the bundled
+bootstrap and authorization as one process instead.
+
+A published npm install can seed the same standalone skill:
+
+```bash
+npm install -g @parcha/parable@latest
+parable install
+```
+
+A source checkout uses the same bundled entrypoint:
+
+```bash
+git clone https://github.com/miguelrios/unc-skills.git
+cd unc-skills/parable
+./install.sh
+```
+
+Setup always selects Claude because Claude Code is the harness, then starts each selected
+provider's native authorization flow. Parable first discovers an existing proxy from
+`--proxy-bin`, `PARABLE_CLIPROXY_BIN`, or `PATH`; when none exists, the skill passes explicit
+consent through `--build-proxy`. Declining that consent performs no network or build work.
+
+After successful setup, enter the repository where Claude should work in a new
+terminal and launch it:
+
+```bash
+cd /path/to/your/project
+parable
+```
+
+That is the whole ordinary path. Bare `parable` selects `auto` and high effort. `auto` prefers Fable when it is configured and
+its Claude usage is below 80%. When that pool is tight it selects Sol if the
+ChatGPT pool has more or unknown headroom; if both are tight, it takes the less
+used pool. Unknown Claude usage keeps the preferred Fable parent. Use
+`parable --brain fable` or `parable --brain sol` to pin one explicitly.
+
+After Claude Code mounts, an in-UI Parable launch card shows the selected brain and every routed
+model with its `use_for` guidance. Parable supplies it through a session-scoped `SessionStart`
+hook as a user-only system message, so it does not enter model context or create a conversation
+turn. `--print`, `--bare`, help, version, and init-only launches omit the card.
+
+`parable` authenticates a readiness
+probe to the configured loopback `/v1/models`. It reuses a healthy endpoint
+without owning or stopping it; otherwise it starts the configured proxy,
+waits for readiness, requires the exact configured parent and every selected child,
+writes or confirms only Parable-owned project agents, launches stock Claude,
+and stops only the proxy process it owns when Claude exits. When it owns both
+children, signals reach both and the meaningful Claude or proxy exit status is
+preserved.
+
+For a headless ChatGPT device flow, create configuration without starting auth
+and connect each selected vendor explicitly:
+
+```bash
+bash /path/to/installed/parable/parable.sh \
+  --non-interactive \
+  --vendors claude,chatgpt,xai \
+  --build-proxy \
+  --no-auth
+parable auth add chatgpt --device
+parable auth add claude
+parable auth add xai
+parable auth status
+cd /path/to/your/project
+parable
+```
+
+Only run the Claude/xAI commands if you selected those vendors. Claude auth
+prints an SSH-forward reminder for callback port `54545`; keep that same
+command alive until its newly issued callback completes. Old authorization
+URLs cannot complete a new PKCE process.
+
+The explicit lifecycle commands remain available as diagnostic escape hatches:
+
+```bash
+parable proxy start
+parable setup finalize
+```
+
+`proxy start` exposes foreground logs for troubleshooting and is never required
+beside the normal launcher. `setup finalize` starts and cleans up the managed proxy when needed,
+checks the exact catalog, and synchronizes agents without launching Claude.
+Neither command is part of ordinary onboarding.
+
+You do not need to source `cliproxy.env`: the CLI passes the generated local
+client token only to the catalog/Claude child process, converts it to
+`ANTHROPIC_AUTH_TOKEN`, and removes the source variable before Claude starts.
+
+## Non-interactive setup
+
+Automation must state its vendor selection and include Claude:
+
+```bash
+bash /path/to/installed/parable/parable.sh \
+  --non-interactive \
+  --vendors claude,chatgpt,xai \
+  --build-proxy \
+  --no-auth
+```
+
+Supported selections are:
+
+| Selection | Parent and named children |
+|---|---|
+| `claude` | Fable parent plus exact Fable 5, Sonnet 5, Opus 4.8, and Haiku 4.5 agents |
+| `claude,chatgpt` | Claude cast plus exact Sol, Terra, and Luna; Sol becomes an eligible fallback parent |
+| `claude,xai` | Claude cast plus exact Grok 4.5 |
+| `claude,chatgpt,xai` | all eight exact models |
+
+Unknown vendors, a selection without Claude, missing executables, partial
+state, changed generated content, unsafe modes, or symlinks all fail without
+overwriting anything. There is deliberately no `--force` path.
+
+## What setup creates
+
+The default configuration root is `~/.config/parable` with mode `0700`:
+
+| File | Mode | Purpose |
+|---|---:|---|
+| `cliproxy.yaml` | `0600` | literal loopback listener, auth directory, random local client token |
+| `cliproxy.env` | `0600` | local `CLIPROXY_API_KEY` export |
+| `parable.toml` | `0600` | exact selected parent, agents, and routing |
+| `setup.json` | `0600` | non-secret setup manifest used for strict idempotency |
+
+CLIProxyAPI's auth directory is `~/.cli-proxy-api`, mode `0700`. Parable never
+parses, copies, or writes provider OAuth token fields. `auth status` opens only
+mode-`0600` regular JSON records and emits provider presence/counts plus
+mode/parse aggregates—never filenames, paths, accounts, or credential values.
+Native authorization inherits a private `0077` umask. Before accepting a record,
+Parable narrows broader permissions to `0600` only when it is a regular file owned
+by the current user, inside that `0700` directory, with the expected provider type.
+`auth status` remains read-only.
+
+## Native authorization mapping
+
+Parable adds no OAuth implementation. Its commands become exactly:
+
+| Parable command | CLIProxyAPI flags |
+|---|---|
+| `auth login` | each selected missing vendor's native flag below, in order |
+| `auth add chatgpt` | `--config … --codex-login` |
+| `auth add chatgpt --device` | `--config … --codex-device-login` |
+| `auth add claude` | `--config … --claude-login --no-browser` |
+| `auth add xai` | `--config … --xai-login --no-browser` |
+| `proxy start` | `--config … --local-model` |
+| `claude` when the endpoint is absent | `--config … --local-model`, supervised |
+
+Auth subprocesses inherit the terminal. Diagnostic `proxy start` inherits
+stdio and stays foreground. The ordinary `claude` command keeps owned proxy
+output away from the Claude TUI, waits for its authenticated catalog, forwards
+`SIGINT`, `SIGTERM`, and `SIGHUP`, preserves meaningful child exits, and leaves
+no owned proxy behind. It never stops a reused listener.
+
+## Managed proxy build
+
+Interactive `parable setup` after consent, `parable proxy build`, and
+`setup --build-proxy` create a new private managed directory. They never patch
+an existing checkout. The build stops before
+`git am` or Go if either source or patch pin differs:
 
 | Item | Pin |
 |---|---|
 | CLIProxyAPI base | `v7.2.88` / `93d74a890a44802f656d7f39a573916b2611896e` |
-| Official source archive SHA-256 | `47c91832a4f09501ed0638191b18d74ffc8eef2ec9de53fd53423ad09d695129` |
 | Vendored patch SHA-256 | `d35b422da321265150fe393da80a686862ef642ee45c65a3e2fb908d689d5d1f` |
 | Verified toolchain | Go `1.26.5` |
 | Verified harness | Claude Code `2.1.215` |
 
-## Five-minute path
+The builder applies the vendored effort-translation patch, runs the focused Go
+test slices, and emits a mode-`0700` `parable-cliproxy-api` executable. A
+pre-existing destination is refused rather than reused or deleted.
 
-Prerequisites: Git, Go `1.26.5`, Claude Code `2.1.215`, `openssl`, `curl`,
-`jq`, and the subscription accounts whose models you intend to use. Install
-Go from the [official downloads](https://go.dev/dl/?mode=html).
+Prerequisites are Node 18+, Python 3.11+, Git, Go, and stock Claude Code.
 
-### 1. Pin, patch, test, and build CLIProxyAPI
+## Exact proved cast and effort behavior
 
-Clone this repository and CLIProxyAPI as siblings:
+The live proof covered all 30 parent/child cells: five Sol parent effort values
+times six exact named children. Every child used Bash and the parent consumed
+its result.
 
-```bash
-git clone https://github.com/miguelrios/unc-skills.git
-git clone https://github.com/router-for-me/CLIProxyAPI.git
-cd CLIProxyAPI
+| Exact child | Subscription | `low` | `medium` | `high` | `xhigh` | `max` |
+|---|---|---|---|---|---|---|
+| `gpt-5.6-terra` | ChatGPT | exact | exact | exact | exact | exact |
+| `gpt-5.6-luna` | ChatGPT | exact | exact | exact | exact | exact |
+| `grok-4.5` | xAI | exact | exact | exact | → `high` | → `high` |
+| `claude-sonnet-5` | Claude | adaptive exact | adaptive exact | adaptive exact | adaptive exact | adaptive exact |
+| `claude-opus-4-8` | Claude | adaptive exact | adaptive exact | adaptive exact | adaptive exact | adaptive exact |
+| `claude-haiku-4-5-20251001` | Claude | → enabled/31,999 | → enabled/31,999 | → enabled/31,999 | → enabled/31,999 | → enabled/31,999 |
 
-git checkout --detach 93d74a890a44802f656d7f39a573916b2611896e
-test "$(git rev-parse HEAD)" = "93d74a890a44802f656d7f39a573916b2611896e"
+The authenticated catalog is entitlement truth. A similarly named id, display
+alias, different case, or `-latest` suffix never substitutes for a missing
+exact id. Subscription plan limits and provider terms still apply.
 
-PATCH=../unc-skills/parable/patches/cliproxyapi-v7.2.88-claude-effort.patch
-printf '%s  %s\n' \
-  d35b422da321265150fe393da80a686862ef642ee45c65a3e2fb908d689d5d1f \
-  "$PATCH" | sha256sum --check
+## npm release verification
 
-git -c user.name="Local patch build" \
-  -c user.email="local-build@invalid.example" am "$PATCH"
-
-go test -count=1 ./internal/thinking ./internal/translator/codex/claude
-go test -count=1 ./test -run '^TestThinkingE2EClaudeAdaptive_Body$'
-go build -o cli-proxy-api ./cmd/server
-```
-
-`git am` must report two applied commits. If the base pin or patch checksum
-does not match, stop; do not force-apply it to another release.
-
-### 2. Create a loopback-only proxy configuration
-
-The local proxy client key is not an OpenAI credential. It prevents other
-local processes from using the proxy and must not be committed:
+Before publishing a new version:
 
 ```bash
-umask 077
-mkdir -p "$HOME/.config/parable"
-export CLIPROXY_API_KEY="$(openssl rand -hex 32)"
-printf 'export CLIPROXY_API_KEY=%q\n' "$CLIPROXY_API_KEY" \
-  > "$HOME/.config/parable/cliproxy.env"
-
-cat > "$HOME/.config/parable/cliproxy.yaml" <<EOF
-host: "127.0.0.1"
-port: 8317
-auth-dir: "~/.cli-proxy-api"
-api-keys:
-  - "$CLIPROXY_API_KEY"
-debug: false
-EOF
+cd parable
+npm test
+npm run pack:check
+npm publish --access public
 ```
 
-### 3. Connect the user's subscriptions
+After publication, `npm install -g @parcha/parable@latest` installs the released CLI and
+`parable install` seeds its bundled skill.
 
-Connect ChatGPT:
+## Evidence
 
-```bash
-./cli-proxy-api \
-  --config "$HOME/.config/parable/cliproxy.yaml" \
-  --codex-login
-```
+- [Secure setup and pinned builder](evidence/o1-secure-bootstrap/EXIT.md)
+- [Native auth, safe status, and proxy lifecycle](evidence/o2-auth-proxy-lifecycle/EXIT.md)
+- [Exact finalize and hermetic first launch](evidence/o3-finalize-first-launch/EXIT.md)
+- [Two-command contract and baseline](evidence/m0-two-command-contract/EXIT.md)
+- [Owned-or-reused Claude supervisor](evidence/m1-supervised-claude/EXIT.md)
+- [Unified 30/30 live subscription verdict](evidence/y5-unified-subscription-verdict/EXIT.md)
+- [GPT effort patch live proof](evidence/e2-cliproxy-effort-live/EXIT.md)
+- [Grok subscription proof](evidence/x5-grok45-verdict/EXIT.md)
 
-On a headless machine, use `--codex-device-login` instead. Enter the newly
-printed device code once; stale or previously submitted codes produce
-“We couldn’t authorize this device.”
-
-This route uses ChatGPT subscription OAuth. Do not set `OPENAI_API_KEY` for
-this setup.
-
-To add Grok 4.5, connect the user's xAI subscription separately:
-
-```bash
-./cli-proxy-api \
-  --config "$HOME/.config/parable/cliproxy.yaml" \
-  --xai-login \
-  --no-browser
-```
-
-Complete the printed xAI device flow. CLIProxyAPI stores and refreshes each
-provider's OAuth record in its user-only auth directory. Do not set
-`XAI_API_KEY`; this recipe proves the subscription route, not metered API
-billing.
-
-### 4. Start and verify the local proxy
-
-Start the server in one terminal:
-
-```bash
-source "$HOME/.config/parable/cliproxy.env"
-./cli-proxy-api \
-  --config "$HOME/.config/parable/cliproxy.yaml" \
-  --local-model
-```
-
-Verify the combined authenticated catalog from another terminal. Remove
-`grok-4.5` from the assertion if you intentionally configured only ChatGPT:
-
-```bash
-source "$HOME/.config/parable/cliproxy.env"
-curl -fsS \
-  -H "Authorization: Bearer $CLIPROXY_API_KEY" \
-  http://127.0.0.1:8317/v1/models |
-  jq -e '
-    [.data[].id] as $ids |
-    all(
-      [
-        "gpt-5.6-sol",
-        "gpt-5.6-terra",
-        "gpt-5.6-luna",
-        "grok-4.5"
-      ][];
-      . as $model | $ids | index($model)
-    )
-  '
-```
-
-### 5. Launch stock Claude Code on Sol
-
-Install Parable, then create the minimal personal configuration:
-
-```bash
-npx @parcha/parable install
-
-cat > "$HOME/.config/parable/parable.toml" <<'EOF'
-[parable]
-version = 1
-
-[claude]
-base_url = "http://127.0.0.1:8317"
-auth_token_env = "CLIPROXY_API_KEY"
-brain_model = "gpt-5.6-sol"
-
-[providers.claude]
-type = "subagent"
-
-[executors.grok]
-provider = "claude"
-model = "grok-4.5"
-use_for = "A third-family implementation or adversarial review."
-avoid_for = "Reviewing its own diff."
-EOF
-
-source "$HOME/.config/parable/cliproxy.env"
-npx @parcha/parable doctor
-npx @parcha/parable agents sync
-npx @parcha/parable claude -- --effort high
-```
-
-That launches the installed stock `claude` binary with Sol as the session
-model and materializes exact project agent `parable-grok`. Change the final
-effort to any of the five verified values. In the session, explicitly ask Sol
-to use the `parable-grok` agent when that is the intended lane.
-
-The effort rule is observable, not advisory:
-
-| Sol parent effort | Grok child inbound | Grok upstream |
-|---|---|---|
-| `low` | `low` | `low` |
-| `medium` | `medium` | `medium` |
-| `high` | `high` | `high` |
-| `xhigh` | `xhigh` | `high` |
-| `max` | `max` | `high` |
-
-## Optional GPT named subagents
-
-Terra and Luna can be materialized as exact project-local Claude agents by
-adding:
-
-```toml
-[providers.claude]
-type = "subagent"
-
-[executors.terra]
-provider = "claude"
-model = "gpt-5.6-terra"
-use_for = "Independent GPT implementation or debugging."
-
-[executors.luna]
-provider = "claude"
-model = "gpt-5.6-luna"
-use_for = "Independent GPT review or a second implementation."
-```
-
-Then run:
-
-```bash
-npx @parcha/parable agents sync
-```
-
-Parable writes `parable-terra` and `parable-luna` agent definitions with exact
-`model:` fields. Live main-model transport and effort are proved for both
-models; a Sol-parent → named-GPT-subagent tool proof is the next gate and is
-not claimed by the current receipt.
-
-Kimi remains paused and is intentionally absent from this setup.
-
-## Evidence and boundaries
-
-- [Released-binary diagnosis](https://github.com/miguelrios/unc-skills/blob/main/parable/docs/evidence/g1-gpt-model-effort-live/EXIT.md)
-- [Patched source proof](https://github.com/miguelrios/unc-skills/blob/main/parable/docs/evidence/e1-cliproxy-effort-fix/EXIT.md)
-- [Patched live matrix](https://github.com/miguelrios/unc-skills/blob/main/parable/docs/evidence/e2-cliproxy-effort-live/EXIT.md)
-- [xAI OAuth and catalog proof](https://github.com/miguelrios/unc-skills/blob/main/parable/docs/evidence/x1-grok45-catalog/EXIT.md)
-- [Grok main-model matrix](https://github.com/miguelrios/unc-skills/blob/main/parable/docs/evidence/x2-grok45-main-permutations/EXIT.md)
-- [Sol to named Grok matrix](https://github.com/miguelrios/unc-skills/blob/main/parable/docs/evidence/x3-sol-grok-named-subagent/EXIT.md)
-
-This is a per-user localhost setup. CLIProxyAPI owns OAuth storage and token
-refresh; Parable stores neither provider credentials nor OAuth state. ChatGPT
-and xAI plan limits, model entitlements, and provider terms still apply. Do
-not expose the proxy port outside loopback.
+This remains an OSS, per-user localhost recipe. It does not require or support
+a shared credential broker.

@@ -140,12 +140,51 @@ keep every provider cursor behind the runner's Brain acknowledgement.
 - Drive captures a start-page token before its file backfill, then consumes
   changes. Only `removed` or explicitly trashed files become tombstones.
 
-Document attachments remain off. A Google Docs body can be exported as bounded
-plain text through the rail when explicitly enabled; other file types remain
-metadata-only. Preview and registration do not read credentials or sources.
+Gmail file attachments remain off by default. Setting the closed
+`include_attachments` selector to `true` turns each supported attachment into a
+child `document.v1`: exact bytes go only to the private content-addressed raw
+archive, while bounded extracted text goes through the same privacy policy and
+search projection as every other record. The initial allowlist is UTF-8 text,
+HTML, PDF, DOCX, and PPTX, with explicit omissions for unsupported, encrypted,
+malformed, or bounded-out content and deterministic duplicate suppression. A
+parent forget cascades through the child lineage and fences both identities
+against resurrection. Google Drive
+document bodies remain a separate opt-in: Docs can be exported as bounded plain
+text; other Drive file types remain metadata-only. Preview and registration do
+not read credentials or sources.
+
+Hosted operators may instead use `ComposioWorkspaceRail` as the authenticated
+transport. It creates a current Composio session for one stable Recall principal,
+one connector toolkit, and one explicitly pinned connected-account ID. Only the
+same immutable Workspace read-operation map can reach Composio proxy execution;
+the Google connectors continue to own normalization, incremental cursors,
+reconciliation, privacy, acknowledgements, and tombstones. Recall never exposes
+Composio tools or a generic proxy to an answering agent. Direct Google OAuth and
+the pinned CLI remain available for self-hosted deployments.
 
 Connectors are explicit Python objects. Recall does not discover or execute
 plugins, recipes, entry points, or code from the current directory.
+
+### Content fidelity invariant
+
+Recall is a brain, not a link catalog. A content-bearing connector must acquire
+the fullest authoritative text the provider exposes within the versioned record
+and transport bounds. It must not silently substitute a title, metadata, preview,
+or snippet for an available body. When a provider, format, policy, or hard safety
+bound prevents complete acquisition, the record must remain useful while declaring
+`content_fidelity=partial` and a non-empty, sorted, stable `content_omissions` list;
+`complete` is required on every other live typed record and cannot carry omissions.
+Snippet-formatted records can never claim complete fidelity. Tombstones carry only
+their closed record kind. File attachments are separate content surfaces and can
+claim complete only when their exact bytes are privately archived and their
+allowlisted content is fully extracted into a linked child document.
+
+Gmail follows this rule by collecting every non-attachment body section, preferring
+plain text within each MIME alternative, converting HTML-only bodies to text, and
+fetching body sections that Gmail externalizes behind an attachment ID. The Gmail
+snippet is last-resort fallback only and is always marked partial. Attachment
+metadata is always retained; bytes are fetched only when the owner enables the
+attachment selector, and raw bytes never enter the model-facing projection.
 
 ### Work APIs
 

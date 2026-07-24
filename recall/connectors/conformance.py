@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Protocol
 
 from connectors.kit import decode_page_wire, encode_page_wire
+from connectors.record_contract import validate_content_fidelity
 from connectors.registry import ConnectorDefinitionV3
 from connectors.sdk import (
     ConnectorContractError,
@@ -25,6 +26,7 @@ CONNECTOR_CONFORMANCE_VERSION = "recall.connector-conformance.v1"
 CONNECTOR_CONFORMANCE_CELLS = (
     "acknowledged_replay",
     "connector_identity",
+    "content_fidelity",
     "content_revision",
     "empty_terminal",
     "explicit_tombstone",
@@ -169,6 +171,14 @@ def _first_page_ack(factory: ConnectorFixtureFactory, root: Path) -> None:
         assert runner.doctor()["checkpointed"]
     finally:
         runner.close()
+
+
+def _content_fidelity(factory: ConnectorFixtureFactory, _root: Path) -> None:
+    connector = factory.build("content_fidelity")
+    page = connector.pull(None)
+    assert isinstance(page, ConnectorPage) and page.records
+    for record in page.records:
+        validate_content_fidelity(record.content, deleted=record.deleted)
 
 
 def _pagination(factory: ConnectorFixtureFactory, root: Path) -> None:
@@ -339,6 +349,7 @@ def _wire_round_trip(factory: ConnectorFixtureFactory, _root: Path) -> None:
 _CELL_RUNNERS = {
     "acknowledged_replay": _acknowledged_replay,
     "connector_identity": _connector_identity,
+    "content_fidelity": _content_fidelity,
     "content_revision": _content_revision,
     "empty_terminal": _empty_terminal,
     "explicit_tombstone": _explicit_tombstone,

@@ -48,6 +48,7 @@ def mapper(record):
         occurred_at=record.data.get("updated_at", "2026-07-18T10:00:00Z"),
         content={
             "kind": "document.v1",
+            "content_fidelity": "complete",
             "document_id": record.id,
             "mime_type": "text/plain",
             "name": record.data.get("title", "Synthetic"),

@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from .authorization import allowed_tools, decide
+
 LATEST_PROTOCOL_VERSION = "2025-11-25"
 SUPPORTED_PROTOCOL_VERSIONS = frozenset(
     {"2025-03-26", "2025-06-18", LATEST_PROTOCOL_VERSION}
@@ -118,7 +120,18 @@ READ_TOOLS = (
                     "maxLength": 8192,
                     "description": "A natural-language question or search phrase.",
                 },
-                "filters": {"type": "object", "default": {}},
+                "filters": {
+                    "type": "object",
+                    "default": {},
+                    "properties": {
+                        "since": {"type": "string", "format": "date-time"},
+                        "until": {"type": "string", "format": "date-time"},
+                        "source_id": {"type": "string"},
+                        "source_family": {"type": "string"},
+                        "source_alias": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
@@ -251,6 +264,11 @@ def _canonical_forget_enabled(principal: dict) -> bool:
 
 
 def _tools_for(principal: dict) -> tuple[dict, ...]:
+    if principal.get("credential_kind") == "mcp":
+        permitted = allowed_tools(principal)
+        return tuple(
+            tool for tool in READ_TOOLS + WRITE_TOOLS if tool["name"] in permitted
+        )
     if _write_enabled(principal):
         return READ_TOOLS + WRITE_TOOLS
     if _canonical_forget_enabled(principal):
@@ -381,7 +399,13 @@ def bound_response(response: dict, request_id: Any) -> dict:
     )
 
 
-def dispatch(store, principal: dict, message: Any) -> dict | None:
+def dispatch(
+    store,
+    principal: dict,
+    message: Any,
+    *,
+    authorize=None,
+) -> dict | None:
     request = _object(message, "request")
     request_id = request.get("id")
     if request.get("jsonrpc") != "2.0":
@@ -389,12 +413,27 @@ def dispatch(store, principal: dict, message: Any) -> dict | None:
     method = _string(request.get("method"), "method")
     params = _object(request.get("params", {}), "params")
 
+    def require_action(action: str, *, hide: bool = False) -> None:
+        if principal.get("credential_kind") != "mcp":
+            return
+        allowed = (
+            bool(authorize(action))
+            if authorize is not None
+            else decide(principal, action).allowed
+        )
+        if not allowed:
+            raise McpProtocolError(
+                -32602 if hide else -32600,
+                "unknown tool" if hide else "operation not authorized",
+            )
+
     if "id" not in request:
         if method == "notifications/initialized":
             return None
         raise McpProtocolError(-32600, "unsupported notification")
 
     if method == "initialize":
+        require_action("mcp.initialize")
         requested = params.get("protocolVersion")
         selected = (
             requested
@@ -411,13 +450,18 @@ def dispatch(store, principal: dict, message: Any) -> dict | None:
             },
         }
     elif method == "ping":
+        require_action("mcp.ping")
         result = {}
     elif method == "tools/list":
+        require_action("mcp.tools.list")
         result = {"tools": list(_tools_for(principal))}
     elif method == "tools/call":
         name = _string(params.get("name"), "name")
         if name not in {tool["name"] for tool in _tools_for(principal)}:
+            if principal.get("credential_kind") == "mcp":
+                require_action(f"mcp.{name}", hide=True)
             raise McpProtocolError(-32602, "unknown tool")
+        require_action(f"mcp.{name}", hide=True)
         arguments = _object(params.get("arguments", {}), "arguments")
         result = _tool_result(_call_tool(store, principal, name, arguments))
     else:

@@ -36,7 +36,7 @@ Schema is versioned: `[parable] version = 1`. Unknown versions refuse to load.
 
 ## `[claude]`
 
-Optional stock-Claude-Code launcher configuration. It is required by `parable claude` and
+Optional stock-Claude-Code launcher configuration. It is required by bare `parable` and
 `parable agents sync`; ordinary Parable dispatch remains unchanged when the table is absent.
 
 | Field | Default | Meaning |
@@ -46,13 +46,23 @@ Optional stock-Claude-Code launcher configuration. It is required by `parable cl
 | `brain_model` | required | Exact model id for the main Claude Code session, such as `gpt-5.6-sol`. |
 | `binary` | `claude` | Optional Claude Code command name or path. |
 
-`parable claude` checks `/v1/models` before launch and requires the brain model plus every
+`parable` checks `/v1/models` before launch and requires the brain model plus every
 configured arbitrary-model Claude executor to be present. It then synchronizes project-local
 `.claude/agents/parable-*.md` files and launches Claude Code with per-process
 `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`; it does not write global Claude settings.
 The source token variable, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and
 `CLAUDE_CODE_SUBAGENT_MODEL` are removed from the child environment. A forwarded `--model`
-is rejected because `brain_model` is the declarative source of truth.
+is rejected so parent selection stays inside Parable's declared policy.
+
+The launcher-level `--brain` policy can be `config`, `fable`, `sol`, or `auto`. `config` uses
+`brain_model` verbatim. `auto` prefers configured Fable while its live Claude usage is below
+80%, probes ChatGPT only when that pool is tight, and then selects Sol when it has more or
+unknown headroom. Explicit `fable` or `sol` fails unless that exact model is configured and
+present in the authenticated catalog. Bare `parable` means `--brain auto` with high effort.
+Claude flags pass through directly; use `parable --dangerously-skip-permissions` or pin the
+brain with `parable --brain fable --effort high`. An optional `--` can separate Parable's brain
+option from Claude arguments. Interactive sessions show this selection and the usable executor
+cast in Claude Code via a user-only startup system message; the model does not receive the card.
 
 For a custom executor id such as `kimi`, `parable agents sync` creates the native Claude agent
 name `parable-kimi` with the exact configured model id. Only files carrying Parable's generated
@@ -80,7 +90,7 @@ Unknown `type` values fail validation loudly (future harnesses will extend this 
 |---|---|---|
 | `provider` | required | a `[providers.*]` id |
 | `model` | required | provider-form model id |
-| `effort` | `high` | `minimal`–`ultra` (`max`/`ultra` exist on GPT-5.6-class models; `ultra` flips codex into proactive multi-agent delegation — the executor spawns its own subagent threads, highest per-turn burn, so reserve it for deliberately dispatched batch clusters); ALWAYS set it explicitly — parable pins it on dispatch precisely so runs never inherit the local user's harness config, which would make cost non-reproducible across machines. pi executors map it to `--thinking`, additionally accept `off`, and cap at `max` (no `ultra`). `parable-run.sh --effort <level>` overrides it for one dispatch |
+| `effort` | `high` | `minimal`–`ultra` for Codex (`max`/`ultra` exist on GPT-5.6-class models; `ultra` flips codex into proactive multi-agent delegation). pi maps this to `--thinking`, additionally accepts `off`, and caps at `max`. Claude `subagent` accepts `low`, `medium`, `high`, `xhigh`, or `max`; Parable writes it into generated agent frontmatter. ALWAYS set it explicitly so runs never inherit a user's local harness default. `parable-run.sh --effort <level>` overrides CLI-backed executors for one dispatch. |
 | `reasoning` | true | pi only: the generated model entry's reasoning flag |
 | `model_overrides` | `{}` | pi only: raw fields merged into the generated model entry last (`maxTokens`, model-level `compat`, …) — pi's analog of `extra_config` |
 | `cost` | — | `{ in, out, cache_in }` $/Mtok; informational + tie-breaks |
@@ -110,9 +120,11 @@ Unknown `type` values fail validation loudly (future harnesses will extend this 
 
 ## `[routing]`
 
-Keys are task classes (`mechanical`, `feature`, `refactor_wide`, `gnarly`, `review`,
-`smoke_test`, `escalation`), values are ordered executor-id lists. `notes` is prose for the
-brain. Chains referencing unknown executors fail validation.
+Keys are task classes such as `mechanical`, `data_transform`, `frontend`, `feature`,
+`refactor_wide`, `gnarly`, `review`, `smoke_test`, and `architecture`. Their executor-id lists
+are capable-peer menus selected by task fit and live subscription headroom, not priority
+ladders. `escalation` is the exception: it is ordered. `notes` is prose for the brain. Lists
+referencing unknown executors fail validation.
 
 ## Runtime artifacts
 

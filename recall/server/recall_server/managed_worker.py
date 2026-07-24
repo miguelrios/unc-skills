@@ -16,11 +16,13 @@ from connectors.host import (
     HOSTED_FACTORIES,
     RemoteOptions,
 )
+from connectors.composio_workspace_rail import ComposioWorkspaceRail
 from connectors.registry import (
     ConnectorDefinitionV3,
     RUNTIME_ERROR_CODES,
     definition,
 )
+from connectors.workspace_rail import WorkspaceRailError
 from connectors.sdk import (
     ConnectorContractError,
     ConnectorRunner,
@@ -52,12 +54,22 @@ def _worker_identity(value: str | None = None) -> str:
 def _private_root(path: Path) -> Path:
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    metadata = path.lstat()
-    if (
-        stat.S_ISLNK(metadata.st_mode)
-        or not stat.S_ISDIR(metadata.st_mode)
-        or stat.S_IMODE(metadata.st_mode) != 0o700
-    ):
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise ValueError("managed worker state root is not private") from error
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError("managed worker state root is not private")
+        os.fchmod(descriptor, 0o700)
+        metadata = os.fstat(descriptor)
+    except OSError as error:
+        raise ValueError("managed worker state root is not private") from error
+    finally:
+        os.close(descriptor)
+    if stat.S_IMODE(metadata.st_mode) != 0o700:
         raise ValueError("managed worker state root is not private")
     return path
 
@@ -65,6 +77,7 @@ def _private_root(path: Path) -> Path:
 def _selector_defaults(connector_id: str) -> dict[str, Any]:
     return {
         "google.gmail": {
+            "include_attachments": False,
             "include_spam_trash": False,
             "label_ids": [],
             "own_addresses": [],
@@ -133,6 +146,7 @@ class ManagedConnectorWorker:
         remote_rails: Mapping[str, Any] | None = None,
         interval_seconds: int = DEFAULT_INTERVAL_SECONDS,
         lease_seconds: int = DEFAULT_LEASE_SECONDS,
+        embedding_max_batches: int = 1,
     ):
         if (
             type(interval_seconds) is not int
@@ -141,6 +155,13 @@ class ManagedConnectorWorker:
             or not 30 <= lease_seconds <= 3600
         ):
             raise ValueError("managed worker timing is invalid")
+        if (
+            type(embedding_max_batches) is not int
+            or not 1 <= embedding_max_batches <= 100
+        ):
+            raise ValueError(
+                "managed worker embedding batch configuration is invalid"
+            )
         self.store = store
         self.archive = archive
         self.secret_box = secret_box
@@ -152,6 +173,7 @@ class ManagedConnectorWorker:
         self.remote_rails = dict(remote_rails or {})
         self.interval_seconds = interval_seconds
         self.lease_seconds = lease_seconds
+        self.embedding_max_batches = embedding_max_batches
         self.plane = CanonicalPlane(store, archive)
         self.retrieval = CanonicalRetrieval(store, archive)
 
@@ -252,18 +274,53 @@ class ManagedConnectorWorker:
             or connector_definition.execution_placement != "remote_worker"
         ):
             raise ControlError("connector_schema_drift")
-        authority_path = private_directory / "source-authority"
-        descriptor = os.open(
-            authority_path,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-            0o600,
-        )
-        try:
-            payload = self._credential_payload(connector_id, credentials)
-            os.write(descriptor, payload)
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        rails = self.remote_rails
+        if row.get("provider") == "composio":
+            if not connector_id.startswith("google."):
+                raise ControlError("connector_schema_drift")
+            api_key = os.environ.get("RECALL_COMPOSIO_API_KEY", "")
+            user_id = credentials.get("user_id")
+            connected_account_id = credentials.get("connected_account_id")
+            toolkit = credentials.get("toolkit")
+            if not all(
+                isinstance(value, str) and value
+                for value in (api_key, user_id, connected_account_id, toolkit)
+            ):
+                raise ControlError("connector_authority_revoked")
+            binary_hosts = tuple(
+                value.strip()
+                for value in os.environ.get(
+                    "RECALL_COMPOSIO_BINARY_HOSTS", ""
+                ).split(",")
+                if value.strip()
+            )
+            try:
+                composio_rail = ComposioWorkspaceRail(
+                    api_key=api_key,
+                    user_id=user_id,
+                    connected_account_id=connected_account_id,
+                    connector_id=connector_id,
+                    binary_hosts=binary_hosts,
+                )
+            except WorkspaceRailError:
+                raise ControlError("connector_authority_revoked") from None
+            if composio_rail.toolkit != toolkit:
+                raise ControlError("connector_authority_revoked")
+            rails = {**self.remote_rails, connector_id: composio_rail}
+            authority_path = private_directory / "composio-reference"
+        else:
+            authority_path = private_directory / "source-authority"
+            descriptor = os.open(
+                authority_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+            try:
+                payload = self._credential_payload(connector_id, credentials)
+                os.write(descriptor, payload)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
         options = RemoteOptions.from_mapping(
             connector_id,
             {
@@ -272,7 +329,11 @@ class ManagedConnectorWorker:
                     "path": str(authority_path),
                 },
                 "spool": str(self.spool_root / f"{row['id']}.db"),
-                "page_size": 25 if connector_id == "x.activity" else 100,
+                "page_size": (
+                    10
+                    if connector_id == "google.gmail"
+                    else 25 if connector_id == "x.activity" else 100
+                ),
                 "timeout_seconds": 60,
                 "selectors": _selectors(
                     connector_id,
@@ -285,7 +346,7 @@ class ManagedConnectorWorker:
             options,
             row["source_id"],
             row["privacy_mode"],
-            self.remote_rails,
+            rails,
         )
         return connector, spool
 
@@ -395,9 +456,8 @@ class ManagedConnectorWorker:
                     "error_code": code,
                 }
             embedding = self.retrieval.embed_pending(
-                tenant_id=row["tenant_id"],
                 batch_size=100,
-                max_batches=1,
+                max_batches=self.embedding_max_batches,
             )
             has_more = bool(result.get("has_more", False))
             self._finish(
@@ -457,6 +517,9 @@ def run_managed_worker(
         SecretBox.from_env(),
         state_root=state_root,
         interval_seconds=interval_seconds,
+        embedding_max_batches=int(
+            os.environ.get("RECALL_CANONICAL_EMBED_MAX_BATCHES", "1")
+        ),
     )
     cycles = committed = failed = 0
     while True:

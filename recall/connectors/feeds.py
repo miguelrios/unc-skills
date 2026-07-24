@@ -363,6 +363,7 @@ class FeedConnector:
             occurred_at = _time(published)
             content: dict[str, Any] = {
                 "kind": "document.v1",
+                "content_fidelity": "complete",
                 "document_id": native_id,
                 "mime_type": (
                     "application/rss+xml"

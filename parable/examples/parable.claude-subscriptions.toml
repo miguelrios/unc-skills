@@ -1,5 +1,5 @@
-# ChatGPT- and xAI-subscription-backed models in one stock Claude Code session
-# through a local Claude-compatible proxy. This file contains no
+# ChatGPT-, Claude-, and xAI-subscription-backed models in one stock Claude
+# Code session through a local Claude-compatible proxy. This file contains no
 # OAuth/provider credentials: only the NAME of the environment variable
 # holding the proxy's localhost client token. Configure and authenticate the
 # local proxy separately.
@@ -7,12 +7,12 @@
 [parable]
 version = 1
 default_executor = "terra"
-default_reviewer = "opus"
+default_reviewer = "opus_exact"
 
 [claude]
 base_url = "http://127.0.0.1:8317"
 auth_token_env = "CLIPROXY_API_KEY"
-brain_model = "gpt-5.6-sol"
+brain_model = "claude-fable-5"
 
 [providers.claude]
 type = "subagent"
@@ -20,27 +20,75 @@ type = "subagent"
 [executors.grok]
 provider = "claude"
 model = "grok-4.5"
-tags = ["implementer", "third-family", "subscription"]
-use_for = "Independent implementation or adversarial review through the xAI subscription."
-avoid_for = "Reviewing its own diff."
+effort = "high"
+tags = ["implementer", "systems", "third-family", "subscription"]
+use_for = "Bounded terminal-heavy or systems implementation, especially Rust or C++, plus cross-family smoke testing."
+avoid_for = "Sole final factual review, orchestration, ambiguous product architecture, or reviewing its own diff."
+
+[executors.sol_exact]
+provider = "claude"
+model = "gpt-5.6-sol"
+effort = "xhigh"
+tags = ["implementer", "reviewer", "subscription"]
+use_for = "Long implementation, difficult debugging, or high-recall review when Sol is not the parent model."
+avoid_for = "Delegation from a Sol parent, routine work, or sole ownership of ambiguous product architecture."
 
 [executors.terra]
 provider = "claude"
 model = "gpt-5.6-terra"
-tags = ["implementer", "subscription"]
-use_for = "Independent GPT implementation or debugging."
+effort = "xhigh"
+tags = ["frontend", "implementer", "subscription"]
+use_for = "React and frontend implementation, visual UI work, or a tightly scoped code fix."
+avoid_for = "Wide architecture, long autonomous refactors, or reviewing its own diff."
 
 [executors.luna]
 provider = "claude"
 model = "gpt-5.6-luna"
-tags = ["reviewer", "subscription"]
-use_for = "Independent GPT review or a second implementation."
+effort = "medium"
+tags = ["data", "mechanical", "subscription"]
+use_for = "Data transforms, scaffolding, test generation, or other bounded mechanical work."
+avoid_for = "Complex symbolic constraints, architecture, long-context refactors, or final high-risk review."
+
+[executors.fable_exact]
+provider = "claude"
+model = "claude-fable-5"
+effort = "high"
+tags = ["architect", "implementer", "subscription"]
+use_for = "Ambiguous planning, architecture, and long autonomous implementation when Fable is not the parent model."
+avoid_for = "Delegation from a Fable parent or routine work that should preserve the parent model's quota."
+
+[executors.sonnet_exact]
+provider = "claude"
+model = "claude-sonnet-5"
+effort = "high"
+tags = ["debugger", "implementer", "subscription"]
+use_for = "Brownfield feature implementation, debugging, and test repair."
+avoid_for = "Mechanical work or reviewing its own diff."
+
+[executors.opus_exact]
+provider = "claude"
+model = "claude-opus-4-8"
+effort = "xhigh"
+tags = ["architect", "reviewer", "subscription"]
+use_for = "High-blast-radius review, architecture critique, or difficult debugging."
+avoid_for = "Routine edits, primary frontend implementation, or reviewing its own diff."
+
+[executors.haiku_exact]
+provider = "claude"
+model = "claude-haiku-4-5-20251001"
+effort = "low"
+tags = ["explorer", "mechanical", "subscription"]
+use_for = "Fast repository exploration, lookup, and simple mechanical edits."
+avoid_for = "Architecture, difficult debugging, or final high-risk review."
 
 [routing]
-mechanical    = ["luna", "sonnet"]
-feature       = ["terra", "sonnet", "grok"]
-refactor_wide = ["terra", "sonnet", "grok"]
-gnarly        = ["opus"]
-review        = ["opus", "luna", "grok"]
-smoke_test    = ["opus"]
-escalation    = ["terra", "sonnet", "grok", "opus"]
+mechanical     = ["luna", "haiku_exact"]
+data_transform = ["luna", "terra", "sonnet_exact"]
+frontend       = ["terra", "sol_exact", "sonnet_exact"]
+feature        = ["terra", "sol_exact", "sonnet_exact", "grok"]
+refactor_wide  = ["sol_exact", "sonnet_exact", "opus_exact", "fable_exact", "grok"]
+gnarly         = ["sol_exact", "opus_exact", "fable_exact", "grok"]
+review         = ["opus_exact", "sol_exact", "terra", "sonnet_exact", "grok"]
+smoke_test     = ["grok", "sol_exact", "luna", "sonnet_exact"]
+architecture   = ["fable_exact", "opus_exact", "sol_exact"]
+escalation     = ["fable_exact", "opus_exact", "sol_exact", "grok", "terra", "sonnet_exact"]

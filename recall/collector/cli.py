@@ -31,6 +31,13 @@ def main() -> None:
     parser.add_argument("--principal-id", default="owner")
     parser.add_argument("--visibility", choices=("private", "shared"), default="private")
     parser.add_argument("--interval", type=float, default=30.0)
+    parser.add_argument("--max-scan-records", type=int, default=1000)
+    parser.add_argument("--max-scan-seconds", type=float, default=20.0)
+    parser.add_argument(
+        "--archive-workers",
+        type=int,
+        default=int(os.environ.get("RECALL_ARCHIVE_WORKERS", "2")),
+    )
     parser.add_argument("--shard-count", type=int, default=1)
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--receipt")
@@ -85,6 +92,9 @@ def main() -> None:
         brain_writer=canonical[0] if canonical else None,
         archive=canonical[1] if canonical else None,
         tenant_id=canonical[2] if canonical else None,
+        archive_workers=args.archive_workers,
+        max_scan_records=args.max_scan_records,
+        max_scan_seconds=args.max_scan_seconds,
     )
     if args.shard_count < 1 or not 0 <= args.shard_index < args.shard_count:
         parser.error("shard index must be within shard count")

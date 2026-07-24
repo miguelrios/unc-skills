@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 import http.client
 import json
 import os
@@ -18,12 +19,18 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT), str(ROOT / "server")]
 
 from recall_server.app import Handler
-from recall_server.control import ControlPlane, OAuthTokens, SecretBox
+from recall_server.control import (
+    ControlPlane,
+    ManagedOAuthStart,
+    OAuthTokens,
+    SecretBox,
+)
 from recall_server.db import BrainStore
 
 
 OWNER = "principal:owner:e2e-control"
 OUTSIDER = "principal:outsider:e2e-control"
+ADMIN = "principal:admin:e2e-control"
 PERSONAL = "tenant:personal:e2e-control"
 COMPANY = "tenant:company:e2e-control"
 SECRET_CANARY = "synthetic-refresh-token-never-render"
@@ -72,6 +79,71 @@ class FakeGoogle:
         self.revoked = True
 
 
+class FakeComposio:
+    provider_id = "composio"
+    managed_connection = True
+
+    def __init__(self):
+        self.revoked = False
+        self.completed = 0
+
+    def start_connection(self, *, user_id, connector_id, state):
+        assert user_id == OWNER
+        assert connector_id == "google.drive"
+        return ManagedOAuthStart(
+            authorization_url=(
+                "https://connect.composio.dev/link/synthetic?"
+                + urlencode({"state": state})
+            ),
+            connected_account_id="ca_synthetic_drive_123",
+        )
+
+    def complete_connection(
+        self,
+        *,
+        user_id,
+        connector_id,
+        expected_connected_account_id,
+        callback_connected_account_id,
+        callback_status,
+        required_scopes,
+    ):
+        assert user_id == OWNER
+        assert connector_id == "google.drive"
+        assert expected_connected_account_id == "ca_synthetic_drive_123"
+        assert callback_connected_account_id == expected_connected_account_id
+        assert callback_status == "success"
+        self.completed += 1
+        return OAuthTokens(
+            subject_id="googledrive:ca_synthetic_drive_123",
+            granted_scopes=tuple(required_scopes),
+            credentials={
+                "user_id": user_id,
+                "connected_account_id": expected_connected_account_id,
+                "toolkit": "googledrive",
+            },
+            expires_at=None,
+        )
+
+    def revoke(self, credentials):
+        assert set(credentials) == {
+            "user_id",
+            "connected_account_id",
+            "toolkit",
+        }
+        self.revoked = True
+
+
+class FakeInvitationEmailSender:
+    provider = "synthetic"
+
+    def __init__(self):
+        self.messages = []
+
+    def send(self, invitation):
+        self.messages.append(invitation)
+
+
 def request(server, method, path, *, body=None, cookie=None, csrf=None):
     payload = None if body is None else json.dumps(body).encode()
     headers = {"Accept": "application/json"}
@@ -82,9 +154,7 @@ def request(server, method, path, *, body=None, cookie=None, csrf=None):
         headers["Cookie"] = cookie
     if csrf:
         headers["X-Recall-CSRF"] = csrf
-    connection = http.client.HTTPConnection(
-        "127.0.0.1", server.server_port, timeout=10
-    )
+    connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=10)
     connection.request(method, path, body=payload, headers=headers)
     response = connection.getresponse()
     raw = response.read()
@@ -119,6 +189,7 @@ def main():
     store = BrainStore(os.environ["RECALL_DATABASE_URL"])
     store.migrate()
     tables = (
+        "authorization_audit_events,brain_invitations,external_identity_bindings,"
         "control_audit_events,connector_installations,provider_connections,"
         "oauth_sessions,admin_sessions,admin_credentials,"
         "canonical_source_grants,brain_access_grants,brain_memberships,"
@@ -145,21 +216,36 @@ def main():
         owner_principal_id=OWNER,
     )
     with store.connect() as connection:
+        for principal_id in (OUTSIDER, ADMIN):
+            connection.execute(
+                """INSERT INTO brain_principals(tenant_id,principal_id)
+                   VALUES (%s,%s)""",
+                (COMPANY, principal_id),
+            )
+            connection.execute(
+                """INSERT INTO brain_access_grants(
+                       tenant_id,principal_id,permission
+                   ) VALUES (%s,%s,'admin')""",
+                (COMPANY, principal_id),
+            )
         connection.execute(
-            """INSERT INTO brain_principals(tenant_id,principal_id)
-               VALUES (%s,%s)""",
-            (COMPANY, OUTSIDER),
-        )
-        connection.execute(
-            """INSERT INTO brain_access_grants(
-                   tenant_id,principal_id,permission
-               ) VALUES (%s,%s,'admin')""",
-            (COMPANY, OUTSIDER),
+            """INSERT INTO brain_memberships(
+                   organization_id,principal_id,role
+               ) VALUES ('org:company:e2e-control',%s,'admin')""",
+            (ADMIN,),
         )
 
     provider = FakeGoogle()
+    composio = FakeComposio()
+    invitation_email_sender = FakeInvitationEmailSender()
     box = SecretBox(b"e" * 32)
-    control = ControlPlane(store, box, {"google": provider})
+    control = ControlPlane(
+        store,
+        box,
+        {"google": provider, "composio": composio},
+        invitation_email_sender=invitation_email_sender,
+        mcp_resource_uri="https://recall.synthetic.invalid/mcp",
+    )
     owner_token = control.create_admin_token(
         "owner-control-e2e",
         principal_id=OWNER,
@@ -167,6 +253,10 @@ def main():
     outsider_token = control.create_admin_token(
         "outsider-control-e2e",
         principal_id=OUTSIDER,
+    )["token"]
+    admin_token = control.create_admin_token(
+        "admin-control-e2e",
+        principal_id=ADMIN,
     )["token"]
     previous = {
         key: os.environ.get(key)
@@ -193,15 +283,20 @@ def main():
         assert status == 200
         assert b"Recall Switchboard" in page
         assert b"Choose what your" in page
+        assert b"Company access" in page
+        assert b"Open a door" in page
         assert b"Admin access key" in page
         security = dict(headers)
         assert security["X-Frame-Options"] == "DENY"
         assert security["Content-Security-Policy"].startswith("default-src 'none'")
 
-        status, _, stylesheet = request(
-            server, "GET", "/admin/assets/admin.css"
-        )
+        status, _, stylesheet = request(server, "GET", "/admin/assets/admin.css")
         assert status == 200 and b"--acid: #c8ff52" in stylesheet
+        status, _, script = request(server, "GET", "/admin/assets/admin.js")
+        assert status == 200 and b"/mcp/brains/" in script
+        assert b"navigator.clipboard.writeText" in script
+        assert b'left.brain_kind === "personal" ? 0 : 1' in script
+        assert b"Company brains are shared." in script
         status, _, denied = request(server, "GET", "/admin/api/v1/state")
         assert status == 401 and denied["error"] == "admin_session_invalid"
         status, _, denied = request(
@@ -214,18 +309,179 @@ def main():
 
         owner_cookie, owner_csrf = login(server, owner_token)
         outsider_cookie, outsider_csrf = login(server, outsider_token)
+        admin_cookie, admin_csrf = login(server, admin_token)
         status, _, initial = request(
             server, "GET", "/admin/api/v1/state", cookie=owner_cookie
         )
         assert status == 200
         assert len(initial["brains"]) == 2
-        assert initial["providers"] == [{"id": "google", "status": "available"}]
+        assert initial["providers"] == [
+            {"id": "composio", "status": "available"},
+            {"id": "google", "status": "available"},
+        ]
         assert {item["connector_id"] for item in initial["catalog"]}.issuperset(
             {"google.gmail", "google.calendar", "custom.webhook"}
         )
         rendered = json.dumps(initial)
         assert SECRET_CANARY not in rendered
         assert "token_sha256" not in rendered
+        assert initial["invitations"] == []
+
+        invitation_body = {
+            "tenant_id": COMPANY,
+            "email": "Teammate@Example.com",
+            "role": "member",
+        }
+        status, _, denied = request(
+            server,
+            "POST",
+            "/admin/api/v1/invitations",
+            body=invitation_body,
+            cookie=owner_cookie,
+        )
+        assert status == 403 and denied["error"] == "admin_csrf_invalid"
+        status, _, denied = request(
+            server,
+            "POST",
+            "/admin/api/v1/invitations",
+            body={**invitation_body, "tenant_id": PERSONAL},
+            cookie=owner_cookie,
+            csrf=owner_csrf,
+        )
+        assert status == 403 and denied["error"] == "brain_admin_forbidden"
+        status, _, denied = request(
+            server,
+            "POST",
+            "/admin/api/v1/invitations",
+            body=invitation_body,
+            cookie=outsider_cookie,
+            csrf=outsider_csrf,
+        )
+        assert status == 403 and denied["error"] == "brain_admin_forbidden"
+        status, _, invitation = request(
+            server,
+            "POST",
+            "/admin/api/v1/invitations",
+            body=invitation_body,
+            cookie=owner_cookie,
+            csrf=owner_csrf,
+        )
+        assert status == 201
+        assert invitation["email"] == "teammate@example.com"
+        assert invitation["status"] == "pending"
+        assert invitation["delivery"] == {
+            "status": "sent",
+            "provider": "synthetic",
+        }
+        assert len(invitation_email_sender.messages) == 1
+        delivered = invitation_email_sender.messages[0]
+        assert delivered.recipient == "teammate@example.com"
+        assert delivered.organization_name == "Synthetic Company"
+        assert (
+            delivered.brain_url
+            == "https://recall.synthetic.invalid/mcp/brains/"
+            "tenant:company:e2e-control"
+        )
+        status, headers, onboarding = request(
+            server,
+            "GET",
+            f"/join/{invitation['id']}",
+        )
+        assert status == 200
+        assert b"npm install -g @openai/codex" in onboarding
+        assert b"npm install -g @anthropic-ai/claude-code" in onboarding
+        assert b"codex mcp login recall-company-control" in onboarding
+        assert b"claude mcp login recall-company-control" in onboarding
+        assert b"teammate@example.com" not in onboarding
+        security = dict(headers)
+        assert security["Referrer-Policy"] == "no-referrer"
+        assert security["X-Frame-Options"] == "DENY"
+        status, _, denied = request(
+            server,
+            "POST",
+            f"/admin/api/v1/invitations/{invitation['id']}/revoke",
+            body={},
+            cookie=outsider_cookie,
+            csrf=outsider_csrf,
+        )
+        assert status == 403 and denied["error"] == "brain_admin_forbidden"
+        with store.connect() as connection:
+            stored = connection.execute(
+                """SELECT encrypted_email,email_sha256
+                   FROM brain_invitations WHERE id=%s""",
+                (invitation["id"],),
+            ).fetchone()
+            assert b"teammate@example.com" not in bytes(stored["encrypted_email"])
+            assert stored["email_sha256"] != "teammate@example.com"
+            assert stored["email_sha256"] != hashlib.sha256(
+                b"teammate@example.com"
+            ).hexdigest()
+        status, _, invited_state = request(
+            server, "GET", "/admin/api/v1/state", cookie=owner_cookie
+        )
+        assert status == 200
+        assert invited_state["invitations"] == [
+            {
+                "id": invitation["id"],
+                "tenant_id": COMPANY,
+                "email": "teammate@example.com",
+                "role": "member",
+                "status": "pending",
+                "expires_at": invitation["expires_at"],
+            }
+        ]
+        status, _, revoked = request(
+            server,
+            "POST",
+            f"/admin/api/v1/invitations/{invitation['id']}/revoke",
+            body={},
+            cookie=owner_cookie,
+            csrf=owner_csrf,
+        )
+        assert status == 200 and revoked["status"] == "revoked"
+        status, _, hidden = request(
+            server,
+            "GET",
+            f"/join/{invitation['id']}",
+        )
+        assert status == 404 and hidden["error"] == "not found"
+        status, _, denied = request(
+            server,
+            "POST",
+            "/admin/api/v1/invitations",
+            body={
+                "tenant_id": COMPANY,
+                "email": "escalation@example.com",
+                "role": "admin",
+            },
+            cookie=admin_cookie,
+            csrf=admin_csrf,
+        )
+        assert status == 403 and denied["error"] == "brain_role_forbidden"
+        status, _, delegated = request(
+            server,
+            "POST",
+            "/admin/api/v1/invitations",
+            body={
+                "tenant_id": COMPANY,
+                "email": "member@example.com",
+                "role": "member",
+            },
+            cookie=admin_cookie,
+            csrf=admin_csrf,
+        )
+        assert status == 201 and delegated["role"] == "member"
+        assert delegated["delivery"]["status"] == "sent"
+        assert len(invitation_email_sender.messages) == 2
+        status, _, revoked = request(
+            server,
+            "POST",
+            f"/admin/api/v1/invitations/{delegated['id']}/revoke",
+            body={},
+            cookie=admin_cookie,
+            csrf=admin_csrf,
+        )
+        assert status == 200 and revoked["status"] == "revoked"
 
         device_body = {
             "connector_id": "local.codex",
@@ -301,9 +557,7 @@ def main():
         credential = store.authenticate_bearer(rerouted["token"], "write")
         assert credential and credential["tenant_id"] == COMPANY
         rerouted_action = (
-            "/admin/api/v1/installations/"
-            + rerouted["installation_id"]
-            + "/actions"
+            "/admin/api/v1/installations/" + rerouted["installation_id"] + "/actions"
         )
         status, _, revoked_device = request(
             server,
@@ -384,9 +638,8 @@ def main():
         )
         assert status == 403 and denied["error"] == "oauth_brain_forbidden"
 
-        callback = (
-            "/admin/oauth/callback/google?"
-            + urlencode({"state": state, "code": "synthetic-code"})
+        callback = "/admin/oauth/callback/google?" + urlencode(
+            {"state": state, "code": "synthetic-code"}
         )
         status, headers, raw = request(server, "GET", callback)
         assert status == 303 and dict(headers)["Location"] == "/admin?oauth=connected"
@@ -404,18 +657,15 @@ def main():
             csrf=owner_csrf,
         )
         assert status == 201
-        reauth_state = parse_qs(
-            urlsplit(reauth["authorization_url"]).query
-        )["state"][0]
+        reauth_state = parse_qs(urlsplit(reauth["authorization_url"]).query)["state"][0]
         with store.connect() as connection:
             connection.execute(
                 """UPDATE brain_access_grants SET permission='read'
                    WHERE tenant_id=%s AND principal_id=%s""",
                 (COMPANY, OWNER),
             )
-        denied_callback = (
-            "/admin/oauth/callback/google?"
-            + urlencode({"state": reauth_state, "code": "synthetic-code"})
+        denied_callback = "/admin/oauth/callback/google?" + urlencode(
+            {"state": reauth_state, "code": "synthetic-code"}
         )
         status, _, denied = request(server, "GET", denied_callback)
         assert status == 403 and denied["error"] == "oauth_brain_forbidden"
@@ -442,10 +692,66 @@ def main():
         }
         assert SECRET_CANARY not in json.dumps(connected)
 
-        first = connected["installations"][0]
-        action_path = (
-            f"/admin/api/v1/installations/{first['id']}/actions"
+        composio_route = [
+            {
+                "connector_id": "google.drive",
+                "tenant_id": PERSONAL,
+                "privacy_mode": "scrub",
+                "selectors": {},
+            }
+        ]
+        status, _, denied = request(
+            server,
+            "POST",
+            "/admin/api/v1/oauth/start",
+            body={"provider": "composio", "routes": composio_route + routes[:1]},
+            cookie=owner_cookie,
+            csrf=owner_csrf,
         )
+        assert status == 400 and denied["error"] == "oauth_routes_invalid"
+        status, _, hosted = request(
+            server,
+            "POST",
+            "/admin/api/v1/oauth/start",
+            body={"provider": "composio", "routes": composio_route},
+            cookie=owner_cookie,
+            csrf=owner_csrf,
+        )
+        assert status == 201
+        hosted_state = parse_qs(urlsplit(hosted["authorization_url"]).query)["state"][0]
+        invalid_hosted_callback = "/admin/oauth/callback/composio?" + urlencode(
+            {
+                "state": hosted_state,
+                "status": "success",
+                "connected_account_id": "ca_synthetic_drive_123",
+                "unexpected": "blocked",
+            }
+        )
+        status, _, denied = request(server, "GET", invalid_hosted_callback)
+        assert status == 400 and denied["error"] == "oauth_callback_invalid"
+        hosted_callback = "/admin/oauth/callback/composio?" + urlencode(
+            {
+                "state": hosted_state,
+                "status": "success",
+                "connected_account_id": "ca_synthetic_drive_123",
+            }
+        )
+        status, headers, raw = request(server, "GET", hosted_callback)
+        assert status == 303 and dict(headers)["Location"] == "/admin?oauth=connected"
+        assert raw == b"" and composio.completed == 1
+        status, _, denied = request(server, "GET", hosted_callback)
+        assert status == 403 and denied["error"] == "oauth_state_invalid"
+
+        status, _, with_hosted = request(
+            server, "GET", "/admin/api/v1/state", cookie=owner_cookie
+        )
+        assert status == 200
+        assert len(with_hosted["connections"]) == 2
+        assert len(with_hosted["installations"]) == 3
+        assert SECRET_CANARY not in json.dumps(with_hosted)
+
+        first = connected["installations"][0]
+        action_path = f"/admin/api/v1/installations/{first['id']}/actions"
         status, _, paused = request(
             server,
             "POST",
@@ -465,7 +771,11 @@ def main():
         )
         assert status == 200 and replay["replay"]
 
-        connection_id = connected["connections"][0]["id"]
+        connection_id = next(
+            item["id"]
+            for item in with_hosted["connections"]
+            if item["provider"] == "google"
+        )
         status, _, revoked = request(
             server,
             "POST",
@@ -489,11 +799,31 @@ def main():
             ).fetchone()["count"]
         assert row["status"] == "revoked"
         assert row["encryption_key_id"] == box.key_id
-        assert box.open(
-            bytes(row["encrypted_credentials"]),
-            purpose=f"provider-connection:{connection_id}",
-        ) == {}
-        assert consumed == 2
+        assert (
+            box.open(
+                bytes(row["encrypted_credentials"]),
+                purpose=f"provider-connection:{connection_id}",
+            )
+            == {}
+        )
+        assert consumed == 3
+
+        hosted_connection_id = next(
+            item["id"]
+            for item in with_hosted["connections"]
+            if item["provider"] == "composio"
+        )
+        status, _, hosted_revoked = request(
+            server,
+            "POST",
+            f"/admin/api/v1/connections/{hosted_connection_id}/revoke",
+            body={},
+            cookie=owner_cookie,
+            csrf=owner_csrf,
+        )
+        assert status == 200
+        assert hosted_revoked["installations_revoked"] == 1
+        assert composio.revoked
     finally:
         server.shutdown()
         server.server_close()
@@ -511,16 +841,18 @@ def main():
             {
                 "status": "pass",
                 "brains": 2,
-                "routes": 4,
+                "routes": 5,
                 "device_token_rotations": 1,
                 "paused_device_authority_denials": 1,
                 "cross_brain_admin_writes": 0,
                 "mid_flow_authority_revocations": 1,
                 "csrf_denials": 1,
                 "oauth_state_replays": 0,
+                "hosted_account_binding_replays": 0,
                 "plaintext_secret_renders": 0,
                 "encrypted_secret_wiped_on_revoke": True,
                 "browser_assets": 3,
+                "invitation_emails": len(invitation_email_sender.messages),
             },
             sort_keys=True,
         )

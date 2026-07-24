@@ -1,0 +1,437 @@
+{
+  "schema_version": 1,
+  "loop": "Y4",
+  "captured_at_utc": "2026-07-20T17:26:41Z",
+  "evidence_window_utc": {
+    "started": "2026-07-20T17:17:07Z",
+    "finished": "2026-07-20T17:25:06Z"
+  },
+  "parable_baseline_head": "1fac020359b406f95368c0a6b1f49fced9a9a2b8",
+  "runtime": {
+    "claude_code_version": "2.1.215",
+    "cliproxyapi_upstream_release": "v7.2.88",
+    "cliproxyapi_upstream_commit": "93d74a890a44802f656d7f39a573916b2611896e",
+    "cliproxyapi_local_fix_commit": "ad20a87efbbd41a9d4f24c83ca8bdd934bf34ab7",
+    "cliproxyapi_binary_sha256": "139e1305a878e08026dd0fb6d85a3817801f32e40a40c1954ea1973c5bb9d697",
+    "loopback_only": true,
+    "fresh_named_parent_sessions": 15,
+    "session_persistence": false,
+    "generated_agents": {
+      "parable-sonnet-exact": "claude-sonnet-5",
+      "parable-opus-exact": "claude-opus-4-8",
+      "parable-haiku-exact": "claude-haiku-4-5-20251001"
+    }
+  },
+  "effort_order": [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max"
+  ],
+  "children": [
+    {
+      "agent": "parable-sonnet-exact",
+      "model": "claude-sonnet-5",
+      "cells_passed": "5/5",
+      "parent_inbound_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "parent_upstream_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "child_inbound_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "child_upstream_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "child_upstream_thinking_types": [
+        "adaptive",
+        "adaptive",
+        "adaptive",
+        "adaptive",
+        "adaptive"
+      ],
+      "child_upstream_thinking_budgets": [
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "effort_classification": "inherited_exact_adaptive_5_of_5",
+      "parent_observed_tools": [
+        "Agent",
+        "Bash"
+      ],
+      "child_observed_tools_by_effort": [
+        [
+          "Bash"
+        ],
+        [
+          "Bash"
+        ],
+        [
+          "Bash"
+        ],
+        [
+          "Bash"
+        ],
+        [
+          "Bash"
+        ]
+      ],
+      "parent_model_requests_by_effort": [
+        3,
+        3,
+        3,
+        3,
+        3
+      ],
+      "child_model_requests_by_effort": [
+        2,
+        2,
+        3,
+        3,
+        4
+      ],
+      "http_status_counts_by_effort": [
+        {
+          "200": 10
+        },
+        {
+          "200": 10
+        },
+        {
+          "200": 12
+        },
+        {
+          "200": 12
+        },
+        {
+          "200": 14
+        }
+      ],
+      "artifact_sha256_by_effort": [
+        "c20069df6ae609baa612a7cd3760f10785845502ea9538e948ec134f79ee5106",
+        "6124f074b846fbd92c9316c46ee883cc404ba647af16121ce0499e4f4b0ce5b3",
+        "b0c5b5258c5ae386ce728364e2541160878e12895e11405b4de6da567451cd72",
+        "b51b7d85f3c6ae4d3008912c6e4a095b6d001f978c1619327dc46605552c6034",
+        "1a5b558a5de8ca1cd228ad76b85da95b6fa6ef822acc102a64fb2046a4a5477c"
+      ],
+      "parent_marker_sha256_by_effort": [
+        "5f4d06014265a8496c4a007fcd947f7b6ef7bd88505168e2b86d8d3e08f54541",
+        "99c2b5164f4c4ae046f76fa8d4a9199a10f9b0672a109e9aea3fba918a35cc67",
+        "9c399e0e5b448dd46070d51f1ae23b5e91313980b3597039295b0b3baa0fd835",
+        "4f464f2113ef0ac16851a8c90d5ec8edd3c87e410cca6803457d50670457384d",
+        "46109e065ed9baf2b27a588e714c1f28104c0559fc89725934907d5182a9295f"
+      ],
+      "deterministic_child_artifacts": "5/5",
+      "deterministic_parent_consumption": "5/5"
+    },
+    {
+      "agent": "parable-opus-exact",
+      "model": "claude-opus-4-8",
+      "cells_passed": "5/5",
+      "parent_inbound_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "parent_upstream_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "child_inbound_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "child_upstream_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "child_upstream_thinking_types": [
+        "adaptive",
+        "adaptive",
+        "adaptive",
+        "adaptive",
+        "adaptive"
+      ],
+      "child_upstream_thinking_budgets": [
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "effort_classification": "inherited_exact_adaptive_5_of_5",
+      "parent_observed_tools": [
+        "Agent",
+        "Bash"
+      ],
+      "child_observed_tools_by_effort": [
+        [
+          "Bash"
+        ],
+        [
+          "Bash"
+        ],
+        [
+          "Bash"
+        ],
+        [
+          "Bash"
+        ],
+        [
+          "Bash"
+        ]
+      ],
+      "parent_model_requests_by_effort": [
+        3,
+        3,
+        3,
+        3,
+        3
+      ],
+      "child_model_requests_by_effort": [
+        2,
+        2,
+        2,
+        2,
+        3
+      ],
+      "http_status_counts_by_effort": [
+        {
+          "200": 10
+        },
+        {
+          "200": 10
+        },
+        {
+          "200": 10
+        },
+        {
+          "200": 10
+        },
+        {
+          "200": 12
+        }
+      ],
+      "artifact_sha256_by_effort": [
+        "a524e10ebe836732240fcbc369073654aa2c527e9884d3336512990d4a1c58a2",
+        "90535b7ef3da1bbf7b1e9b327f3ab30d214cbbaf3ea61c460704229f4df6651e",
+        "3213cc02f3783bc12fce42d2db789e8fb6fac5a3143a2a36741534ae74901c28",
+        "f3013416a908d78a46108a823605efaa3fad8939c7cf7b6b551de0cbb6176dae",
+        "2262bdd382ae821a223abeee29fe540715e1dfd683fdae9f862ae731f828088d"
+      ],
+      "parent_marker_sha256_by_effort": [
+        "b4f72facd65e31b2d3c407f8f9033462e9af535576e5938063603b6521b4fb93",
+        "499a027c03ceb770c3269f767a0d50cf29bcea5561cd382f46ab29d2c8241b92",
+        "32a4fc47a16c45b1b9c6be5a7a31dbb0cc44218fe848d3ab9f08544e4facd76b",
+        "8216ca717acac398bfe309f1cc078c071b8f70a3a50d9e949ded8ab9c669d367",
+        "099afe0dddfa135a08b367e93bfd638d643c1b30c969be176296a0fcd6cc632d"
+      ],
+      "deterministic_child_artifacts": "5/5",
+      "deterministic_parent_consumption": "5/5"
+    },
+    {
+      "agent": "parable-haiku-exact",
+      "model": "claude-haiku-4-5-20251001",
+      "cells_passed": "5/5",
+      "parent_inbound_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "parent_upstream_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "child_inbound_efforts": [
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "child_upstream_efforts": [
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "child_upstream_thinking_types": [
+        "enabled",
+        "enabled",
+        "enabled",
+        "enabled",
+        "enabled"
+      ],
+      "child_upstream_thinking_budgets": [
+        31999,
+        31999,
+        31999,
+        31999,
+        31999
+      ],
+      "effort_classification": "normalized_to_enabled_budget_31999_5_of_5",
+      "parent_observed_tools": [
+        "Agent",
+        "Bash"
+      ],
+      "child_observed_tools_by_effort": [
+        [
+          "Bash",
+          "Read"
+        ],
+        [
+          "Bash",
+          "Read"
+        ],
+        [
+          "Bash",
+          "Read"
+        ],
+        [
+          "Bash",
+          "Read"
+        ],
+        [
+          "Bash",
+          "Read"
+        ]
+      ],
+      "parent_model_requests_by_effort": [
+        3,
+        3,
+        3,
+        3,
+        3
+      ],
+      "child_model_requests_by_effort": [
+        3,
+        3,
+        3,
+        3,
+        2
+      ],
+      "http_status_counts_by_effort": [
+        {
+          "200": 12
+        },
+        {
+          "200": 12
+        },
+        {
+          "200": 12
+        },
+        {
+          "200": 12
+        },
+        {
+          "200": 10
+        }
+      ],
+      "artifact_sha256_by_effort": [
+        "1ee93ce9809a56be3eb8a5f227981a0f95f977e077dd549d7ae91dbdf2dd21db",
+        "4ad090b0e3833237aaa9830ee2c4871076504f26c1ea74a259a511eed58e0733",
+        "ffd117cf1f83ce91fc8bb33ad187207191b35fba9efb2673b10657704491893c",
+        "ad1e47e77d867671df0dfad6a70f19c13a8a3a71781f013f9b934dffe0e90432",
+        "adb7756d4af167ea796e967b6988a70c303cb383424401fe40f4af7e83998743"
+      ],
+      "parent_marker_sha256_by_effort": [
+        "fcc36b0171ca3418798440d6ae8537a7f1a235e380e0eab292556b9c0f4e4fa1",
+        "800b675c21056001197ba812ecbde5b01cabedbeba789123e37f3b336005e808",
+        "f080512cbb5fe867b05e5ee4348055e4a7cfbc7f12fff5c8c6e53d4a7ff6ee40",
+        "b8fb55e132fea9a02e0cb3dab43b2d41cac753e0ece66798fc1d61ff2bf47099",
+        "935c829da11889b09caba7b36496d028a45af9493ddb774f31b77f4cc23ae869"
+      ],
+      "deterministic_child_artifacts": "5/5",
+      "deterministic_parent_consumption": "5/5"
+    }
+  ],
+  "summary": {
+    "matrix_cells_passed": "15/15",
+    "exact_parent_model_and_effort_cells": "15/15",
+    "exact_named_child_model_cells": "15/15",
+    "sonnet_opus_effort_inheritance_exact": "10/10",
+    "haiku_effort_normalization_measured": "5/5",
+    "deterministic_child_tool_artifacts": "15/15",
+    "deterministic_parent_consumption": "15/15",
+    "parent_model_requests": 45,
+    "child_model_requests": 39,
+    "non_200_statuses": 0,
+    "correctly_wired_attempts": "15/30",
+    "evidence_failures": 0,
+    "instrument_failures": 2
+  },
+  "instrumentation_events": [
+    {
+      "stage": "calibration",
+      "event": "The first redacting parser omitted translated Responses-format parent bodies.",
+      "resolution": "The same private logs were re-parsed with input/reasoning support; no model cell was rerun."
+    },
+    {
+      "stage": "aggregate",
+      "event": "A safe aggregate-only jq expression used the wrong pipeline context.",
+      "resolution": "The corrected expression passed against unchanged evidence."
+    }
+  ],
+  "routing": {
+    "parent_model": "gpt-5.6-sol",
+    "parent_provider": "openai",
+    "parent_auth_kind": "oauth",
+    "child_provider": "anthropic",
+    "child_auth_kind": "oauth",
+    "expected_route_pair_cells": "15/15",
+    "provider_fallback_observed": false,
+    "openai_api_key_set": false,
+    "anthropic_api_key_set": false,
+    "xai_api_key_set": false,
+    "claude_code_oauth_token_override_set": false,
+    "global_subagent_model_override_set": false
+  },
+  "safety": {
+    "credential_material_committed": false,
+    "oauth_state_committed": false,
+    "account_identifier_committed": false,
+    "raw_prompt_or_response_committed": false,
+    "raw_proxy_log_committed": false,
+    "callback_url_committed": false,
+    "private_path_committed": false
+  }
+}

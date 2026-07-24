@@ -11,7 +11,7 @@ import time
 import urllib.error
 import urllib.request
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -194,6 +194,15 @@ class SemanticRuntime:
         self._embedding_lock = (
             threading.Lock() if embedding_protocol == "tei" else None
         )
+        # Managed providers can keep a response socket active beyond its per-read
+        # timeout. Bound optional query work by total wall time and capacity so a
+        # slow provider cannot hold the retrieval request or grow an unbounded
+        # queue. Document ingestion remains on the direct, lossless path.
+        self._query_executor = ThreadPoolExecutor(
+            max_workers=4,
+            thread_name_prefix="recall-query-embedding",
+        )
+        self._query_slots = threading.BoundedSemaphore(8)
         self._plan_cache: OrderedDict[str, tuple[float, SearchPlan]] = OrderedDict()
         self._query_embedding_cache: OrderedDict[
             str, tuple[float, tuple[float, ...]]
@@ -481,9 +490,16 @@ class SemanticRuntime:
                 }
             )
         try:
-            response = self._post(
-                self._managed_embedding_endpoint, payload, headers
-            )
+            try:
+                response = self._post(
+                    self._managed_embedding_endpoint, payload, headers
+                )
+            except json.JSONDecodeError:
+                if input_type != "document":
+                    raise
+                response = self._post(
+                    self._managed_embedding_endpoint, payload, headers
+                )
         except urllib.error.HTTPError as error:
             splittable = error.code == 413 or 500 <= error.code <= 504
             if not splittable or len(batch) == 1:
@@ -541,6 +557,29 @@ class SemanticRuntime:
 
     def embed_query(self, query: str) -> list[float]:
         return self.embed_queries([query])[0]
+
+    def embed_query_bounded(self, query: str) -> list[float]:
+        """Embed an optional search query within a hard wall-clock budget."""
+        if not self._query_slots.acquire(blocking=False):
+            raise TimeoutError("query embedding capacity is unavailable")
+
+        def run() -> list[float]:
+            try:
+                return self.embed_query(query)
+            finally:
+                self._query_slots.release()
+
+        try:
+            future = self._query_executor.submit(run)
+        except Exception:
+            self._query_slots.release()
+            raise
+        try:
+            return future.result(timeout=self.timeout_seconds)
+        except FutureTimeoutError as error:
+            if future.cancel():
+                self._query_slots.release()
+            raise TimeoutError("query embedding deadline exceeded") from error
 
     def _read_planner_key(self) -> str:
         return self._read_owner_only_key(self.planner_key_file, "planner")

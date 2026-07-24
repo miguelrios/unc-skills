@@ -80,6 +80,7 @@ class MacUtilityError(ValueError):
 
 
 ROUTE_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._/@+-]{1,255}\Z")
+STALE_RUNNING_SECONDS = 300
 
 
 def _regular(path: Path) -> bool:
@@ -90,21 +91,41 @@ def _regular(path: Path) -> bool:
     return stat.S_ISREG(details.st_mode) and not stat.S_ISLNK(details.st_mode)
 
 
-def _metadata(path: Path) -> dict[str, str] | None:
+def _metadata(path: Path) -> dict[str, Any] | None:
     if not _regular(path):
         return None
     try:
-        connection = sqlite3.connect(path.resolve(strict=True).as_uri() + "?mode=ro&immutable=1", uri=True)
+        connection = sqlite3.connect(
+            path.resolve(strict=True).as_uri() + "?mode=ro",
+            uri=True,
+            timeout=0.25,
+        )
         try:
+            connection.execute("PRAGMA query_only=ON")
+            connection.execute("PRAGMA busy_timeout=250")
             tables = {row[0] for row in connection.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )}
             if "meta" not in tables:
                 return None
-            return dict(connection.execute(
+            result: dict[str, Any] = dict(connection.execute(
                 "SELECT key,value FROM meta WHERE key IN "
-                "('last_scan_at','last_success_epoch','committed_cursor','last_error_code')"
+                "('last_scan_at','last_success_epoch','committed_cursor',"
+                "'last_error_code','running_started_epoch','last_scan_complete')"
             ))
+            result["pending_count"] = (
+                connection.execute(
+                    "SELECT count(*) FROM outbox WHERE state='pending'"
+                ).fetchone()[0]
+                if "outbox" in tables
+                else 0
+            )
+            result["dead_letter_count"] = (
+                connection.execute("SELECT count(*) FROM dead_letters").fetchone()[0]
+                if "dead_letters" in tables
+                else 0
+            )
+            return result
         finally:
             connection.close()
     except (OSError, sqlite3.Error, ValueError):
@@ -185,10 +206,39 @@ def _source_status(*, prefix: Path, launch_agents: Path, name: str, now: float) 
         health = "invalid_local_state"
     elif metadata is None:
         health = "starting"
-    elif metadata.get("last_error_code"):
-        health = "degraded"
     else:
-        health = "ready"
+        pending_count = int(metadata.get("pending_count", 0))
+        dead_letter_count = int(metadata.get("dead_letter_count", 0))
+        running_started = metadata.get("running_started_epoch")
+        try:
+            running_age = (
+                max(0, int(now - float(running_started)))
+                if running_started is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            running_age = None
+            health = "invalid_local_state"
+        else:
+            if running_age is not None and running_age > STALE_RUNNING_SECONDS:
+                health = "stalled"
+            elif metadata.get("last_error_code") or dead_letter_count:
+                health = "degraded"
+            elif running_age is not None:
+                health = "running"
+            elif not any(
+                key in metadata
+                for key in (
+                    "last_scan_at",
+                    "last_success_epoch",
+                    "committed_cursor",
+                )
+            ):
+                health = "starting"
+            elif metadata.get("last_scan_complete") == "0":
+                health = "backfilling"
+            else:
+                health = "ready"
     last_success = None
     if metadata is not None:
         raw = metadata.get("last_success_epoch", metadata.get("last_scan_at"))
@@ -197,6 +247,43 @@ def _source_status(*, prefix: Path, launch_agents: Path, name: str, now: float) 
         except (TypeError, ValueError):
             health = "invalid_local_state" if enabled else health
     lag = None if last_success is None else max(0, int(now - last_success))
+    last_ack = None
+    if metadata is not None and metadata.get("last_success_epoch") is not None:
+        try:
+            last_ack = max(0, int(now - float(metadata["last_success_epoch"])))
+        except (TypeError, ValueError):
+            health = "invalid_local_state" if enabled else health
+    pending_count = int(metadata.get("pending_count", 0)) if metadata else 0
+    dead_letter_count = int(metadata.get("dead_letter_count", 0)) if metadata else 0
+    running_age = None
+    if metadata is not None and metadata.get("running_started_epoch") is not None:
+        try:
+            running_age = max(
+                0,
+                int(now - float(metadata["running_started_epoch"])),
+            )
+        except (TypeError, ValueError):
+            pass
+    error_code = metadata.get("last_error_code") if metadata else None
+    remediation = {
+        "disabled": "enable_source",
+        "paused": "resume_source",
+        "invalid_local_state": "repair_local_state",
+        "starting": "wait_for_first_run",
+        "running": "wait_for_running",
+        "stalled": "restart_stalled_source",
+        "backfilling": "continue_backfill",
+        "ready": "none",
+    }.get(health)
+    if health == "degraded":
+        if error_code == "brain_unauthorized":
+            remediation = "rotate_brain_authority"
+        elif error_code == "archive_unavailable":
+            remediation = "retry_archive"
+        elif dead_letter_count:
+            remediation = "inspect_dead_letters"
+        else:
+            remediation = "retry_brain"
     checkpointed = bool(metadata and (
         "committed_cursor" in metadata or "last_scan_at" in metadata
     ))
@@ -204,6 +291,11 @@ def _source_status(*, prefix: Path, launch_agents: Path, name: str, now: float) 
         "enabled": enabled,
         "health": health,
         "lag_seconds": lag,
+        "running_age_seconds": running_age,
+        "last_ack_age_seconds": last_ack,
+        "pending_count": pending_count,
+        "dead_letter_count": dead_letter_count,
+        "remediation": remediation,
         "checkpointed": checkpointed,
         "state_present": metadata is not None,
         "privacy_mode": privacy_mode,

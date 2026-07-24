@@ -40,6 +40,14 @@ _EXPORTS = {
     "GoogleCalendarConnector": ("google_workspace", "GoogleCalendarConnector"),
     "GoogleContactsConnector": ("google_workspace", "GoogleContactsConnector"),
     "GoogleDriveConnector": ("google_workspace", "GoogleDriveConnector"),
+    "ComposioWorkspaceRail": (
+        "composio_workspace_rail",
+        "ComposioWorkspaceRail",
+    ),
+    "toolkit_for_connector": (
+        "composio_workspace_rail",
+        "toolkit_for_connector",
+    ),
     "GitHubActivityConnector": ("work_apis", "GitHubActivityConnector"),
     "LinearActivityConnector": ("work_apis", "LinearActivityConnector"),
     "NotionWorkspaceConnector": ("work_apis", "NotionWorkspaceConnector"),

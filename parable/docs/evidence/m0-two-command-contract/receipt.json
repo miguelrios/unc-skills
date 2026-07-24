@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-07-20T23:20:00Z",
+  "baselineCommit": "0d5af718f6e7730f167c114eac41e47a433217dc",
+  "providerTurns": 0,
+  "oauthFlows": 0,
+  "credentialReads": 0,
+  "canonicalRuntimeCommandsAfterInstall": 4,
+  "canonicalTerminals": 2,
+  "canonicalRuntimeSequence": [
+    "setup-with-explicit-build",
+    "foreground-proxy-start",
+    "catalog-finalize",
+    "claude-launch"
+  ],
+  "currentLifecycle": {
+    "setupCanOfferInteractiveBuild": true,
+    "docsRequireExplicitBuildFlag": true,
+    "claudeStartsProxy": false,
+    "claudeWaitsForReadiness": false,
+    "claudeOwnsProxyCleanup": false,
+    "claudeRequiresRunningCatalogEndpoint": true
+  },
+  "targetLifecycle": {
+    "runtimeCommandsAfterInstall": 2,
+    "terminals": 1,
+    "sequence": ["setup", "claude"],
+    "reuseHealthyConfiguredEndpoint": true,
+    "stopReusedEndpoint": false,
+    "startConfiguredEndpointWhenAbsent": true,
+    "stopOnlyOwnedEndpoint": true,
+    "exactCatalogGateBeforeClaude": true
+  },
+  "baseline": {
+    "testsPassed": 99,
+    "testsFailed": 0,
+    "packageFiles": 33,
+    "packageDryRunPassed": true
+  }
+}

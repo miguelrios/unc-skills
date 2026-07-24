@@ -2,14 +2,16 @@
   "schema_version": 2,
   "record_kinds": {
     "calendar_event.v1": {
-      "optional": ["all_day", "attendee_ids", "busy", "conference_url", "description", "instance_id", "location", "organizer_id", "series_id", "source_url", "status", "surface", "text", "timezone", "visibility"],
-      "required": ["calendar_id", "end", "event_id", "kind", "start", "title"],
+      "optional": ["all_day", "attendee_ids", "busy", "conference_url", "content_omissions", "description", "instance_id", "location", "organizer_id", "series_id", "source_url", "status", "surface", "text", "timezone", "visibility"],
+      "required": ["calendar_id", "content_fidelity", "end", "event_id", "kind", "start", "title"],
       "properties": {
         "all_day": {"type": "boolean"},
         "attendee_ids": {"type": "string_list"},
         "busy": {"type": "boolean"},
         "calendar_id": {"type": "string"},
         "conference_url": {"type": "string"},
+        "content_fidelity": {"enum": ["complete", "partial"], "type": "string"},
+        "content_omissions": {"type": "string_list"},
         "description": {"type": "string"},
         "end": {"type": "string"},
         "event_id": {"type": "string"},
@@ -29,11 +31,13 @@
       }
     },
     "communication_message.v1": {
-      "optional": ["attachments", "author_id", "deleted_at", "edited_at", "format", "participant_ids", "received_at", "reply_to_id", "role", "sent_at", "source_url", "subject", "surface"],
-      "required": ["conversation_id", "direction", "kind", "message_id", "text"],
+      "optional": ["attachments", "author_id", "content_omissions", "deleted_at", "edited_at", "format", "participant_ids", "received_at", "reply_to_id", "role", "sent_at", "source_url", "subject", "surface"],
+      "required": ["content_fidelity", "conversation_id", "direction", "kind", "message_id", "text"],
       "properties": {
         "attachments": {"type": "object_list"},
         "author_id": {"type": "string"},
+        "content_fidelity": {"enum": ["complete", "partial"], "type": "string"},
+        "content_omissions": {"type": "string_list"},
         "conversation_id": {"type": "string"},
         "deleted_at": {"type": "string"},
         "direction": {"enum": ["inbound", "outbound", "system"], "type": "string"},
@@ -53,10 +57,12 @@
       }
     },
     "contact_identity.v1": {
-      "optional": ["confidence", "identifier", "organization", "role", "surface", "text", "title"],
-      "required": ["display_name", "identifier_type", "identity_id", "kind"],
+      "optional": ["confidence", "content_omissions", "identifier", "organization", "role", "surface", "text", "title"],
+      "required": ["content_fidelity", "display_name", "identifier_type", "identity_id", "kind"],
       "properties": {
         "confidence": {"type": "number"},
+        "content_fidelity": {"enum": ["complete", "partial"], "type": "string"},
+        "content_omissions": {"type": "string_list"},
         "display_name": {"type": "string"},
         "identifier": {"type": "string"},
         "identifier_type": {"type": "string"},
@@ -70,10 +76,13 @@
       }
     },
     "document.v1": {
-      "optional": ["attachments", "modified_at", "owner_ids", "parent_id", "participant_ids", "source_url", "surface", "text"],
-      "required": ["document_id", "kind", "mime_type", "name"],
+      "optional": ["artifact_content_sha256", "attachments", "content_omissions", "modified_at", "owner_ids", "parent_id", "participant_ids", "source_url", "surface", "text"],
+      "required": ["content_fidelity", "document_id", "kind", "mime_type", "name"],
       "properties": {
+        "artifact_content_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
         "attachments": {"type": "object_list"},
+        "content_fidelity": {"enum": ["complete", "partial"], "type": "string"},
+        "content_omissions": {"type": "string_list"},
         "document_id": {"type": "string"},
         "kind": {"const": "document.v1", "type": "string"},
         "mime_type": {"type": "string"},
@@ -88,10 +97,12 @@
       }
     },
     "social_post.v1": {
-      "optional": ["created_at", "deleted_at", "edited_at", "metrics", "reply_to_id", "source_url", "surface", "thread_id"],
-      "required": ["author_id", "kind", "post_id", "stream_type", "text"],
+      "optional": ["content_omissions", "created_at", "deleted_at", "edited_at", "metrics", "reply_to_id", "source_url", "surface", "thread_id"],
+      "required": ["author_id", "content_fidelity", "kind", "post_id", "stream_type", "text"],
       "properties": {
         "author_id": {"type": "string"},
+        "content_fidelity": {"enum": ["complete", "partial"], "type": "string"},
+        "content_omissions": {"type": "string_list"},
         "created_at": {"type": "string"},
         "deleted_at": {"type": "string"},
         "edited_at": {"type": "string"},

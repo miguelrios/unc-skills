@@ -1,9 +1,77 @@
 ---
 name: parable
-description: Orchestrator for multi-task implementation batches. The session model plans each task, routes it to the cheapest capable executor (native subagents when available; configured Codex, pi, or Cursor executors everywhere), and verifies and reviews the results. Invoke when the user names Parable, hands over a list of tasks to implement, says "work through my backlog," "knock out these issues," or "use cheap/fast models for this." Not for a single isolated bugfix or a standalone code review.
+description: Install, onboard, and run multi-model coding orchestration. Invoke when the user says install Parable, install parable.sh, set up or onboard Parable, connect coding subscriptions, names Parable, hands over a backlog, or asks to route work across models. For first-time install intent, collect subscription choices with the harness's native structured-question tool and then run the bundled parable.sh. Not for a single isolated bugfix or standalone code review.
 ---
 
 # parable — divide and conquer
+
+## First-time install and subscription onboarding
+
+When the user asks to install, set up, or onboard Parable, resolve `parable.sh` beside this
+`SKILL.md`. Plugin caches and standalone skill installs live in different roots. Do not replace
+it with `curl`, `npx`, or a repository clone: the skill carries the pinned runtime it needs.
+
+Before running the script, state that Claude is the baseline subscription because the harness is
+Claude Code, then collect the optional subscriptions with the harness's native structured-question UI:
+
+1. Ask whether to connect a ChatGPT subscription for Sol, Terra, and Luna. Explain that Sol becomes
+   an automatic fallback only when ChatGPT is connected; without it, `auto` remains on Fable.
+2. Ask whether to connect an xAI subscription for Grok 4.5. Recommend yes when the user has one.
+
+In Claude Code use `AskUserQuestion`; in Codex use `request_user_input` when the active mode
+permits it (normally Plan mode); in another harness use its equivalent structured-choice tool.
+Ask both questions in one tool call when possible. Use two-choice yes/no answers and explain that
+the credentials stay user-owned in CLIProxyAPI. If the structured-question tool is absent or
+unavailable in the active mode, ask the same two choices in one concise message and wait for the
+answer. Do not attempt a known-unavailable tool and do not silently infer paid subscriptions.
+
+Inspect `PARABLE_CLIPROXY_BIN` and `PATH` for an existing CLIProxyAPI executable. If none exists,
+ask one more native yes/no question for consent to download source, install any missing build
+prerequisite, and build Parable's pinned patched proxy. Prefer a user-local prerequisite install;
+keep any Parable-owned data root at mode `0700`; request separate approval before any privileged
+system change. Stop cleanly if consent is denied.
+
+Build the canonical vendor list with `claude` always present and optional `chatgpt`/`xai` from
+those answers.
+
+If the harness can keep a foreground process alive and write later user input to its stdin, run
+exactly one foreground bootstrap:
+
+```bash
+bash /resolved/skill/directory/parable.sh \
+  --non-interactive \
+  --vendors claude[,chatgpt][,xai] \
+  [--proxy-bin /resolved/existing/proxy | --build-proxy]
+```
+
+Claude Code's `Bash` tool is the exception: it cannot send a pasted OAuth callback to a command's
+stdin after that command starts, and its command view may clip long authorization URLs. In Claude
+Code, stage setup through `Bash` with the same command plus `--no-auth`. After staging succeeds,
+tell the user to open a new terminal and run exactly:
+
+```text
+parable auth login
+```
+
+Tell them to keep that command running until the selected flows complete. Do not run it through
+Claude Code's `Bash` tool or `!` shell command. `auth login` walks every selected missing provider
+in order, skips providers already connected, and prints the final launch command.
+Do not give the user three separate `auth add` commands or ask them to run `setup finalize`. Do not
+claim onboarding is complete before `auth login` succeeds. Outside this Claude Code exception, do
+not pass `--no-auth` during ordinary onboarding; reserve it for explicit staged setup.
+
+The bootstrap installs an immutable versioned runtime, creates the durable `parable` command,
+updates the new-terminal PATH when necessary, and either runs authorization or prepares the one
+new-terminal authorization command above.
+
+Never print the final handoff yourself after a failed or unauthenticated script. The script prints
+it only after setup and all selected authorization flows succeed:
+
+```text
+In a new terminal, open your project and run:
+
+  parable
+```
 
 You are the **brain**: the most capable model in the room, and the most expensive. The strategy
 is division of labor: carve the work into the smallest clusters that can proceed independently —
@@ -17,7 +85,7 @@ those. This file tells you what's available and the house rules; the method is y
 ## Session start
 
 Run `scripts/parable-config.sh` once. It prints the executor cast (credential status, costs,
-`use_for`/`avoid_for` stage directions), the routing chains per task class, the configured
+`use_for`/`avoid_for` stage directions), the routing menus per task class, the configured
 checks, the research provider, and `repo_notes` — repo conventions that belong in every plan.
 That output plus this file covers the common case; the full selection algorithm and escalation
 ladder live in `references/routing.md`. First detect whether this harness exposes a native
@@ -29,8 +97,14 @@ fake runtime parity. With no configured checks, `parable-verify.sh` passes vacuo
 user declares some.
 
 When the config contains `[claude]`, the session should have been entered through
-`parable claude`. Arbitrary-model Claude executors are synchronized as project-local native
-agents named `parable-<normalized-executor-id>`; `parable-config.sh` prints the exact
+bare `parable`, which selects the automatic brain policy at high effort. Ordinary skill-first subscription onboarding is one
+`parable.sh` run followed by that fresh-terminal launch command. Setup delegates
+native vendor authorization; the launcher starts or reuses the loopback proxy,
+checks the exact catalog, synchronizes agents, and cleans up only a proxy it owns.
+`parable auth add`, `parable proxy start`, and `parable setup finalize` remain
+headless/recovery diagnostics. Arbitrary-model Claude executors are
+synchronized as project-local native agents named `parable-<normalized-executor-id>`;
+`parable-config.sh` prints the exact
 `agent=` name beside each one. Invoke that named agent through the Agent tool. Claude Code's
 built-in model aliases remain normal model-selected subagents.
 
@@ -51,9 +125,11 @@ usage endpoint — Claude's 5h/7d window % and current-period usage-credit meter
 window % and credit/overage state, Cursor's dollars left this cycle — for zero model tokens and
 no turn. Read it before a batch and whenever a pool feels
 tight, and route the next dispatch to the pool with the most room among the executors capable of
-the task. The routing chains in the config are **menus of capable peers, not priority ladders**:
+the task. The routing menus in the config are **menus of capable peers, not priority ladders**:
 the config author writes which executors can do each task class; you pick among them by live
-headroom. A Claude `extra=` value is the endpoint's cumulative current-period meter, not a
+headroom. Never dispatch an executor whose `model` is the current parent model: the parent
+already owns that lane and delegating back to it only burns the same pool. During review, also
+exclude the model that authored the diff. A Claude `extra=` value is the endpoint's cumulative current-period meter, not a
 weekly total; `daily`/`weekly` remain explicit nulls in JSON when Anthropic does not provide
 history. Don't wait for a throttle error to learn a pool is empty — that error is the failure
 this tool exists to prevent. The per-pool selection detail lives in `references/routing.md`.
@@ -72,13 +148,23 @@ this tool exists to prevent. The per-pool selection detail lives in `references/
   codex-, pi-, or cursor-backed executor headlessly; prints status, session id, turns, tokens
   and cost, last message, and the run dir. Subagent executors (`sonnet`, `opus`, …) dispatch via
   the harness's native agent-spawn tool with the plan as the prompt. For a custom model in a
-  `parable claude` session, use the exact `agent=parable-*` name printed by
+  `parable` session, use the exact `agent=parable-*` name printed by
   `parable-config.sh`; for a bare Claude alias, use a general-purpose agent with the executor's
   model. If there is no native agent-spawn tool, that executor is unavailable; choose a
   CLI-backed executor.
-- `parable agents sync` — idempotently synchronize Parable-owned project agents from TOML.
-  `parable claude [ARGS...]` does this automatically after checking the local model catalog,
-  then launches the configured brain model. These are package CLI commands, not skill scripts.
+- `parable [--brain auto|fable|sol|config] [--] [CLAUDE_ARGS...]` — safely reuse a healthy configured loopback proxy or own its
+  start/readiness/cleanup lifecycle, require every exact configured id, idempotently synchronize
+  Parable-owned project agents, and launch the selected brain model. `auto` prefers Fable while
+  its pool is below the tight threshold, then falls back to Sol by live usage; `fable` and `sol`
+  pin either parent, and `config` uses `brain_model`. With no arguments, Parable uses `auto` and
+  forwards `--effort high`. Claude flags pass through directly, so for example
+  `parable --dangerously-skip-permissions` works; the `--` separator is optional. Never enable
+  permission bypass implicitly. Interactive launches render a live brain/cast card inside Claude
+  Code through a session-scoped `SessionStart` system message. It is user-only and costs no model
+  context; headless and bare modes omit it.
+  `parable claude` remains a backward-compatible explicit alias. `parable setup finalize`
+  performs only the catalog/sync diagnostic against an already-running proxy. These are package
+  CLI commands, not skill scripts.
 - `scripts/parable-resume.sh <run-dir> "<message>"` — continue an executor's existing session
   (caching economics: facts below). Sessions do not transfer between executors.
 - `scripts/parable-status.sh <run-dir>` — live run state in ~7 lines for zero model tokens;
@@ -95,6 +181,7 @@ this tool exists to prevent. The per-pool selection detail lives in `references/
 ## House rules
 
 - The reviewer never shares the author's model — `--author` enforces it.
+- A subagent never shares the current parent model; select another capable model from the menu.
 - A feature split across concurrent plans is reviewed once, as one integrated diff against the
   whole feature intent — the union of the changed paths plus the full spec. Reviews scoped per
   plan cannot see integration seams and misread sibling work as scope violations.

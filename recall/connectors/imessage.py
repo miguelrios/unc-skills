@@ -187,6 +187,8 @@ class IMessageConnector:
             raise IMessageSchemaError("unsupported_imessage_schema")
         content: dict[str, Any] = {
             "kind": "communication_message.v1",
+            "content_fidelity": "partial",
+            "content_omissions": ["attachment_content_not_fetched"],
             "conversation_id": conversation_id,
             "direction": direction,
             "message_id": native_id,

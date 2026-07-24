@@ -19,7 +19,7 @@ require or mention an LLM broker.
 
 | Piece | Where |
 |---|---|
-| Checksum-pinned source patch | `patches/cliproxyapi-v7.2.88-claude-effort.patch` |
+| Checksum-pinned source patch | `skills/parable/runtime/patches/cliproxyapi-v7.2.88-claude-effort.patch` |
 | End-to-end OSS setup | `docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md` |
 | Machine-readable packaging/build receipt | `docs/evidence/e3-cliproxy-effort-oss/receipt.json` |
 | Provider reference link | `skills/parable/references/providers.md` |

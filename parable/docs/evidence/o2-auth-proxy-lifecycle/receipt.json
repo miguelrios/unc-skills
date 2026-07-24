@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "loop": "O2",
+  "captured_at": "2026-07-20T22:50:49Z",
+  "status": "complete",
+  "native_auth_mapping": {
+    "chatgpt_browser": [
+      "--config",
+      "<generated-config>",
+      "--codex-login"
+    ],
+    "chatgpt_device": [
+      "--config",
+      "<generated-config>",
+      "--codex-device-login"
+    ],
+    "claude": [
+      "--config",
+      "<generated-config>",
+      "--claude-login",
+      "--no-browser"
+    ],
+    "xai": [
+      "--config",
+      "<generated-config>",
+      "--xai-login",
+      "--no-browser"
+    ]
+  },
+  "auth": {
+    "setup_auto_auth_order": [
+      "chatgpt",
+      "claude",
+      "xai"
+    ],
+    "no_auth_opt_out": true,
+    "existing_records_preserved_by_parable": true,
+    "subprocess_stdio_inherited": true,
+    "subprocess_output_captured_by_parable": false,
+    "unsupported_or_unselected_vendor_spawned": false,
+    "claude_callback_port_in_guidance": 54545,
+    "oauth_material_parsed_or_copied_by_auth_add": false
+  },
+  "status_output": {
+    "providers": [
+      "chatgpt",
+      "claude",
+      "xai"
+    ],
+    "provider_fields": [
+      "present",
+      "recordCount"
+    ],
+    "aggregate_fields": [
+      "directoryModeValid",
+      "scanned",
+      "total",
+      "userOnly",
+      "invalidMode",
+      "parseErrors",
+      "unrecognized",
+      "allModesValid"
+    ],
+    "credential_fields_accessed": [
+      "type"
+    ],
+    "secret_sentinels_in_output": false,
+    "record_names_or_paths_in_output": false,
+    "unsafe_records_opened": false,
+    "missing_proxy_blocks_status": false
+  },
+  "proxy_start": {
+    "argv": [
+      "--config",
+      "<generated-config>",
+      "--local-model"
+    ],
+    "foreground": true,
+    "stdio_inherited": true,
+    "signals_forwarded": [
+      "SIGINT",
+      "SIGTERM",
+      "SIGHUP"
+    ],
+    "child_exit_status_preserved": true
+  },
+  "proof": {
+    "focused_lifecycle_tests": "5/5",
+    "complete_package_tests": "96/96",
+    "npm_pack_dry_run": "pass",
+    "packed_files": 33,
+    "diff_check": "pass",
+    "provider_turns": 0,
+    "oauth_flows": 0,
+    "provider_record_mutations": 0
+  },
+  "bounds": {
+    "evidence_failures": 0,
+    "instrument_failures": 1,
+    "instrument_failure": "The first local source-location grep was scoped too broadly under the home directory and was truncated; the corrected probe was restricted to the installed CLIProxyAPI tree.",
+    "review_rounds": 1,
+    "review_round_limit": 3
+  },
+  "privacy": {
+    "contains_raw_token": false,
+    "contains_oauth_url_or_callback": false,
+    "contains_account_identifier": false,
+    "contains_record_name_or_path": false,
+    "contains_provider_payload": false,
+    "contains_private_path": false
+  }
+}

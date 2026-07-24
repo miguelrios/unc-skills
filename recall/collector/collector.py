@@ -18,6 +18,9 @@ from privacy.transport import open_no_redirect
 
 COLLECTOR_VERSION = 1
 MAX_BATCH_BYTES = 8_000_000
+MAX_CANONICAL_BATCH_EVENTS = 50
+DEFAULT_MAX_SCAN_RECORDS = 1_000
+DEFAULT_MAX_SCAN_SECONDS = 20.0
 SENSITIVE_KEY = re.compile(r"(?:litellm.*master.*key|api[_-]?key|password|secret|authorization|bearer|access[_-]?token|refresh[_-]?token|token)$", re.I)
 SENSITIVE_LINE = re.compile(
     r"(?i)\b(LITELLM_MASTER_KEY|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|password|secret|authorization|bearer|access[_-]?token|refresh[_-]?token|token|key)"
@@ -28,6 +31,14 @@ PRIVATE_KEY_BLOCK = re.compile(
     r"-----BEGIN (?P<label>[A-Z0-9 ]*PRIVATE KEY)-----.*?-----END (?P=label)-----",
     re.DOTALL,
 )
+
+
+class CollectorRuntimeError(RuntimeError):
+    """A stable, content-free collector failure for local health surfaces."""
+
+    def __init__(self, error_code: str):
+        self.error_code = error_code
+        super().__init__(error_code)
 
 
 def canonical_json(value: Any) -> bytes:
@@ -79,7 +90,9 @@ class Collector:
                  visibility: str = "private", batch_size: int = 500,
                  privacy: PrivacyPolicy | None = None, brain_writer: Any = None,
                  archive: Any = None, tenant_id: str | None = None,
-                 archive_workers: int = 2):
+                 archive_workers: int = 2,
+                 max_scan_records: int = DEFAULT_MAX_SCAN_RECORDS,
+                 max_scan_seconds: float = DEFAULT_MAX_SCAN_SECONDS):
         if harness not in {"claude", "codex"}:
             raise ValueError("harness must be claude or codex")
         if visibility not in {"private", "shared"}:
@@ -93,6 +106,16 @@ class Collector:
             or not 1 <= archive_workers <= 16
         ):
             raise ValueError("archive_workers must be between 1 and 16")
+        if type(batch_size) is not int or batch_size < 1:
+            raise ValueError("batch_size must be a positive integer")
+        if type(max_scan_records) is not int or not 1 <= max_scan_records <= 100_000:
+            raise ValueError("max_scan_records must be between 1 and 100000")
+        if (
+            isinstance(max_scan_seconds, bool)
+            or not isinstance(max_scan_seconds, (int, float))
+            or not 0.1 <= float(max_scan_seconds) <= 300.0
+        ):
+            raise ValueError("max_scan_seconds must be between 0.1 and 300")
         self.root = Path(root).expanduser().resolve()
         self.harness = harness
         self.source_id = source_id
@@ -101,12 +124,18 @@ class Collector:
         self.token = token
         self.principal_id = principal_id
         self.visibility = visibility
-        self.batch_size = batch_size
+        self.batch_size = (
+            min(batch_size, MAX_CANONICAL_BATCH_EVENTS)
+            if brain_writer is not None
+            else batch_size
+        )
         self.privacy = privacy or PrivacyPolicy(mode="off")
         self.brain_writer = brain_writer
         self.archive = archive
         self.tenant_id = tenant_id
         self.archive_workers = archive_workers
+        self.max_scan_records = max_scan_records
+        self.max_scan_seconds = float(max_scan_seconds)
         self.shard_count = 1
         self.shard_index = 0
         self.spool_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -160,6 +189,22 @@ class Collector:
             for row in self.db.execute("SELECT DISTINCT path FROM outbox"):
                 self.db.execute("UPDATE outbox SET shard_key=? WHERE path=?", (self._path_shard(row["path"]), row["path"]))
         self.db.execute("CREATE INDEX IF NOT EXISTS outbox_shard_state_id ON outbox(shard_key,state,id)")
+        self.db.execute(
+            "DELETE FROM dead_letters "
+            "WHERE error_code='RecoveryError' AND EXISTS ("
+            "SELECT 1 FROM outbox "
+            "WHERE outbox.path=dead_letters.path "
+            "AND outbox.start_offset=dead_letters.byte_offset "
+            "AND outbox.state='acked')"
+        )
+        last_ack = self.db.execute(
+            "SELECT max(acked_at) FROM outbox WHERE state='acked' AND acked_at IS NOT NULL"
+        ).fetchone()[0]
+        if last_ack is not None:
+            self.db.execute(
+                "INSERT OR IGNORE INTO meta(key,value) VALUES ('last_success_epoch',?)",
+                (str(int(last_ack)),),
+            )
         self.db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('collector_version',?)", (str(COLLECTOR_VERSION),))
         self.db.commit()
 
@@ -171,7 +216,11 @@ class Collector:
         if self.privacy.mode != "off":
             self.db.execute("PRAGMA secure_delete=ON")
             for row in list(self.db.execute("SELECT * FROM outbox WHERE state='pending' ORDER BY id")):
-                self._repair_pending_envelope(row)
+                # A privacy-policy migration must not turn startup into an
+                # unbounded archive backfill. Re-scrub the durable envelope
+                # here; the ordinary bounded flush repairs missing artifact
+                # references immediately before their batch is committed.
+                self._repair_pending_envelope(row, repair_artifact=False)
             self.db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('privacy_policy_state',?)", (state,))
             self.db.commit()
             self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -184,11 +233,32 @@ class Collector:
     def close(self) -> None:
         self.db.close()
 
+    def _set_meta(self, key: str, value: str) -> None:
+        self.db.execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)",
+            (key, value),
+        )
+
+    def _record_error(self, error_code: str) -> None:
+        self._set_meta("last_error_code", error_code)
+        self.db.commit()
+
+    def _clear_error(self) -> None:
+        self.db.execute("DELETE FROM meta WHERE key='last_error_code'")
+
+    def _clear_running(self) -> None:
+        self.db.execute("DELETE FROM meta WHERE key='running_started_epoch'")
+
     def discover(self) -> list[Path]:
         if not self.root.exists():
             return []
         pattern = "rollout-*.jsonl" if self.harness == "codex" else "*.jsonl"
-        return sorted(path for path in self.root.rglob(pattern) if path.is_file())
+        paths = [path for path in self.root.rglob(pattern) if path.is_file()]
+        return sorted(
+            paths,
+            key=lambda path: (path.stat().st_mtime_ns, str(path)),
+            reverse=True,
+        )
 
     def _file_key(self, path: Path) -> str:
         relative = str(path.relative_to(self.root))
@@ -239,14 +309,17 @@ class Collector:
     ) -> dict[str, Any] | None:
         if self.archive is None:
             return None
-        return self.archive.put_raw(
-            tenant_id=self.tenant_id,
-            source_id=self.source_id,
-            native_id=native_id,
-            payload=payload,
-            media_type="application/x-ndjson",
-            created_at=occurred_at,
-        )
+        try:
+            return self.archive.put_raw(
+                tenant_id=self.tenant_id,
+                source_id=self.source_id,
+                native_id=native_id,
+                payload=payload,
+                media_type="application/x-ndjson",
+                created_at=occurred_at,
+            )
+        except Exception:
+            raise CollectorRuntimeError("archive_unavailable") from None
 
     def _versioned_record_content(self, native_id: str, content: dict, *, was_active: bool) -> dict:
         clean = sanitize(content)
@@ -280,17 +353,55 @@ class Collector:
         )
 
     def scan(self) -> dict:
+        """Run one bounded, resumable scan slice and publish content-free health."""
+
+        self._set_meta("running_started_epoch", str(time.time()))
+        self.db.commit()
+        try:
+            summary = self._scan()
+        except CollectorRuntimeError as error:
+            self._clear_running()
+            self._record_error(error.error_code)
+            raise
+        except Exception:
+            self._clear_running()
+            self._record_error("scan_failed")
+            raise
+        self._clear_running()
+        self._set_meta("last_scan_complete", "1" if summary["scan_complete"] else "0")
+        self.db.execute(
+            "DELETE FROM meta WHERE key='last_error_code' "
+            "AND value IN ('archive_unavailable','scan_failed')"
+        )
+        self.db.commit()
+        return summary
+
+    def _scan(self) -> dict:
         scan_id = hashlib.sha256(f"{time.time_ns()}:{os.getpid()}".encode()).hexdigest()[:16]
         summary = {"files_seen": 0, "records_queued": 0, "tombstones_queued": 0,
-                   "parse_errors": 0, "partial_files": 0}
+                   "parse_errors": 0, "partial_files": 0, "scan_complete": True}
+        scan_started = time.monotonic()
+        records_seen = 0
+        bounded = False
         privacy_receipts = []
+        if self.brain_writer is not None:
+            self.flush()
         executor = (
             ThreadPoolExecutor(max_workers=self.archive_workers)
             if self.archive is not None and self.archive_workers > 1
             else None
         )
         try:
-            for path in self.discover():
+            paths = self.discover()
+            for path in paths:
+                if (
+                    records_seen >= self.max_scan_records
+                    or time.monotonic() - scan_started >= self.max_scan_seconds
+                ):
+                    bounded = True
+                    break
+                if summary["files_seen"] and self.brain_writer is not None:
+                    self.flush()
                 summary["files_seen"] += 1
                 stat = path.stat()
                 path_text = str(path)
@@ -370,6 +481,12 @@ class Collector:
                 with path.open("rb") as source:
                     source.seek(start_offset)
                     while source.tell() < stat.st_size:
+                        if (
+                            records_seen >= self.max_scan_records
+                            or time.monotonic() - scan_started >= self.max_scan_seconds
+                        ):
+                            bounded = True
+                            break
                         line_start = source.tell()
                         line = source.readline(stat.st_size - line_start)
                         if not line:
@@ -379,6 +496,7 @@ class Collector:
                             break
                         complete_end = source.tell()
                         complete_records += 1
+                        records_seen += 1
                         native_id = f"{self._file_key(path)}-{line_start:016x}"
                         try:
                             content = json.loads(line)
@@ -437,6 +555,25 @@ class Collector:
                                 self.flush()
                 while pending:
                     commit_pending()
+                if bounded and complete_end < stat.st_size:
+                    self._save_file_progress(
+                        path_text,
+                        stat,
+                        current_fingerprint,
+                        complete_end,
+                        "scanning-" + mode,
+                        file_scan_id,
+                    )
+                    if not self.db.execute(
+                        "SELECT 1 FROM outbox WHERE path=? AND state='pending' LIMIT 1",
+                        (path_text,),
+                    ).fetchone():
+                        self.db.execute(
+                            "UPDATE files SET committed_offset=scanned_offset WHERE path=?",
+                            (path_text,),
+                        )
+                    self.db.commit()
+                    break
                 if not append:
                     for native_id, old in old_active.items():
                         if native_id in seen_native:
@@ -468,31 +605,45 @@ class Collector:
         finally:
             if executor is not None:
                 executor.shutdown(wait=True, cancel_futures=True)
-        missing = list(self.db.execute("SELECT path FROM files WHERE last_scan_id != ? AND status != 'tombstone'", (scan_id,)))
-        for item in missing:
-            for old in self.db.execute("SELECT * FROM active_records WHERE path=?", (item["path"],)):
-                path = Path(item["path"])
-                occurred_at = iso_now()
-                artifact_ref = self._archive_raw(
-                    native_id=old["native_id"],
-                    payload=canonical_json({
-                        "deleted": True,
-                        "native_id": old["native_id"],
-                    }),
-                    occurred_at=occurred_at,
+        if not bounded:
+            missing = list(self.db.execute(
+                "SELECT path FROM files WHERE last_scan_id != ? AND status != 'tombstone'",
+                (scan_id,),
+            ))
+            for item in missing:
+                for old in self.db.execute(
+                    "SELECT * FROM active_records WHERE path=?",
+                    (item["path"],),
+                ):
+                    path = Path(item["path"])
+                    occurred_at = iso_now()
+                    artifact_ref = self._archive_raw(
+                        native_id=old["native_id"],
+                        payload=canonical_json({
+                            "deleted": True,
+                            "native_id": old["native_id"],
+                        }),
+                        occurred_at=occurred_at,
+                    )
+                    envelope = self._envelope(
+                        path, old["native_id"], "tombstone",
+                        {"target_native_id": old["native_id"], "deletion_id": scan_id},
+                        occurred_at, old["start_offset"], old["end_offset"],
+                        artifact_ref,
+                    )
+                    if self._queue(path, envelope, old["end_offset"]):
+                        summary["tombstones_queued"] += 1
+                self.db.execute(
+                    "DELETE FROM active_records WHERE path=?",
+                    (item["path"],),
                 )
-                envelope = self._envelope(
-                    path, old["native_id"], "tombstone",
-                    {"target_native_id": old["native_id"], "deletion_id": scan_id},
-                    occurred_at, old["start_offset"], old["end_offset"],
-                    artifact_ref,
+                self.db.execute(
+                    "UPDATE files SET status='tombstone',last_scan_id=? WHERE path=?",
+                    (scan_id, item["path"]),
                 )
-                if self._queue(path, envelope, old["end_offset"]):
-                    summary["tombstones_queued"] += 1
-            self.db.execute("DELETE FROM active_records WHERE path=?", (item["path"],))
-            self.db.execute("UPDATE files SET status='tombstone',last_scan_id=? WHERE path=?", (scan_id, item["path"]))
         self.db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES ('last_scan_at',?)", (str(time.time()),))
         self.db.commit()
+        summary["scan_complete"] = not bounded
         summary["privacy"] = summarize_receipts(privacy_receipts, self.privacy.mode)
         return summary
 
@@ -545,7 +696,13 @@ class Collector:
                     (row["path"],),
                 )
                 result["recovered"] += 1
-            except (OSError, ValueError, json.JSONDecodeError, UnicodeDecodeError):
+            except (
+                OSError,
+                TypeError,
+                ValueError,
+                json.JSONDecodeError,
+                UnicodeDecodeError,
+            ):
                 self.db.execute(
                     "INSERT OR IGNORE INTO dead_letters(path,byte_offset,error_code,error_summary,created_at) VALUES (?,?,?,?,?)",
                     (row["path"], row["start_offset"], "RecoveryError", "record recovery rejected", time.time()),
@@ -554,8 +711,95 @@ class Collector:
         self.db.commit()
         return result
 
-    def _repair_pending_envelope(self, row: sqlite3.Row) -> dict | None:
+    def _repair_pending_envelope(
+        self,
+        row: sqlite3.Row,
+        *,
+        repair_artifact: bool = True,
+    ) -> dict | None:
         envelope = json.loads(row["envelope_json"])
+        if (
+            repair_artifact
+            and self.archive is not None
+            and "artifact_ref" not in envelope.get("provenance", {})
+        ):
+            try:
+                if envelope.get("kind") == "tombstone":
+                    raw = canonical_json({
+                        "deleted": True,
+                        "native_id": row["native_id"],
+                    })
+                    content = envelope["content"]
+                else:
+                    path = Path(row["path"])
+                    with path.open("rb") as source:
+                        source.seek(row["start_offset"])
+                        raw = source.read(row["end_offset"] - row["start_offset"])
+                    if not raw.endswith(b"\n"):
+                        raise ValueError("source byte window is incomplete")
+                    original = json.loads(raw)
+                    if not isinstance(original, dict):
+                        raise ValueError("record is not an object")
+                    privacy = self.privacy.apply(original)
+                    if privacy.action == "drop":
+                        self.db.execute("DELETE FROM outbox WHERE id=?", (row["id"],))
+                        return None
+                    content = envelope["content"]
+                    expected_content = dict(content)
+                    generation = expected_content.pop(
+                        "_recall_collector_generation",
+                        None,
+                    )
+                    if (
+                        not isinstance(generation, int)
+                        or sanitize(privacy.value) != expected_content
+                    ):
+                        raise ValueError("source byte window changed")
+                artifact_ref = self._archive_raw(
+                    native_id=row["native_id"],
+                    payload=raw,
+                    occurred_at=envelope["occurred_at"],
+                )
+                envelope = self._envelope(
+                    Path(row["path"]),
+                    row["native_id"],
+                    envelope["kind"],
+                    content,
+                    envelope["occurred_at"],
+                    row["start_offset"],
+                    row["end_offset"],
+                    artifact_ref,
+                )
+                rendered = canonical_json(envelope).decode()
+                self.db.execute(
+                    "UPDATE outbox SET envelope_json=?,queued_at=? WHERE id=?",
+                    (rendered, time.time(), row["id"]),
+                )
+                repaired = dict(row)
+                repaired["envelope_json"] = rendered
+                row = repaired
+            except (
+                OSError,
+                TypeError,
+                ValueError,
+                json.JSONDecodeError,
+                UnicodeDecodeError,
+            ):
+                self.db.execute(
+                    "UPDATE outbox SET state='dead' WHERE id=?",
+                    (row["id"],),
+                )
+                self.db.execute(
+                    "INSERT OR IGNORE INTO dead_letters(path,byte_offset,error_code,error_summary,created_at) VALUES (?,?,?,?,?)",
+                    (
+                        row["path"],
+                        row["start_offset"],
+                        "RecoveryError",
+                        "record recovery rejected",
+                        time.time(),
+                    ),
+                )
+                return None
         if envelope.get("kind") == "tombstone":
             clean = sanitize(envelope["content"])
         else:
@@ -664,12 +908,27 @@ class Collector:
                 except urllib.error.HTTPError as exc:
                     result["errors"] += 1
                     if exc.code < 500:
+                        self._record_error(
+                            "brain_unauthorized"
+                            if exc.code in {401, 403}
+                            else "brain_rejected"
+                        )
                         return result
+                    self._record_error("brain_unavailable")
+                except PermissionError:
+                    result["errors"] += 1
+                    self._record_error("brain_unauthorized")
+                    return result
                 except (OSError, urllib.error.URLError):
                     result["errors"] += 1
+                    self._record_error("brain_unavailable")
                 except (json.JSONDecodeError, RuntimeError):
                     result["errors"] += 1
+                    self._record_error("brain_invalid_acknowledgement")
                     return result
+                except Exception:
+                    result["errors"] += 1
+                    self._record_error("brain_unavailable")
                 if attempt < 4:
                     time.sleep(min(2 ** attempt, 10))
             if acknowledgement is None:
@@ -677,6 +936,7 @@ class Collector:
             receipts = acknowledgement.get("receipts", [])
             if len(receipts) != len(rows):
                 result["errors"] += 1
+                self._record_error("brain_invalid_acknowledgement")
                 break
             self._after_remote_commit(acknowledgement)
             acked_at = time.time()
@@ -690,10 +950,17 @@ class Collector:
                     "UPDATE active_records SET receipt=? WHERE path=? AND native_id=?",
                     [(receipt, row["path"], row["native_id"]) for row, receipt in acknowledgements],
                 )
+                self.db.executemany(
+                    "DELETE FROM dead_letters "
+                    "WHERE path=? AND byte_offset=? AND error_code='RecoveryError'",
+                    [(row["path"], row["start_offset"]) for row in rows],
+                )
                 for path in {row["path"] for row in rows}:
                     pending = self.db.execute("SELECT 1 FROM outbox WHERE path=? AND state='pending' LIMIT 1", (path,)).fetchone()
                     if not pending:
                         self.db.execute("UPDATE files SET committed_offset=scanned_offset WHERE path=?", (path,))
+                self._set_meta("last_success_epoch", str(int(acked_at)))
+                self._clear_error()
             result["batches"] += 1
             result["acked"] += len(rows)
             result["replayed_batches"] += int(bool(acknowledgement.get("replay")))
@@ -706,6 +973,11 @@ class Collector:
         parse_errors = self.db.execute("SELECT count(*) AS n FROM dead_letters").fetchone()["n"]
         latencies = [row["acked_at"] - row["queued_at"] for row in self.db.execute("SELECT queued_at,acked_at FROM outbox WHERE acked_at IS NOT NULL ORDER BY acked_at-queued_at")]
         p95 = latencies[max(0, int(len(latencies) * 0.95 + 0.999999) - 1)] if latencies else None
+        metadata = dict(self.db.execute(
+            "SELECT key,value FROM meta WHERE key IN "
+            "('last_success_epoch','last_error_code','running_started_epoch',"
+            "'last_scan_complete')"
+        ))
         result = {
             "harness": self.harness,
             "source_id": self.source_id,
@@ -723,6 +995,10 @@ class Collector:
             "dead_letter_count": parse_errors,
             "privacy_mode": self.privacy.mode,
             "privacy_policy_version": self.privacy.apply({}).policy_version,
+            "last_success_epoch": int(metadata.get("last_success_epoch", "0")),
+            "last_error_code": metadata.get("last_error_code"),
+            "running": "running_started_epoch" in metadata,
+            "scan_complete": metadata.get("last_scan_complete") == "1",
         }
         if include_dead_letters:
             result["dead_letters"] = [dict(row) for row in self.db.execute("SELECT path,byte_offset,error_code,error_summary FROM dead_letters ORDER BY id")]

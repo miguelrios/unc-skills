@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
+import logging
 import os
 import re
 import secrets
+import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
@@ -18,6 +22,19 @@ import urllib.request
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from .authorization import normalize_verified_email
+from .invitation_email import (
+    InvitationEmail,
+    InvitationEmailError,
+    InvitationEmailSender,
+    invitation_urls,
+    sender_from_env,
+)
+from connectors.composio_workspace_rail import (
+    ComposioWorkspaceRail,
+    toolkit_for_connector,
+)
+from connectors.workspace_rail import WorkspaceRailError
 from connectors.registry import (
     ConnectorDefinitionV3,
     ConnectorRegistryError,
@@ -34,6 +51,23 @@ DEVICE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{2,63}\Z")
 GOOGLE_CONNECTORS = frozenset(
     {"google.gmail", "google.calendar", "google.contacts", "google.drive"}
 )
+GOOGLE_SCOPE_SUPERSETS = {
+    "https://www.googleapis.com/auth/gmail.readonly": frozenset(
+        {
+            "https://mail.google.com/",
+            "https://www.googleapis.com/auth/gmail.modify",
+        }
+    ),
+    "https://www.googleapis.com/auth/calendar.readonly": frozenset(
+        {"https://www.googleapis.com/auth/calendar"}
+    ),
+    "https://www.googleapis.com/auth/contacts.readonly": frozenset(
+        {"https://www.googleapis.com/auth/contacts"}
+    ),
+    "https://www.googleapis.com/auth/drive.readonly": frozenset(
+        {"https://www.googleapis.com/auth/drive"}
+    ),
+}
 INSTALLATION_STATES = frozenset(
     {"configured", "enabled", "paused", "revoked", "uninstalled"}
 )
@@ -44,6 +78,11 @@ TRANSITIONS = {
     "revoke": ({"configured", "enabled", "paused"}, "revoked"),
     "uninstall": ({"configured", "enabled", "paused", "revoked"}, "uninstalled"),
 }
+COMPOSIO_PROBE_RETRY_DELAYS = (1.0, 2.0, 4.0, 8.0, 15.0, 15.0)
+COMPOSIO_TRANSIENT_PROBE_ERRORS = frozenset(
+    {"authority_forbidden", "transport_unavailable", "upstream_error"}
+)
+LOG = logging.getLogger("recall.control")
 
 
 class ControlError(RuntimeError):
@@ -57,6 +96,17 @@ class ControlError(RuntimeError):
 
 def _digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _scopes_cover(
+    required: set[str] | tuple[str, ...],
+    granted: set[str] | tuple[str, ...],
+) -> bool:
+    observed = set(granted)
+    return all(
+        scope in observed or bool(GOOGLE_SCOPE_SUPERSETS.get(scope, ()) & observed)
+        for scope in required
+    )
 
 
 def _now() -> datetime:
@@ -121,10 +171,17 @@ class SecretBox:
         if len(plaintext) > 64 * 1024:
             raise ControlError("control_secret_too_large")
         nonce = os.urandom(12)
-        ciphertext = AESGCM(self._key).encrypt(
-            nonce, plaintext, purpose.encode()
-        )
+        ciphertext = AESGCM(self._key).encrypt(nonce, plaintext, purpose.encode())
         return b"\x01" + nonce + ciphertext
+
+    def blind_index(self, value: str, *, purpose: str) -> str:
+        if not isinstance(value, str) or not value or not isinstance(purpose, str):
+            raise ControlError("control_secret_invalid")
+        return hmac.new(
+            self._key,
+            f"{purpose}\0{value}".encode(),
+            hashlib.sha256,
+        ).hexdigest()
 
     def open(self, envelope: bytes, *, purpose: str) -> dict[str, Any]:
         if (
@@ -151,6 +208,12 @@ class OAuthTokens:
     granted_scopes: tuple[str, ...]
     credentials: dict[str, Any]
     expires_at: datetime | None
+
+
+@dataclass(frozen=True)
+class ManagedOAuthStart:
+    authorization_url: str
+    connected_account_id: str
 
 
 class OAuthProvider(Protocol):
@@ -205,15 +268,11 @@ class GoogleOAuthProvider:
             raise ControlError("google_oauth_configuration_invalid", 500)
         self.client_id = client_id
         self.client_secret = client_secret
-        self.redirect_uri = _https_url(
-            redirect_uri, label="google_redirect_uri"
-        )
+        self.redirect_uri = _https_url(redirect_uri, label="google_redirect_uri")
         self.authorization_endpoint = _https_url(
             authorization_endpoint, label="google_authorization_endpoint"
         )
-        self.token_endpoint = _https_url(
-            token_endpoint, label="google_token_endpoint"
-        )
+        self.token_endpoint = _https_url(token_endpoint, label="google_token_endpoint")
         self.userinfo_endpoint = _https_url(
             userinfo_endpoint, label="google_userinfo_endpoint"
         )
@@ -262,9 +321,7 @@ class GoogleOAuthProvider:
             },
         )
         try:
-            with GoogleOAuthProvider._opener().open(
-                request, timeout=20
-            ) as response:
+            with GoogleOAuthProvider._opener().open(request, timeout=20) as response:
                 value = GoogleOAuthProvider._json(response)
         except (
             OSError,
@@ -392,6 +449,301 @@ class GoogleOAuthProvider:
             raise ControlError("google_oauth_revoke_failed", 502) from None
 
 
+class ComposioConnectionBroker:
+    """Hosted connect-link broker; provider credentials never enter Recall."""
+
+    provider_id = "composio"
+    managed_connection = True
+    _PROBES = {
+        "google.gmail": ("gmail.users.getProfile", {"userId": "me"}),
+        "google.calendar": (
+            "calendar.calendarList.list",
+            {"maxResults": 1},
+        ),
+        "google.contacts": (
+            "people.people.connections.list",
+            {
+                "resourceName": "people/me",
+                "pageSize": 1,
+                "personFields": "metadata",
+            },
+        ),
+        "google.drive": (
+            "drive.changes.getStartPageToken",
+            {"supportsAllDrives": True},
+        ),
+    }
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        redirect_uri: str,
+        auth_configs: Mapping[str, str] | None = None,
+        client_factory: Any | None = None,
+        rail_factory: Any | None = None,
+    ):
+        if (
+            not isinstance(api_key, str)
+            or not 10 <= len(api_key) <= 4096
+            or any(character.isspace() or ord(character) < 33 for character in api_key)
+        ):
+            raise ControlError("composio_configuration_invalid", 500)
+        redirect_uri = _https_url(redirect_uri, label="composio_redirect_uri")
+        parsed = urlsplit(redirect_uri)
+        if parsed.query or parsed.path != "/admin/oauth/callback/composio":
+            raise ControlError("composio_redirect_uri_invalid", 500)
+        normalized_configs = dict(auth_configs or {})
+        if any(
+            toolkit
+            not in {
+                "gmail",
+                "googlecalendar",
+                "googlecontacts",
+                "googledrive",
+            }
+            or not isinstance(config_id, str)
+            or not re.fullmatch(r"ac_[A-Za-z0-9_-]{3,252}", config_id)
+            for toolkit, config_id in normalized_configs.items()
+        ):
+            raise ControlError("composio_configuration_invalid", 500)
+        self.api_key = api_key
+        self.redirect_uri = redirect_uri
+        self.auth_configs = normalized_configs
+        self.client_factory = client_factory
+        self.rail_factory = rail_factory or ComposioWorkspaceRail
+        self._client_value = None
+
+    @classmethod
+    def from_env(cls) -> "ComposioConnectionBroker":
+        configs = {}
+        for toolkit, variable in {
+            "gmail": "RECALL_COMPOSIO_AUTH_CONFIG_GMAIL",
+            "googlecalendar": "RECALL_COMPOSIO_AUTH_CONFIG_GOOGLECALENDAR",
+            "googlecontacts": "RECALL_COMPOSIO_AUTH_CONFIG_GOOGLECONTACTS",
+            "googledrive": "RECALL_COMPOSIO_AUTH_CONFIG_GOOGLEDRIVE",
+        }.items():
+            value = os.environ.get(variable, "")
+            if value:
+                configs[toolkit] = value
+        return cls(
+            api_key=os.environ.get("RECALL_COMPOSIO_API_KEY", ""),
+            redirect_uri=os.environ.get("RECALL_COMPOSIO_REDIRECT_URI", ""),
+            auth_configs=configs,
+        )
+
+    def _client(self):
+        if self._client_value is None:
+            try:
+                if self.client_factory is not None:
+                    self._client_value = self.client_factory(self.api_key)
+                else:
+                    from composio import Composio
+
+                    self._client_value = Composio(api_key=self.api_key, timeout=60.0)
+            except Exception:
+                raise ControlError("composio_upstream_failed", 502) from None
+        return self._client_value
+
+    @staticmethod
+    def _field(value: Any, name: str) -> Any:
+        if isinstance(value, Mapping):
+            return value.get(name)
+        return getattr(value, name, None)
+
+    def start_connection(
+        self,
+        *,
+        user_id: str,
+        connector_id: str,
+        state: str,
+    ) -> ManagedOAuthStart:
+        if (
+            not isinstance(user_id, str)
+            or not AUTHORITY_RE.fullmatch(user_id)
+            or not isinstance(state, str)
+            or not STATE_RE.fullmatch(state)
+        ):
+            raise ControlError("oauth_state_invalid", 403)
+        try:
+            toolkit = toolkit_for_connector(connector_id)
+        except Exception:
+            raise ControlError("oauth_connector_invalid") from None
+        callback_url = self.redirect_uri + "?" + urlencode({"state": state})
+        options: dict[str, Any] = {
+            "user_id": user_id,
+            "toolkits": [toolkit],
+            "manage_connections": False,
+            "multi_account": {
+                "enable": True,
+                "require_explicit_selection": True,
+            },
+        }
+        auth_config = self.auth_configs.get(toolkit)
+        if auth_config:
+            options["auth_configs"] = {toolkit: auth_config}
+        try:
+            session = self._client().create(**options)
+            request = session.authorize(toolkit, callback_url=callback_url)
+        except ControlError:
+            raise
+        except Exception:
+            raise ControlError("composio_upstream_failed", 502) from None
+        connected_account_id = self._field(request, "id")
+        authorization_url = self._field(request, "redirect_url")
+        parsed = (
+            urlsplit(authorization_url) if isinstance(authorization_url, str) else None
+        )
+        if (
+            not isinstance(connected_account_id, str)
+            or not re.fullmatch(r"ca_[A-Za-z0-9_-]{3,252}", connected_account_id)
+            or parsed is None
+            or parsed.scheme != "https"
+            or parsed.hostname != "connect.composio.dev"
+            or parsed.username
+            or parsed.password
+            or parsed.fragment
+            or not parsed.path.startswith("/link/")
+        ):
+            raise ControlError("composio_upstream_invalid", 502)
+        return ManagedOAuthStart(
+            authorization_url=authorization_url,
+            connected_account_id=connected_account_id,
+        )
+
+    def _account(self, connected_account_id: str) -> Any:
+        try:
+            return self._client().connected_accounts.get(connected_account_id)
+        except ControlError:
+            raise
+        except Exception:
+            raise ControlError("composio_upstream_failed", 502) from None
+
+    def _probe_connection(
+        self,
+        *,
+        user_id: str,
+        connected_account_id: str,
+        connector_id: str,
+    ) -> None:
+        probe = self._PROBES.get(connector_id)
+        if probe is None:
+            raise ControlError("oauth_connector_invalid")
+        for attempt in range(len(COMPOSIO_PROBE_RETRY_DELAYS) + 1):
+            try:
+                rail = self.rail_factory(
+                    api_key=self.api_key,
+                    user_id=user_id,
+                    connected_account_id=connected_account_id,
+                    connector_id=connector_id,
+                )
+                rail.run(*probe)
+                return
+            except WorkspaceRailError as error:
+                retryable = str(error) in COMPOSIO_TRANSIENT_PROBE_ERRORS
+                if not retryable or attempt == len(COMPOSIO_PROBE_RETRY_DELAYS):
+                    raise ControlError("oauth_scope_insufficient", 403) from None
+                time.sleep(COMPOSIO_PROBE_RETRY_DELAYS[attempt])
+            except Exception:
+                raise ControlError("oauth_scope_insufficient", 403) from None
+
+    def complete_connection(
+        self,
+        *,
+        user_id: str,
+        connector_id: str,
+        expected_connected_account_id: str,
+        callback_connected_account_id: str,
+        callback_status: str,
+        required_scopes: tuple[str, ...],
+    ) -> OAuthTokens:
+        if not isinstance(user_id, str) or not AUTHORITY_RE.fullmatch(user_id):
+            raise ControlError("oauth_connection_forbidden", 403)
+        if callback_status != "success":
+            raise ControlError("oauth_connection_inactive", 403)
+        if (
+            callback_connected_account_id != expected_connected_account_id
+            or not re.fullmatch(
+                r"ca_[A-Za-z0-9_-]{3,252}",
+                callback_connected_account_id or "",
+            )
+        ):
+            raise ControlError("oauth_connection_mismatch", 403)
+        try:
+            toolkit = toolkit_for_connector(connector_id)
+        except Exception:
+            raise ControlError("oauth_connector_invalid") from None
+        account = self._account(expected_connected_account_id)
+        account_toolkit = self._field(self._field(account, "toolkit"), "slug")
+        if self._field(account, "id") != expected_connected_account_id:
+            raise ControlError("oauth_connection_mismatch", 403)
+        if self._field(account, "user_id") != user_id:
+            raise ControlError("oauth_connection_forbidden", 403)
+        if self._field(account, "status") != "ACTIVE":
+            raise ControlError("oauth_connection_inactive", 403)
+        if account_toolkit != toolkit:
+            raise ControlError("oauth_connection_mismatch", 403)
+        observed_scopes = self._field(account, "requested_scopes")
+        if observed_scopes is not None and (
+            not isinstance(observed_scopes, list)
+            or not _scopes_cover(
+                required_scopes,
+                {
+                    value
+                    for value in observed_scopes
+                    if isinstance(value, str)
+                },
+            )
+        ):
+            raise ControlError("oauth_scope_insufficient", 403)
+        self._probe_connection(
+            user_id=user_id,
+            connected_account_id=expected_connected_account_id,
+            connector_id=connector_id,
+        )
+        return OAuthTokens(
+            subject_id=f"{toolkit}:{expected_connected_account_id}",
+            granted_scopes=tuple(sorted(observed_scopes or required_scopes)),
+            credentials={
+                "user_id": user_id,
+                "connected_account_id": expected_connected_account_id,
+                "toolkit": toolkit,
+            },
+            expires_at=None,
+        )
+
+    def revoke(self, credentials: dict[str, Any]) -> None:
+        if not isinstance(credentials, dict) or set(credentials) != {
+            "user_id",
+            "connected_account_id",
+            "toolkit",
+        }:
+            raise ControlError("oauth_connection_invalid", 500)
+        user_id = credentials["user_id"]
+        connected_account_id = credentials["connected_account_id"]
+        toolkit = credentials["toolkit"]
+        if (
+            not isinstance(user_id, str)
+            or not AUTHORITY_RE.fullmatch(user_id)
+            or not isinstance(connected_account_id, str)
+            or not re.fullmatch(r"ca_[A-Za-z0-9_-]{3,252}", connected_account_id)
+            or toolkit
+            not in {"gmail", "googlecalendar", "googlecontacts", "googledrive"}
+        ):
+            raise ControlError("oauth_connection_invalid", 500)
+        account = self._account(connected_account_id)
+        account_toolkit = self._field(self._field(account, "toolkit"), "slug")
+        if self._field(account, "user_id") != user_id or account_toolkit != toolkit:
+            raise ControlError("oauth_connection_forbidden", 403)
+        try:
+            self._client().connected_accounts.delete(
+                connected_account_id,
+                revoke_on_delete=True,
+            )
+        except Exception:
+            raise ControlError("composio_revoke_failed", 502) from None
+
+
 class ControlPlane:
     """One control contract for browser, remote worker, and macOS clients."""
 
@@ -400,10 +752,14 @@ class ControlPlane:
         store: Any,
         secret_box: SecretBox,
         providers: dict[str, OAuthProvider],
+        invitation_email_sender: InvitationEmailSender | None = None,
+        mcp_resource_uri: str = "",
     ):
         self.store = store
         self.secret_box = secret_box
         self.providers = dict(providers)
+        self.invitation_email_sender = invitation_email_sender
+        self.mcp_resource_uri = mcp_resource_uri
 
     @classmethod
     def from_env(cls, store: Any) -> "ControlPlane":
@@ -414,10 +770,28 @@ class ControlPlane:
         )
         if any(google_values) and not all(google_values):
             raise ControlError("google_oauth_configuration_invalid", 500)
+        composio_values = (
+            os.environ.get("RECALL_COMPOSIO_API_KEY", ""),
+            os.environ.get("RECALL_COMPOSIO_REDIRECT_URI", ""),
+        )
+        if any(composio_values) and not all(composio_values):
+            raise ControlError("composio_configuration_invalid", 500)
         providers: dict[str, OAuthProvider] = {}
         if all(google_values):
             providers["google"] = GoogleOAuthProvider.from_env()
-        return cls(store, SecretBox.from_env(), providers)
+        if all(composio_values):
+            providers["composio"] = ComposioConnectionBroker.from_env()
+        try:
+            invitation_email_sender = sender_from_env()
+        except InvitationEmailError:
+            raise ControlError("invitation_email_configuration_invalid", 500) from None
+        return cls(
+            store,
+            SecretBox.from_env(),
+            providers,
+            invitation_email_sender=invitation_email_sender,
+            mcp_resource_uri=os.environ.get("RECALL_MCP_RESOURCE_URI", ""),
+        )
 
     def create_admin_token(
         self,
@@ -562,6 +936,329 @@ class ControlPlane:
                 (principal_id,),
             ).fetchall()
 
+    def _brain_admin(
+        self,
+        connection: Any,
+        *,
+        principal_id: str,
+        tenant_id: str,
+    ) -> dict[str, Any]:
+        row = connection.execute(
+            """SELECT space.organization_id,space.brain_kind,space.slug,
+                      organization.display_name,
+                      membership.role,access.permission
+               FROM brain_spaces space
+               JOIN brain_organizations organization USING(organization_id)
+               JOIN brain_access_grants access
+                 ON access.tenant_id=space.tenant_id
+                AND access.principal_id=%s
+               JOIN brain_memberships membership
+                 ON membership.organization_id=space.organization_id
+                AND membership.principal_id=%s
+               WHERE space.tenant_id=%s""",
+            (principal_id, principal_id, tenant_id),
+        ).fetchone()
+        if (
+            row is None
+            or row["brain_kind"] != "company"
+            or row["role"] not in {"owner", "admin"}
+            or row["permission"] not in {"owner", "admin"}
+        ):
+            raise ControlError("brain_admin_forbidden", 403)
+        return row
+
+    def create_brain_invitation(
+        self,
+        *,
+        principal_id: str,
+        tenant_id: str,
+        email: str,
+        role: str,
+        expires_in_days: int = 7,
+    ) -> dict[str, Any]:
+        normalized_email = normalize_verified_email(email)
+        if (
+            not isinstance(principal_id, str)
+            or not AUTHORITY_RE.fullmatch(principal_id)
+            or not isinstance(tenant_id, str)
+            or not AUTHORITY_RE.fullmatch(tenant_id)
+            or normalized_email is None
+            or role not in {"admin", "member"}
+            or type(expires_in_days) is not int
+            or not 1 <= expires_in_days <= 30
+        ):
+            raise ControlError("brain_invitation_invalid")
+        invitation_id = uuid.uuid4()
+        expires_at = _now() + timedelta(days=expires_in_days)
+        email_sha256 = self.invitation_email_index(normalized_email)
+        encrypted_email = self.secret_box.seal(
+            {"email": normalized_email},
+            purpose=f"brain-invitation:{invitation_id}",
+        )
+        with self.store.connect() as connection:
+            with connection.transaction():
+                admin = self._brain_admin(
+                    connection,
+                    principal_id=principal_id,
+                    tenant_id=tenant_id,
+                )
+                if admin["role"] == "admin" and role != "member":
+                    raise ControlError("brain_role_forbidden", 403)
+                existing = connection.execute(
+                    """SELECT 1 FROM brain_invitations
+                       WHERE tenant_id=%s AND email_sha256=%s
+                         AND accepted_at IS NOT NULL AND revoked_at IS NULL""",
+                    (tenant_id, email_sha256),
+                ).fetchone()
+                if existing:
+                    raise ControlError("brain_member_exists", 409)
+                connection.execute(
+                    """UPDATE brain_invitations SET revoked_at=now()
+                       WHERE tenant_id=%s AND email_sha256=%s
+                         AND accepted_at IS NULL AND revoked_at IS NULL""",
+                    (tenant_id, email_sha256),
+                )
+                connection.execute(
+                    """INSERT INTO brain_invitations(
+                           id,tenant_id,email_sha256,encrypted_email,
+                           encryption_key_id,role,invited_by_principal_id,expires_at
+                       ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (
+                        invitation_id,
+                        tenant_id,
+                        email_sha256,
+                        encrypted_email,
+                        self.secret_box.key_id,
+                        role,
+                        principal_id,
+                        expires_at,
+                    ),
+                )
+                connection.execute(
+                    """INSERT INTO control_audit_events(
+                           id,principal_id,operation,status,target_sha256
+                       ) VALUES (%s,%s,'brain.invitation.create','success',%s)""",
+                    (uuid.uuid4(), principal_id, _digest(str(invitation_id))),
+                )
+        delivery = {"status": "disabled"}
+        if self.invitation_email_sender is not None:
+            try:
+                brain_url, onboarding_url = invitation_urls(
+                    self.mcp_resource_uri,
+                    tenant_id=tenant_id,
+                    invitation_id=str(invitation_id),
+                )
+                self.invitation_email_sender.send(
+                    InvitationEmail(
+                        invitation_id=str(invitation_id),
+                        recipient=normalized_email,
+                        organization_name=admin["display_name"],
+                        brain_slug=admin["slug"],
+                        role=role,
+                        expires_at=expires_at,
+                        brain_url=brain_url,
+                        onboarding_url=onboarding_url,
+                    )
+                )
+                delivery = {
+                    "status": "sent",
+                    "provider": self.invitation_email_sender.provider,
+                }
+            except InvitationEmailError:
+                LOG.error(
+                    "invitation email delivery failed provider=%s target=%s",
+                    self.invitation_email_sender.provider,
+                    _digest(str(invitation_id)),
+                )
+                delivery = {
+                    "status": "failed",
+                    "provider": self.invitation_email_sender.provider,
+                }
+        return {
+            "id": str(invitation_id),
+            "tenant_id": tenant_id,
+            "email": normalized_email,
+            "role": role,
+            "status": "pending",
+            "expires_at": expires_at.isoformat(),
+            "delivery": delivery,
+        }
+
+    def invitation_onboarding(self, invitation_id: str) -> InvitationEmail:
+        try:
+            parsed_id = uuid.UUID(invitation_id)
+        except (TypeError, ValueError, AttributeError):
+            raise ControlError("brain_invitation_not_found", 404) from None
+        with self.store.connect() as connection:
+            row = connection.execute(
+                """SELECT invitation.tenant_id,invitation.role,
+                          invitation.expires_at,invitation.accepted_at,
+                          invitation.revoked_at,space.slug,
+                          organization.display_name
+                   FROM brain_invitations invitation
+                   JOIN brain_spaces space USING(tenant_id)
+                   JOIN brain_organizations organization USING(organization_id)
+                   WHERE invitation.id=%s""",
+                (parsed_id,),
+            ).fetchone()
+        if (
+            row is None
+            or row["revoked_at"] is not None
+            or (row["accepted_at"] is None and row["expires_at"] <= _now())
+        ):
+            raise ControlError("brain_invitation_not_found", 404)
+        try:
+            brain_url, onboarding_url = invitation_urls(
+                self.mcp_resource_uri,
+                tenant_id=row["tenant_id"],
+                invitation_id=str(parsed_id),
+            )
+        except InvitationEmailError:
+            raise ControlError("invitation_email_configuration_invalid", 500) from None
+        return InvitationEmail(
+            invitation_id=str(parsed_id),
+            recipient="",
+            organization_name=row["display_name"],
+            brain_slug=row["slug"],
+            role=row["role"],
+            expires_at=row["expires_at"],
+            brain_url=brain_url,
+            onboarding_url=onboarding_url,
+        )
+
+    def invitation_email_index(self, email: str) -> str:
+        normalized_email = normalize_verified_email(email)
+        if normalized_email is None:
+            raise ControlError("brain_invitation_invalid")
+        return self.secret_box.blind_index(
+            normalized_email,
+            purpose="brain-invitation-email-v1",
+        )
+
+    def _brain_invitations(self, principal_id: str) -> list[dict[str, Any]]:
+        with self.store.connect() as connection:
+            rows = connection.execute(
+                """SELECT invitation.id,invitation.tenant_id,
+                          invitation.encrypted_email,invitation.encryption_key_id,
+                          invitation.role,invitation.expires_at,
+                          invitation.accepted_at,invitation.revoked_at
+                   FROM brain_invitations invitation
+                   JOIN brain_spaces space USING(tenant_id)
+                   JOIN brain_access_grants access
+                     ON access.tenant_id=invitation.tenant_id
+                    AND access.principal_id=%s
+                   JOIN brain_memberships membership
+                     ON membership.organization_id=space.organization_id
+                    AND membership.principal_id=%s
+                   WHERE access.permission IN ('owner','admin')
+                     AND membership.role IN ('owner','admin')
+                   ORDER BY invitation.created_at DESC""",
+                (principal_id, principal_id),
+            ).fetchall()
+        result = []
+        now = _now()
+        for row in rows:
+            if row["encryption_key_id"] != self.secret_box.key_id:
+                raise ControlError("brain_invitation_key_invalid", 500)
+            private = self.secret_box.open(
+                bytes(row["encrypted_email"]),
+                purpose=f"brain-invitation:{row['id']}",
+            )
+            email = normalize_verified_email(private.get("email"))
+            if email is None or set(private) != {"email"}:
+                raise ControlError("brain_invitation_email_invalid", 500)
+            if row["revoked_at"] is not None:
+                status = "revoked"
+            elif row["accepted_at"] is not None:
+                status = "active"
+            elif row["expires_at"] <= now:
+                status = "expired"
+            else:
+                status = "pending"
+            result.append({
+                "id": str(row["id"]),
+                "tenant_id": row["tenant_id"],
+                "email": email,
+                "role": row["role"],
+                "status": status,
+                "expires_at": row["expires_at"].isoformat(),
+            })
+        return result
+
+    def revoke_brain_invitation(
+        self,
+        *,
+        principal_id: str,
+        invitation_id: str,
+    ) -> dict[str, str]:
+        try:
+            parsed_id = uuid.UUID(invitation_id)
+        except (ValueError, TypeError):
+            raise ControlError("brain_invitation_invalid") from None
+        with self.store.connect() as connection:
+            with connection.transaction():
+                invitation = connection.execute(
+                    """SELECT invitation.tenant_id,invitation.role,
+                              invitation.accepted_principal_id,
+                              space.organization_id
+                       FROM brain_invitations invitation
+                       JOIN brain_spaces space USING(tenant_id)
+                       WHERE invitation.id=%s AND invitation.revoked_at IS NULL
+                       FOR UPDATE OF invitation""",
+                    (parsed_id,),
+                ).fetchone()
+                if invitation is None:
+                    raise ControlError("brain_invitation_not_found", 404)
+                admin = self._brain_admin(
+                    connection,
+                    principal_id=principal_id,
+                    tenant_id=invitation["tenant_id"],
+                )
+                if admin["role"] == "admin" and invitation["role"] != "member":
+                    raise ControlError("brain_role_forbidden", 403)
+                connection.execute(
+                    "UPDATE brain_invitations SET revoked_at=now() WHERE id=%s",
+                    (parsed_id,),
+                )
+                member = invitation["accepted_principal_id"]
+                if member is not None:
+                    connection.execute(
+                        """UPDATE external_identity_bindings SET revoked_at=now()
+                           WHERE tenant_id=%s AND principal_id=%s
+                             AND revoked_at IS NULL""",
+                        (invitation["tenant_id"], member),
+                    )
+                    connection.execute(
+                        """DELETE FROM canonical_source_grants
+                           WHERE tenant_id=%s AND principal_id=%s""",
+                        (invitation["tenant_id"], member),
+                    )
+                    connection.execute(
+                        """DELETE FROM brain_access_grants
+                           WHERE tenant_id=%s AND principal_id=%s""",
+                        (invitation["tenant_id"], member),
+                    )
+                    remaining = connection.execute(
+                        """SELECT 1 FROM brain_access_grants access
+                           JOIN brain_spaces space USING(tenant_id)
+                           WHERE space.organization_id=%s
+                             AND access.principal_id=%s LIMIT 1""",
+                        (invitation["organization_id"], member),
+                    ).fetchone()
+                    if not remaining:
+                        connection.execute(
+                            """DELETE FROM brain_memberships
+                               WHERE organization_id=%s AND principal_id=%s""",
+                            (invitation["organization_id"], member),
+                        )
+                connection.execute(
+                    """INSERT INTO control_audit_events(
+                           id,principal_id,operation,status,target_sha256
+                       ) VALUES (%s,%s,'brain.invitation.revoke','success',%s)""",
+                    (uuid.uuid4(), principal_id, _digest(str(parsed_id))),
+                )
+        return {"id": str(parsed_id), "status": "revoked"}
+
     def state(self, principal_id: str) -> dict[str, Any]:
         brains = self._brain_rows(principal_id)
         with self.store.connect() as connection:
@@ -604,9 +1301,7 @@ class ControlPlane:
                     "placement": public["placement"],
                     "auth": public["auth"],
                     "privacy_modes": public["policy"]["privacy_modes"],
-                    "default_privacy_mode": public["policy"][
-                        "default_privacy_mode"
-                    ],
+                    "default_privacy_mode": public["policy"]["default_privacy_mode"],
                     "selection_fields": public["selection_fields"],
                 }
             )
@@ -615,6 +1310,7 @@ class ControlPlane:
             "mode": "connector-control-state",
             "principal": {"id": principal_id},
             "brains": brains,
+            "invitations": self._brain_invitations(principal_id),
             "providers": [
                 {"id": provider_id, "status": "available"}
                 for provider_id in sorted(self.providers)
@@ -791,7 +1487,10 @@ class ControlPlane:
                 raise ControlError("oauth_route_invalid")
             connector_id = route["connector_id"]
             tenant_id = route["tenant_id"]
-            if provider_id == "google" and connector_id not in GOOGLE_CONNECTORS:
+            if (
+                provider_id in {"google", "composio"}
+                and connector_id not in GOOGLE_CONNECTORS
+            ):
                 raise ControlError("oauth_connector_invalid")
             if tenant_id not in brains:
                 raise ControlError("oauth_brain_forbidden", 403)
@@ -813,14 +1512,12 @@ class ControlPlane:
             if privacy_mode not in item.privacy_modes:
                 raise ControlError("oauth_privacy_invalid")
             selectors = route["selectors"]
-            if (
-                not isinstance(selectors, dict)
-                or set(selectors) - set(item.selection_fields)
+            if not isinstance(selectors, dict) or set(selectors) - set(
+                item.selection_fields
             ):
                 raise ControlError("oauth_selectors_invalid")
             selectors = {
-                key: _selector(value)
-                for key, value in sorted(selectors.items())
+                key: _selector(value) for key, value in sorted(selectors.items())
             }
             encoded = json.dumps(
                 selectors,
@@ -839,17 +1536,33 @@ class ControlPlane:
                     "selectors": selectors,
                 }
             )
+        managed_connection = bool(getattr(provider, "managed_connection", False))
+        if managed_connection and len(normalized) != 1:
+            raise ControlError("oauth_routes_invalid")
         code_verifier = secrets.token_urlsafe(64)
-        challenge = base64.urlsafe_b64encode(
-            hashlib.sha256(code_verifier.encode()).digest()
-        ).rstrip(b"=").decode()
+        challenge = (
+            base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode()).digest())
+            .rstrip(b"=")
+            .decode()
+        )
         state = secrets.token_urlsafe(48)
+        connected_account_id = None
+        authorization_url = None
+        if managed_connection:
+            started = provider.start_connection(
+                user_id=principal_id,
+                connector_id=normalized[0]["connector_id"],
+                state=state,
+            )
+            connected_account_id = started.connected_account_id
+            authorization_url = started.authorization_url
         context = self.secret_box.seal(
             {
                 "provider": provider_id,
                 "principal_id": principal_id,
                 "routes": normalized,
                 "code_verifier": code_verifier,
+                "expected_connected_account_id": connected_account_id,
             },
             purpose="oauth-session",
         )
@@ -870,7 +1583,8 @@ class ControlPlane:
             )
         return {
             "provider": provider_id,
-            "authorization_url": provider.authorization_url(
+            "authorization_url": authorization_url
+            or provider.authorization_url(
                 state=state,
                 code_challenge=challenge,
                 scopes=tuple(sorted(scopes)),
@@ -882,7 +1596,9 @@ class ControlPlane:
         *,
         provider_id: str,
         state: str,
-        code: str,
+        code: str | None = None,
+        connected_account_id: str | None = None,
+        status: str | None = None,
     ) -> dict[str, Any]:
         if not isinstance(state, str) or not STATE_RE.fullmatch(state):
             raise ControlError("oauth_state_invalid", 403)
@@ -929,14 +1645,31 @@ class ControlPlane:
             for route in context.get("routes", [])
         ):
             raise ControlError("oauth_brain_forbidden", 403)
-        tokens = provider.exchange(
-            code=code, code_verifier=context.get("code_verifier", "")
-        )
         required_scopes: set[str] = set()
         for route in context.get("routes", []):
             item = definition(route["connector_id"])
             required_scopes.update(item.auth.minimum_scopes)
-        if not required_scopes.issubset(set(tokens.granted_scopes)):
+        if getattr(provider, "managed_connection", False):
+            routes = context.get("routes", [])
+            if len(routes) != 1:
+                raise ControlError("oauth_state_invalid", 403)
+            tokens = provider.complete_connection(
+                user_id=row["principal_id"],
+                connector_id=routes[0]["connector_id"],
+                expected_connected_account_id=context.get(
+                    "expected_connected_account_id", ""
+                ),
+                callback_connected_account_id=connected_account_id or "",
+                callback_status=status or "",
+                required_scopes=tuple(sorted(required_scopes)),
+            )
+        else:
+            if not isinstance(code, str) or not code:
+                raise ControlError("oauth_callback_invalid")
+            tokens = provider.exchange(
+                code=code, code_verifier=context.get("code_verifier", "")
+            )
+        if not _scopes_cover(required_scopes, tokens.granted_scopes):
             raise ControlError("oauth_scope_insufficient", 403)
         connection_id = uuid.uuid4()
         encrypted = self.secret_box.seal(
@@ -990,9 +1723,7 @@ class ControlPlane:
                     )
                 for route in context["routes"]:
                     installation_id = uuid.uuid4()
-                    source_id = (
-                        f"source:{route['connector_id']}:{uuid.uuid4().hex}"
-                    )
+                    source_id = f"source:{route['connector_id']}:{uuid.uuid4().hex}"
                     connection.execute(
                         """INSERT INTO connector_installations(
                                id,tenant_id,principal_id,connector_id,source_id,
@@ -1126,9 +1857,7 @@ class ControlPlane:
         if provider is None:
             raise ControlError("oauth_provider_unsupported", 500)
         provider.revoke(credentials)
-        empty = self.secret_box.seal(
-            {}, purpose=f"provider-connection:{target_id}"
-        )
+        empty = self.secret_box.seal({}, purpose=f"provider-connection:{target_id}")
         with self.store.connect() as connection:
             with connection.transaction():
                 connection.execute(
@@ -1155,9 +1884,11 @@ class ControlPlane:
 
 
 __all__ = [
+    "ComposioConnectionBroker",
     "ControlError",
     "ControlPlane",
     "GoogleOAuthProvider",
+    "ManagedOAuthStart",
     "OAuthTokens",
     "SecretBox",
 ]

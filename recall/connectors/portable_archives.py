@@ -143,6 +143,7 @@ class SlackArchiveConnector(_SnapshotImport):
                 occurred_at = _slack_time(timestamp)
                 content = {
                     "kind": self.record_kind,
+                    "content_fidelity": "complete",
                     "conversation_id": conversation_id,
                     "direction": (
                         "outbound"
@@ -203,6 +204,7 @@ class NotionArchiveConnector(_SnapshotImport):
                 occurred_at=EPOCH,
                 content={
                     "kind": self.record_kind,
+                    "content_fidelity": "complete",
                     "document_id": native_id,
                     "mime_type": mime_type,
                     "name": _bounded(name, "notion_name", maximum=10_000),
@@ -281,6 +283,7 @@ class XArchiveConnector(_SnapshotImport):
                 occurred_at = _x_time(value.get("created_at"))
                 content: dict[str, Any] = {
                     "kind": self.record_kind,
+                    "content_fidelity": "complete",
                     "author_id": (
                         self.owner_identifiers[0]
                         if self.owner_identifiers

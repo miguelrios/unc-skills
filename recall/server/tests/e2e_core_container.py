@@ -120,6 +120,26 @@ def main() -> None:
         ).stdout.strip()
         if identity != "10001:10001":
             raise RuntimeError("container user contract failed")
+        composio_import = run(
+            "docker",
+            "run",
+            "--rm",
+            "--read-only",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=16m,uid=10001,gid=10001,mode=0700",
+            "--entrypoint",
+            "python",
+            image,
+            "-c",
+            (
+                "from composio import Composio; "
+                "from connectors.composio_workspace_rail import "
+                "ComposioWorkspaceRail; "
+                "from recall_server.control import ComposioConnectionBroker"
+            ),
+        )
+        if composio_import.stdout or composio_import.stderr:
+            raise RuntimeError("Composio container import was not content-free")
         production_start = subprocess.run(
             ["docker", "run", "--rm", "--read-only", "--network", "host",
              "-e", "RECALL_DATABASE_URL", image],
@@ -214,6 +234,7 @@ def main() -> None:
         "filesystem": "read-only",
         "database": "standard-pgvector-fixture",
         "authentication": "fail-closed",
+        "composio_runtime": "ready",
         "ingest_retrieve": "pass",
     }, sort_keys=True))
 

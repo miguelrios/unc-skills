@@ -157,27 +157,71 @@ tool — no API keys and no CLI subprocess. `parable.py run` refuses them by des
 owns subagent dispatch directly. If the current harness has no native agent-spawn tool, this
 provider is unavailable.
 
-When the session itself is launched with `parable claude`, this same provider can carry exact
-third-party model ids exposed by a localhost Claude-compatible proxy:
+When the session itself is launched with bare `parable`, this same provider can carry exact
+catalog model ids exposed by a localhost Claude-compatible proxy:
+
+For a new subscription-only setup, use the CLI rather than hand-writing the
+following reference config:
+
+```bash
+# Run the parable.sh bundled beside SKILL.md; it installs the CLI and enters setup.
+bash /path/to/installed/parable/parable.sh
+# in the working repository
+parable
+```
+
+Claude is the baseline pool for the Claude Code harness; interactive setup asks whether
+to add ChatGPT and xAI and offers the pinned build when no proxy is installed.
+Bare `parable` stays on Fable without ChatGPT. When ChatGPT is selected, it
+prefers Fable while its pool has room and can move to Sol when it is tight. The launcher owns
+proxy start, authenticated readiness, exact catalog sync,
+stock-Claude launch, signal forwarding, and cleanup. It reuses but never stops
+a healthy pre-existing endpoint. `parable proxy start` and
+`parable setup finalize` remain explicit troubleshooting commands. Headless
+operators can pass `--no-auth`, then use
+`parable auth add chatgpt --device`, `parable auth add claude`, and
+`parable auth add xai` for the vendors they selected. See the
+[complete first-run guide](../../../docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md).
+
+Claude Code first-run uses `--no-auth` only because its Bash tool cannot write a later OAuth
+callback to child stdin and its command view may clip long authorization URLs. Tell the user to
+open a new terminal and run one `parable auth login` command there. Do not run it through Claude
+Code, and do not expand that ordinary flow into per-provider commands; those remain troubleshooting
+and headless-operator escape hatches.
+
+The generated TOML has this shape:
 
 ```toml
 [claude]
 base_url = "http://127.0.0.1:8317"
 auth_token_env = "CLIPROXY_API_KEY"
-brain_model = "gpt-5.6-sol"
+brain_model = "claude-fable-5"
 
-[executors.kimi]
+[executors.terra]
 provider = "claude"
-model = "kimi-k3"
-use_for = "Independent implementation through the Kimi Code subscription."
+model = "gpt-5.6-terra"
+use_for = "Independent GPT implementation through ChatGPT subscription OAuth."
+
+[executors.sonnet_exact]
+provider = "claude"
+model = "claude-sonnet-5"
+use_for = "Implementation through Claude subscription OAuth."
+
+[executors.grok]
+provider = "claude"
+model = "grok-4.5"
+use_for = "Third-family implementation or review through xAI subscription OAuth."
 ```
 
-`parable agents sync` materializes that executor as project agent `parable-kimi`; stock Claude
-Code sends its child requests to `kimi-k3` through the same endpoint. The launcher strips
+`parable` checks the authenticated loopback catalog and then
+materializes those executors as exact project agents; stock Claude Code sends child requests to
+each full model id through the same endpoint. Diagnostic `parable setup finalize` and ordinary
+launch obtain the private generated localhost client token without requiring a shell export,
+and never print it. The launcher strips
 `CLAUDE_CODE_SUBAGENT_MODEL`, because Claude Code gives that environment variable priority over
 every agent's own `model:` field and would otherwise silently route all children to the parent.
 The proxy owns provider OAuth. Parable stores no provider credential and does not implement an
-OAuth flow.
+OAuth flow. Kimi is currently paused and is intentionally absent from the proved setup.
 
 ### Verified GPT effort support
 
@@ -201,7 +245,7 @@ Claude-to-Codex translation boundary. Its independently built binary preserved
 The patch is not an upstream release. Until CLIProxyAPI merges and releases
 the change, released `v7.2.88` users must treat non-medium effort as
 accepted-but-not-effective. Follow the
-[pinned five-minute patched-source path](../../../docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md)
+[pinned managed setup path](../../../docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md)
 for the exact build, OAuth, proxy, and Parable commands.
 
 ### Verified Grok 4.5 subscription support
@@ -232,6 +276,34 @@ separate ChatGPT/xAI OAuth routes.
 This xAI OAuth route is distinct from Parable's Cursor executor. Cursor uses a
 Cursor plan and `cursor-agent`; it is not the Grok child route inside Claude
 Code.
+
+### Verified Sol subscription-subagent matrix
+
+The exact named-child proof is complete for stock Claude Code `2.1.215`.
+With `gpt-5.6-sol` as parent, every child below created a Bash artifact and
+the parent consumed it with Agent and Bash at all five parent efforts:
+
+| Exact child | OAuth route | `low` | `medium` | `high` | `xhigh` | `max` |
+|---|---|---|---|---|---|---|
+| `gpt-5.6-terra` | ChatGPT | exact | exact | exact | exact | exact |
+| `gpt-5.6-luna` | ChatGPT | exact | exact | exact | exact | exact |
+| `grok-4.5` | xAI | exact | exact | exact | → `high` | → `high` |
+| `claude-sonnet-5` | Claude | adaptive exact | adaptive exact | adaptive exact | adaptive exact | adaptive exact |
+| `claude-opus-4-8` | Claude | adaptive exact | adaptive exact | adaptive exact | adaptive exact | adaptive exact |
+| `claude-haiku-4-5-20251001` | Claude | → enabled/31,999 | → enabled/31,999 | → enabled/31,999 | → enabled/31,999 | → enabled/31,999 |
+
+This is 30/30 live cells with exact model attribution and no provider
+fallback. Sonnet and Opus preserve the effort label under adaptive thinking.
+Haiku removes the label and consistently uses classic enabled thinking with a
+31,999-token budget. See the
+[GPT-child receipt](../../../docs/evidence/y1-sol-terra-luna/receipt.json),
+[Claude-child receipt](../../../docs/evidence/y4-sol-claude-children/receipt.json),
+and the [source-pinned setup guide](../../../docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md).
+
+Each operator must connect their own subscriptions to their own loopback
+proxy. Catalog availability is the entitlement gate; do not substitute a
+display alias when an exact id is missing. Plan limits and provider terms
+still apply.
 
 ## Reading subscription headroom (parable-usage.sh)
 

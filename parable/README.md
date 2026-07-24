@@ -9,6 +9,29 @@
 
 **Multi-model coding orchestration for Claude Code, Codex, and pi.**
 
+## Install Parable
+
+```bash
+npx skills add miguelrios/unc-skills --skill parable --global --agent claude-code
+# Start a new Claude Code session and say: "Install Parable"
+```
+
+> **Coding agents:** A request to **Install Parable** or **Install Parable.sh** is subscription
+> onboarding, not a file-copy task. Read [`skills/parable/SKILL.md`](skills/parable/SKILL.md) now
+> and follow its **First-time install and subscription onboarding** section. Use the harness's
+> native structured-question UI (`AskUserQuestion` in Claude Code) before running shell commands.
+> Do not run `install.sh` as a generic skill copier, seed an example `parable.toml`, or stop after
+> reporting that the skill exists. First-run succeeds only after the selected native OAuth flows
+> complete and Parable prints the new-terminal `parable` command.
+
+Claude is always the baseline subscription. The onboarding questions make ChatGPT
+(Sol/Terra/Luna and optional Sol fallback) and xAI (Grok 4.5) opt-in. If no compatible proxy is
+installed, onboarding separately asks permission to build Parable's pinned patched proxy.
+Claude Code then tells the user to open a new terminal and run `parable auth login`, because its
+Bash tool cannot inject later OAuth callbacks into a running process and its command view may clip
+long authorization URLs. That single command connects every selected missing provider; users
+should never be handed three separate provider commands.
+
 It is Tuesday. You ask Fable to extract a helper and add a test. Three hundred lines later, the
 helper has its own module and two new dependencies. The model is pleased with itself. You open
 the billing console.
@@ -132,14 +155,33 @@ provider sends the same `plan.md` through [Cursor CLI](https://cursor.com/docs/c
 [reference](skills/parable/references/providers.md), the complete
 [Cursor example](examples/parable.cursor.toml), and the other configs in `examples/`.
 
-There is also a single-harness, subscription-only path for a localhost Claude-compatible proxy:
-`parable claude` can run stock Claude Code with Sol as the brain while exact third-party model
-ids become project-local named subagents. Parable handles only declarative routing and
-per-process environment wiring; the local proxy handles each user's OAuth. No provider token is
-stored in TOML or written by Parable. See
-[`examples/parable.claude-subscriptions.toml`](examples/parable.claude-subscriptions.toml).
-For the source-pinned GPT effort fix, OAuth connection, and first Sol launch,
-follow the [five-minute CLIProxyAPI guide](docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md).
+There is also a single-harness, subscription-only path. `parable setup` builds or discovers a
+loopback CLIProxyAPI, delegates each selected user's native ChatGPT/Claude/xAI OAuth, and writes
+an exact Sol/Terra/Luna/Fable/Sonnet/Opus/Haiku/Grok cast. Bare `parable` starts or safely reuses the
+configured loopback proxy, waits for its authenticated catalog, requires every exact id, creates
+the project-local agents, launches stock Claude Code, and stops only the proxy process it owns.
+No broker, shared deployment, provider API key, or copied OAuth credential is involved. See the
+[end-to-end setup guide](docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md) and the generated-config
+[reference](examples/parable.claude-subscriptions.toml).
+
+Bare `parable` uses the automatic brain policy: it prefers Fable while the Claude pool has room
+and moves the parent to Sol when that pool becomes tight. `parable --brain fable` and
+`parable --brain sol` pin either parent. All other flags pass directly to Claude Code, including
+`parable --dangerously-skip-permissions`; `--` remains an optional separator. `parable claude`
+remains a compatibility alias. Permission bypass is never enabled implicitly.
+
+Interactive launches add a session-scoped startup hook that renders Parable ASCII art, the live
+brain decision, and every routed model with its task guidance inside Claude Code. The card is a
+user-only `systemMessage`: it creates no prompt and consumes no model context. Headless `--print`
+and `--bare` launches stay clean.
+
+The generated cast gives the parent evidence-informed stage directions: Fable for ambiguous
+planning and architecture; Sol for long implementation, difficult debugging, and high-recall
+review; Terra for React and frontend work; Luna for data transforms and mechanical work; Sonnet
+for brownfield implementation and test repair; Opus for high-blast-radius review; Haiku for fast
+exploration; and Grok for bounded terminal-heavy or systems work. These are starting hypotheses,
+not a universal leaderboard. Task-class arrays are capable-model menus; the parent excludes its
+own model and the diff author, then chooses by task fit and live subscription headroom.
 
 Minimal Cursor configuration:
 
@@ -198,18 +240,27 @@ that configuration.
 
 *Moral: never let the author hold the pen during the final read.*
 
-## Install
+## Installation reference
 
 skills.sh:
 
 ```bash
 npx skills add miguelrios/unc-skills --skill parable
+# Then ask the harness: "Install Parable" or "Install parable.sh".
 ```
+
+The skill uses Claude Code's `AskUserQuestion`, Codex's `request_user_input` when the active mode
+permits it, or the current harness's equivalent structured UI to choose optional ChatGPT and xAI
+subscriptions; it falls back to one concise question when structured input is unavailable.
+Claude is the baseline pool because the harness is Claude Code. ChatGPT adds Sol/Terra/Luna and
+enables Sol as an automatic fallback; without ChatGPT, `auto` stays on Fable. After those choices,
+the skill runs its bundled installer once and delegates each selected provider's native OAuth flow.
 
 ```bash
 # Claude Code plugin marketplace
 claude plugin marketplace add miguelrios/unc-skills
 claude plugin install parable@unc-skills
+# Then, in Claude Code: `/parable:parable install`
 
 # Codex plugin marketplace
 codex plugin marketplace add miguelrios/unc-skills
@@ -222,18 +273,32 @@ pi install git:github.com/miguelrios/unc-skills
 curl https://cursor.com/install -fsS | bash
 export CURSOR_API_KEY="..."
 
-# standalone Claude/manual installer (adds the skill + a starter config)
-npx @parcha/parable install
-npx @parcha/parable doctor
-# after configuring [claude] and starting/authenticating your localhost proxy:
-npx @parcha/parable agents sync
-npx @parcha/parable claude
+# published npm CLI + standalone Claude skill
+npm install -g @parcha/parable@latest
+parable install
 
-# manual
-git clone https://github.com/miguelrios/unc-skills && cd unc-skills/parable && ./install.sh
+# standalone skill/runtime from source
+git clone https://github.com/miguelrios/unc-skills.git
+cd unc-skills/parable
+./install.sh
+
+# after setup succeeds, in a new terminal and from the project Claude should work on
+cd /path/to/your/project
+parable
+
+# project-local skill copy without global subscription onboarding
+./install.sh --project
 ```
 
-Requirements: Claude Code, Codex, or pi as the orchestrating harness; Python 3.11+; codex CLI
+Interactive setup offers the pinned proxy build when no executable is installed. For a headless
+ChatGPT device flow, use
+`parable.sh --non-interactive --vendors claude,chatgpt,xai --build-proxy --no-auth`, then run
+`parable auth add chatgpt --device` plus the selected Claude/xAI auth commands. The
+[subscription guide](docs/CLIPROXYAPI_GPT_SUBSCRIPTION.md) covers every command, generated file,
+exact model, and failure rule.
+
+Requirements: Claude Code, Codex, or pi as the orchestrating harness; Python 3.11+; Git and Go
+for the managed CLIProxyAPI build; codex CLI
 for codex-backed executors; Cursor CLI plus `CURSOR_API_KEY` for Cursor-backed executors; pi CLI
 (node 22+) for pi-backed executors.
 
@@ -246,8 +311,14 @@ runtime difference.
 
 - `skills/parable/SKILL.md`: what the brain reads — the strategy, the house rules, and the
   environment facts it can't derive on its own. Deliberately small; the method is the model's.
+- `skills/parable/parable.sh` and `skills/parable/runtime/`: the portable, pinned bootstrap and
+  dependency-free CLI runtime. The package-level `bin/parable.js` / `lib/onboarding.js` are thin
+  compatibility entrypoints. The runtime provides private subscription setup, native auth delegation,
+  aggregate auth status, pinned proxy builder, diagnostic
+  foreground proxy, exact catalog finalizer, and owned-or-reused stock-Claude supervisor.
 - `skills/parable/scripts/parable.py`: the dispatcher, stdlib only, with `config`, `list`,
-  `claude`, `agents sync`, `run`, `resume`, `status`, `verify`, and `review` subcommands. It
+  `finalize`, `claude`, `agents sync`, `run`, `resume`, `status`, `verify`, and `review`
+  subcommands. It
   launches stock Claude Code through a configured localhost proxy, runs codex and pi headlessly
   with per-invocation provider injection, drives Cursor through `cursor-agent`, and reports
   compact run summaries the brain can read for pennies. Global Claude settings,

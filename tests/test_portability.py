@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILLS = ("hands-free", "parable", "cascade", "recall", "recap", "tether", "desloppify")
+SKILLS = ("hands-free", "parable", "cascade", "recall", "recap", "tether", "desloppify", "autoqa")
 
 
 def load_json(path: Path):
@@ -108,6 +108,24 @@ class PortablePackagingTest(unittest.TestCase):
             package_readme = (ROOT / name / "README.md").read_text()
             self.assertIn(f"https://skills.sh/miguelrios/unc-skills/{name}", package_readme)
             self.assertIn(f"npx skills add miguelrios/unc-skills --skill {name}", package_readme)
+
+    def test_effective_comms_is_a_complete_managed_snippet(self):
+        snippet = (ROOT / "snippets/effective-comms/AGENTS.md").read_text()
+        readme = (ROOT / "snippets/effective-comms/README.md").read_text()
+
+        self.assertTrue(snippet.startswith("<!-- effective-comms:start -->"))
+        self.assertTrue(snippet.rstrip().endswith("<!-- effective-comms:end -->"))
+        self.assertIn("ISO 24495-1:2023's relevant/findable/understandable/usable test", snippet)
+        self.assertIn("W3C COGA clear-content, focus-recovery, and no-memory patterns", snippet)
+        self.assertIn("JAN-style written instructions, checklists, and task separation", snippet)
+        self.assertIn("Lead with the answer, result, or next action", snippet)
+        self.assertIn("Default to brief, not incomplete", snippet)
+        self.assertIn("Accuracy, safety, security, privacy", snippet)
+        self.assertIn("After three failed iterations", snippet)
+        self.assertIn("Before sending, check:", snippet)
+        self.assertIn("without reconstructing prior turns", snippet)
+        self.assertIn("does not claim certification or", readme)
+        self.assertIn("[`effective-comms`](snippets/effective-comms/)", (ROOT / "README.md").read_text())
 
 
 if __name__ == "__main__":
