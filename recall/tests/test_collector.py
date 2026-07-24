@@ -510,6 +510,129 @@ class CollectorTest(unittest.TestCase):
         ))
         collector.close()
 
+    def test_canonical_writer_byte_budget_splits_base64_wrapped_batches(self) -> None:
+        (self.root / "session.jsonl").write_text(
+            "".join(claude_line("x" * 1_000) for _ in range(6))
+        )
+        ingested_batches = []
+
+        class Archive:
+            def put_raw(self, **kwargs):
+                digest = hashlib.sha256(kwargs["payload"]).hexdigest()
+                return {
+                    "contract": "recall.artifact-ref.v1",
+                    "schema_version": 1,
+                    "tenant_id": kwargs["tenant_id"],
+                    "source_id": kwargs["source_id"],
+                    "artifact_id": "art_" + digest[:32],
+                    "storage_backend": "s3",
+                    "object_key": "objects/aa/" + digest,
+                    "content_sha256": digest,
+                    "size_bytes": len(kwargs["payload"]),
+                    "media_type": kwargs["media_type"],
+                    "encryption": "sse-s3",
+                    "version_id": "synthetic-version",
+                    "created_at": kwargs["created_at"],
+                }
+
+        class Writer:
+            def max_events_payload_bytes(self):
+                return 4_000
+
+            def ingest(self, events):
+                rendered = json.dumps(
+                    events,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+                if len(rendered) > self.max_events_payload_bytes():
+                    raise ValueError("canonical ingest batch exceeds client size limit")
+                ingested_batches.append(events)
+                return {
+                    "status": "committed",
+                    "inserted": len(events),
+                    "duplicate_events": 0,
+                    "receipts": [
+                        f"recall://{event['source_id']}/{event['native_id']}?rev=1"
+                        for event in events
+                    ],
+                    "replay": False,
+                }
+
+        collector = Collector(
+            root=self.root,
+            harness="claude",
+            source_id="claude:linux:test",
+            spool_path=self.spool,
+            endpoint=self.endpoint,
+            token="test-token-not-a-secret",
+            principal_id="owner",
+            privacy=PrivacyPolicy(mode="scrub"),
+            brain_writer=Writer(),
+            archive=Archive(),
+            tenant_id="tenant:personal",
+            bulk_manifest_archive=True,
+        )
+        self.assertEqual(collector.scan()["records_queued"], 6)
+        result = collector.flush()
+        self.assertEqual(result["acked"], 6)
+        self.assertGreater(len(ingested_batches), 1)
+        self.assertTrue(all(
+            len(json.dumps(batch, sort_keys=True, separators=(",", ":")).encode())
+            <= 4_000
+            for batch in ingested_batches
+        ))
+        self.assertIsNone(
+            collector.doctor(include_dead_letters=False)["last_error_code"]
+        )
+        collector.close()
+
+    def test_local_canonical_rejection_is_not_reported_as_unavailable(self) -> None:
+        (self.root / "session.jsonl").write_text(claude_line("safe"))
+
+        class Archive:
+            def put_raw(self, **kwargs):
+                digest = hashlib.sha256(kwargs["payload"]).hexdigest()
+                return {
+                    "contract": "recall.artifact-ref.v1",
+                    "schema_version": 1,
+                    "tenant_id": kwargs["tenant_id"],
+                    "source_id": kwargs["source_id"],
+                    "artifact_id": "art_" + digest[:32],
+                    "storage_backend": "s3",
+                    "object_key": "objects/aa/" + digest,
+                    "content_sha256": digest,
+                    "size_bytes": len(kwargs["payload"]),
+                    "media_type": kwargs["media_type"],
+                    "encryption": "sse-s3",
+                    "version_id": "synthetic-version",
+                    "created_at": kwargs["created_at"],
+                }
+
+        class Writer:
+            def ingest(self, _events):
+                raise ValueError("synthetic local rejection")
+
+        collector = Collector(
+            root=self.root,
+            harness="claude",
+            source_id="claude:linux:test",
+            spool_path=self.spool,
+            endpoint=self.endpoint,
+            token="test-token-not-a-secret",
+            brain_writer=Writer(),
+            archive=Archive(),
+            tenant_id="tenant:personal",
+            privacy=PrivacyPolicy(mode="scrub"),
+        )
+        collector.scan()
+        self.assertEqual(collector.flush()["errors"], 1)
+        self.assertEqual(
+            collector.doctor(include_dead_letters=False)["last_error_code"],
+            "brain_rejected",
+        )
+        collector.close()
+
     def test_bulk_manifest_mode_recovers_oversized_dead_payload(self) -> None:
         transcript = self.root / "session.jsonl"
         canary = "synthetic-secret-value-1234567890"

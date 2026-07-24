@@ -528,6 +528,17 @@ class CanonicalArchiveClient(_CanonicalClient):
 class CanonicalBrainWriter(_CanonicalClient):
     """Connector BrainWriter that commits only privacy-safe canonical envelopes."""
 
+    def max_events_payload_bytes(self) -> int:
+        """Largest canonical event-array JSON that fits the base64 wire envelope."""
+        empty_body = canonical_json({
+            "tenant_id": self.tenant_id,
+            "principal_id": self.principal_id,
+            "source_id": self.source_id,
+            "events_base64": "",
+        })
+        available_base64_bytes = MAX_INGEST_BYTES - len(empty_body)
+        return 3 * (available_base64_bytes // 4)
+
     def ingest(self, events: list[dict[str, Any]]) -> dict[str, Any]:
         if not events or len(events) > MAX_INGEST_EVENTS:
             raise ValueError("canonical ingest batch is invalid")
