@@ -12,7 +12,11 @@ from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from collector.collector import Collector, CollectorRuntimeError
+from collector.collector import (
+    MAX_CANONICAL_BATCH_EVENTS,
+    Collector,
+    CollectorRuntimeError,
+)
 from privacy.policy import PrivacyPolicy
 
 
@@ -92,6 +96,23 @@ class CollectorTest(unittest.TestCase):
     def test_default_archive_concurrency_leaves_capacity_for_ingest(self) -> None:
         collector = self.collector()
         self.assertEqual(collector.archive_workers, 2)
+        collector.close()
+
+    def test_canonical_batch_size_can_reach_safe_server_cap(self) -> None:
+        collector = Collector(
+            root=self.root,
+            harness="claude",
+            source_id="claude:linux:test",
+            spool_path=self.spool,
+            endpoint=self.endpoint,
+            token="test-token-not-a-secret",
+            brain_writer=object(),
+            archive=object(),
+            tenant_id="tenant:test",
+            batch_size=MAX_CANONICAL_BATCH_EVENTS + 1,
+        )
+        self.assertEqual(collector.batch_size, MAX_CANONICAL_BATCH_EVENTS)
+        self.assertEqual(MAX_CANONICAL_BATCH_EVENTS, 1_000)
         collector.close()
 
     def test_discovery_prioritizes_newest_sessions_for_backfill_freshness(self) -> None:
