@@ -295,6 +295,8 @@ def main():
         status, _, script = request(server, "GET", "/admin/assets/admin.js")
         assert status == 200 and b"/mcp/brains/" in script
         assert b"navigator.clipboard.writeText" in script
+        assert b'left.brain_kind === "personal" ? 0 : 1' in script
+        assert b"Company brains are shared." in script
         status, _, denied = request(server, "GET", "/admin/api/v1/state")
         assert status == 401 and denied["error"] == "admin_session_invalid"
         status, _, denied = request(
