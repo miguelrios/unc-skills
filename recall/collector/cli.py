@@ -60,6 +60,11 @@ def main() -> None:
         type=int,
         default=int(os.environ.get("RECALL_BULK_BUNDLE_RECORDS", "500")),
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=int(os.environ.get("RECALL_BATCH_SIZE", "500")),
+    )
     parser.add_argument("--shard-count", type=int, default=1)
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--receipt")
@@ -119,6 +124,7 @@ def main() -> None:
         max_scan_seconds=args.max_scan_seconds,
         bulk_manifest_archive=args.bulk_manifest_archive,
         bulk_bundle_records=args.bulk_bundle_records,
+        batch_size=args.batch_size,
     )
     if args.shard_count < 1 or not 0 <= args.shard_index < args.shard_count:
         parser.error("shard index must be within shard count")

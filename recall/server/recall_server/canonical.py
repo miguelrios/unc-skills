@@ -15,6 +15,7 @@ from .projectors import validate_envelope
 MAX_CANONICAL_TEXT_BYTES = 8_000_000
 MAX_CANONICAL_CHUNK_BYTES = 24_000
 MAX_LINKED_IDENTITIES = 10_000
+MAX_CANONICAL_BATCH_EVENTS = 1_000
 
 
 class CanonicalLifecycleError(RuntimeError):
@@ -546,7 +547,10 @@ class CanonicalPlane:
         principal_id: str,
         events: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        if not isinstance(events, list) or not 1 <= len(events) <= 500:
+        if (
+            not isinstance(events, list)
+            or not 1 <= len(events) <= MAX_CANONICAL_BATCH_EVENTS
+        ):
             raise CanonicalLifecycleError("canonical_batch_invalid")
         if (
             all(event.get("kind") != "tombstone" for event in events)
